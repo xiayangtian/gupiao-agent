@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>财报分析工具</title>
+  <link rel="stylesheet" href="/static/style.css?v=__APP_VERSION__" />
+</head>
+<body>
+  <!-- ═══════════ 全局导航栏 ═══════════ -->
+  <nav class="global-nav">
+    <div class="nav-brand">📊 财报分析工具</div>
+    <div class="nav-links">
+      <a href="#/home" class="nav-link">首页</a>
+      <a href="#/analysis" class="nav-link">财报分析</a>
+      <a href="#/history" class="nav-link">历史记录</a>
+      <a href="#/rag" class="nav-link">RAG 知识库</a>
+      <a href="#/chat" class="nav-link">智能问答</a>
+    </div>
+    <span id="ai-status" class="badge badge-warn">AI 未连接</span>
+  </nav>
+
+  <!-- ═══════════ 首页 ═══════════ -->
+  <section id="page-home" class="page hidden">
+    <div class="home-hero">
+      <h1>中国上市公司财报分析与 AI 智能问答</h1>
+      <p>下载 A 股财报 → 12 维 AI 深度分析（RAG 增强）→ 流式智能问答与历史会话，一站式完成</p>
+      <div class="home-search">
+        <input id="home-stock-input" type="text" placeholder="输入股票名称或代码，如：长江电力 / 600900" autocomplete="off" />
+        <button id="home-stock-btn" class="btn primary">开始分析</button>
+      </div>
+      <div class="home-features">
+        <span class="home-feature">📊 12 维分析</span>
+        <span class="home-feature">🧠 RAG 增强</span>
+        <span class="home-feature">⚡ 流式问答</span>
+        <span class="home-feature">🕘 历史会话</span>
+        <span class="home-feature">⏹ 可停止</span>
+        <span class="home-feature">🚀 并发执行</span>
+      </div>
+    </div>
+    <div class="home-cards">
+      <a href="#/analysis" class="home-card">
+        <span class="home-card-icon">🔍</span>
+        <h3>财报分析</h3>
+        <p>12 个分析维度可勾选（财务摘要 / 风险识别 / 盈利质量 / 现金流等），RAG 按维度定向检索全文，
+          支持多组并发分析、一键停止、结果分维度卡片展示</p>
+        <span class="home-card-btn">进入分析 →</span>
+      </a>
+      <a href="#/history" class="home-card">
+        <span class="home-card-icon">📋</span>
+        <h3>历史记录</h3>
+        <p>浏览本地已下载的全部财报与 AI 分析结果，支持搜索筛选、查看详情、重新分析，并可就结果继续追问</p>
+        <span class="home-card-btn">进入历史 →</span>
+      </a>
+      <a href="#/rag" class="home-card">
+        <span class="home-card-icon">🧠</span>
+        <h3>RAG 知识库</h3>
+        <p>管理年报 PDF 与分析报告索引（摄取 / 删除 / 状态），为多维度分析与智能问答提供全文检索能力</p>
+        <span class="home-card-btn">进入知识库 →</span>
+      </a>
+      <a href="#/chat" class="home-card">
+        <span class="home-card-icon">💬</span>
+        <h3>智能问答</h3>
+        <p>基于知识库的通用问答：流式输出 + 思考状态、答案带引用、历史会话续聊、多会话并发提问、一键停止</p>
+        <span class="home-card-btn">进入问答 →</span>
+      </a>
+      <div class="home-card home-card-info">
+        <span class="home-card-icon">📈</span>
+        <h3>股票行情</h3>
+        <p>腾讯免费行情：个股实时 / 指数 / 日周月 K 线。CLI 子命令 <code>quote</code>，HTTP API <code>/api/quote*</code></p>
+      </div>
+      <div class="home-card home-card-info">
+        <span class="home-card-icon">🛠</span>
+        <h3>财务 / 基本面</h3>
+        <p>30 个 MCP 工具：三大报表、财务指标、股东 / 高管 / 分红、研报、估值等。CLI 子命令 <code>mcp</code>，HTTP API <code>/api/stock/*</code></p>
+      </div>
+    </div>
+    <div class="home-stats">
+      <div class="stat-item">
+        <span class="stat-value" id="stat-reports">—</span>
+        <span class="stat-label">本地报告</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value" id="stat-analyzed">—</span>
+        <span class="stat-label">已完成分析</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value" id="stat-rag">—</span>
+        <span class="stat-label">知识库片段</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value" id="stat-sessions">—</span>
+        <span class="stat-label">问答会话</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value" id="stat-ai">—</span>
+        <span class="stat-label">AI 状态</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ 分析页 ═══════════ -->
+  <section id="page-analysis" class="page hidden">
+    <div class="searchbar">
+      <div class="searchbox">
+        <input id="stock-input" type="text" placeholder="输入股票名称或代码，如：长江、600900" autocomplete="off" />
+        <div id="suggestions" class="suggestions hidden"></div>
+      </div>
+      <div class="year-range">
+        <span>年份</span>
+        <input id="year-start" type="number" value="2023" min="1990" max="2030" />
+        <span>~</span>
+        <input id="year-end" type="number" value="2025" min="1990" max="2030" />
+      </div>
+      <button id="search-btn" class="btn primary">查询</button>
+    </div>
+
+    <div id="error-banner" class="banner hidden"></div>
+
+    <div class="workspace layout-3col">
+      <!-- 左栏：财报列表 -->
+      <aside class="panel sidebar-panel">
+        <div class="panel-head">
+          <h2>财报列表 <small id="stock-label"></small></h2>
+        </div>
+        <div id="report-list" class="report-list">
+          <p class="hint">先从上方选择股票开始</p>
+        </div>
+      </aside>
+
+      <!-- 中栏：PDF 预览 -->
+      <section class="panel preview-panel">
+        <div class="panel-head">
+          <h2>PDF 预览 <small id="preview-title"></small></h2>
+        </div>
+        <div id="pdf-loading" class="pdf-loading hidden">
+          <span class="mark-spinner"></span>
+          <span>正在下载财报…</span>
+        </div>
+        <iframe id="pdf-frame" class="pdf-frame" src="about:blank" title="财报预览"></iframe>
+      </section>
+
+      <!-- 右栏：AI 分析 + 问答 -->
+      <aside class="panel analysis-panel">
+        <div class="panel-head">
+          <h2>AI 分析</h2>
+        </div>
+        <div class="panel-body scroll">
+          <div class="dim-checkboxes" id="dims">
+            <!-- 维度清单由 GET /api/analysis/dimensions 动态渲染（initAnalysisPage） -->
+          </div>
+          <div class="dim-toolbar">
+            <button id="dims-select-all" class="btn dim-tool-btn">全选</button>
+            <button id="dims-clear" class="btn dim-tool-btn">清空</button>
+            <span id="dims-count" class="dim-count"></span>
+          </div>
+          <button id="view-local-btn" class="btn full-btn local-btn hidden">📄 查看本地分析</button>
+          <button id="analyze-btn" class="btn primary full-btn" disabled>开始分析</button>
+          <div id="analyze-result"></div>
+
+          <div class="qa-box">
+            <h3>自由问答</h3>
+            <div id="qa-history" class="qa-history"></div>
+            <div class="qa-input-row">
+              <input id="qa-input" type="text" placeholder="针对当前财报提问…（先选中左侧财报）" disabled />
+              <button id="qa-btn" class="btn" disabled>发送</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ═══════════ 历史页 ═══════════ -->
+  <section id="page-history" class="page hidden">
+    <div class="searchbar history-searchbar">
+      <div class="searchbox">
+        <input id="history-search" type="text" placeholder="搜索公司名、代码或年份…" autocomplete="off" />
+      </div>
+      <select id="history-type-filter" class="filter-select">
+        <option value="">全部类型</option>
+        <option value="年报">年报</option>
+        <option value="半年报">半年报</option>
+        <option value="季报">季报</option>
+      </select>
+      <select id="history-year-filter" class="filter-select">
+        <option value="">全部年份</option>
+      </select>
+      <span id="history-count" class="filter-count"></span>
+    </div>
+
+    <div class="workspace layout-2col">
+      <!-- 左栏：扁平报告列表 -->
+      <aside class="panel sidebar-panel">
+        <div class="panel-head">
+          <h2>本地财报 <small id="history-total"></small></h2>
+        </div>
+        <div id="history-list" class="history-list">
+          <p class="hint">正在读取本地数据…</p>
+        </div>
+      </aside>
+
+      <!-- 右栏：分析详情 / 对话 -->
+      <section class="panel history-detail-panel">
+        <div class="panel-head">
+          <h2 id="history-detail-title">选择左侧项目查看详情</h2>
+          <div class="panel-head-actions">
+            <button id="history-reanalyze-btn" class="btn reanalyze-panel-btn hidden" title="重新触发 AI 分析">重新分析</button>
+            <span id="history-detail-badge" class="badge"></span>
+          </div>
+        </div>
+        <div class="panel-body scroll">
+          <div id="history-detail" class="hint">
+            点击左侧任意报告查看分析结果或触发 AI 分析
+          </div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ═══════════ RAG 知识库页 ═══════════ -->
+  <section id="page-rag" class="page hidden">
+    <div class="rag-header">
+      <h2>📚 RAG 知识库</h2>
+      <p class="hint">管理已加入 / 未加入索引的本地文件；已加入文件可被通用问答与单报告问答检索</p>
+    </div>
+    <div id="rag-status-bar" class="rag-status-bar"></div>
+    <div id="mcp-status-bar" class="mcp-status-bar"></div>
+    <div id="rag-toolbar" class="rag-toolbar">
+      <div id="rag-filters" class="tab-group"></div>
+      <button id="rag-ingest-all-btn" class="btn primary">一键全部加入</button>
+    </div>
+    <div id="rag-files" class="rag-files"></div>
+  </section>
+
+  <!-- ═══════════ 智能问答页 ═══════════ -->
+  <section id="page-chat" class="page hidden">
+    <div class="chat-header">
+      <h2>💬 智能问答</h2>
+    </div>
+    <div id="chat-focus-bar" class="chat-focus-bar hidden">
+      <span id="chat-focus-label"></span>
+      <button id="chat-focus-clear" class="btn dim-tool-btn" title="取消聚焦，恢复全库检索">取消聚焦</button>
+    </div>
+    <div class="chat-layout">
+      <aside class="chat-session-panel">
+        <div class="chat-session-head">
+          <span>历史会话</span>
+          <button id="chat-new-btn" class="btn chat-new-btn" title="开启新会话">＋ 新会话</button>
+        </div>
+        <div id="chat-session-list" class="chat-session-list"></div>
+      </aside>
+      <div class="chat-main">
+        <div id="chat-history" class="chat-history"></div>
+        <div id="chat-draft-bar" class="chat-draft-bar hidden"></div>
+        <div class="chat-input-row">
+          <input id="chat-input" type="text" placeholder="输入你的问题，例如：长江电力的营收增长情况如何？" />
+          <button id="chat-send-btn" class="btn primary">发送</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <script>
+  // Chart.js 加载失败不阻塞后续脚本
+  window.__chartFailed = false;
+  window.addEventListener('error', function(e) {
+    if (e.target && e.target.src && e.target.src.indexOf('chart') !== -1) {
+      window.__chartFailed = true;
+      e.preventDefault();
+      console.warn('Chart.js 加载失败，图表功能不可用（不影响其他功能）');
+    }
+  }, true);
+  </script>
+  <script src="/static/vendor/markdown-it.min.js" onerror="console.warn('markdown-it load failed, continuing...')"></script>
+  <script src="/static/vendor/chart.umd.min.js" onerror="console.warn('Chart.js load failed, continuing...')"></script>
+  <!-- 版本号由服务端按 app.js 修改时间自动注入，改 JS 后无需手动维护 -->
+  <script src="/static/app.js?v=__APP_VERSION__"></script>
+</body>
+</html>

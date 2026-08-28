@@ -1,0 +1,46 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+reports/
+logs/
+.worktrees/
+.superpowers/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+*.tmp
+.DS_Store
+.idea/
+.vscode/
+.claude/settings.local.json
+config.yaml
+
+# 误创建的嵌套仓库目录
+gp-agent/
+
+# ── 敏感信息防护 ──
+.env
+.env.*
+*.local.yaml
+*.secret.yaml
+*.secret.yml
+*.key
+*.pem
+*.p12
+*.pfx
+credentials*
+secrets*
+cache_data/
+
+# RAG 知识库（ChromaDB 持久化 + manifest）
+data/rag/
+
+# 智能问答历史会话
+data/chat_sessions.json

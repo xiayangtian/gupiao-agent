@@ -1,0 +1,10 @@
+# 长江电力（600900）财务报表拉取配置
+storage_dir: reports
+companies:
+  - ticker: "600900"
+    name: "长江电力"
+report_types:
+  - annual
+start_date: "2023"
+end_date: "2025"
+max_count: 3

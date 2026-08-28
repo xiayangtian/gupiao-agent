@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+pre-commit 钩子：提交前扫描暂存区（git diff --cached）中的敏感信息。
+
+命中以下内容会阻止提交并提示：
+  - API Key / Token（sk-、ghp_、xox、AIza、AKIA、JWT 等常见形态）
+  - 硬编码 api_key / password / secret 字面量
+  - 大陆手机号（11 位）
+  - 18 位身份证号
+  - 疑似真实邮箱（自动排除示例域与代码装饰器误报）
+
+只扫描本次新增（+）行，删除行与上下文不检查，最大限度减少误报。
+"""
+
+import re
+import subprocess
+import sys
+
+# ── 检测规则：正则 -> 描述 ──────────────────────────────────────
+RULES = [
+    # API Key / Token
+    (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), "疑似 AI API Key（sk-...）"),
+    (re.compile(r"\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}\b"), "疑似 GitHub Token"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "疑似 Slack Token"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"), "疑似 Google API Key"),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "疑似 AWS Access Key"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "疑似 JWT Token"),
+    # 硬编码凭证字面量
+    (re.compile(r"(?i)\b(?:api[_-]?key|apikey|token|secret|password|passwd|pwd)\s*[:=]\s*[\"'][^\"']{8,}[\"']"), "疑似硬编码凭证字面量"),
+    (re.compile(r"(?i)\bauthorization\s*[:=]\s*[\"'](?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}[\"']"), "疑似硬编码 Authorization 头"),
+    # 个人信息
+    (re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"), "疑似大陆手机号"),
+    (re.compile(r"(?<!\d)[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)"), "疑似身份证号"),
+    # 本地用户目录：避免在规则源码中写入会自命中的字面量
+    (re.compile(r"/(?:Users|home)/[^/\s`'\"]+(?:/[^\s`'\"]*)?"),
+     "疑似本地用户目录绝对路径"),
+    # 邮箱：排除示例域与代码装饰器
+    (re.compile(r"(?<![@\w.])[A-Za-z0-9._%+-]{2,}@[A-Za-z0-9-]+\.(?:com|cn|net|org|io|me|xyz|top|vip|info|edu|gov|co)(?![\w-])"),
+     "疑似个人邮箱"),
+]
+
+# 示例/占位符域名：命中即视为安全
+EXAMPLE_DOMAINS = (
+    "example.com", "example.org", "example.net", "example.cn",
+    "xxx.com", "xxx.cn", "yourdomain.com", "yourdomain.cn",
+    "localhost", "test.com", "test.cn", "foo.com", "bar.com",
+    "domain.com", "company.com",
+)
+
+# ── 占位符特征（如 sk-xxxx...、sk-xxxxxxxxxxxx）──────────────────
+PLACEHOLDER_RE = re.compile(
+    r"x{4,}|…{2,}|\.\.\.|your-|YOUR_|xxx|<[^>]+>",
+    re.IGNORECASE,
+)
+
+
+def staged_lines() -> list:
+    """返回暂存区中本次新增的内容行（去掉 + 前缀）。"""
+    proc = subprocess.run(
+        ["git", "diff", "--cached", "--no-color"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "未知错误").strip()
+        raise RuntimeError(f"无法读取暂存区 diff：{detail}")
+    lines = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            lines.append(line[1:])
+    return lines
+
+
+def is_placeholder(value: str) -> bool:
+    """仅判定当前匹配值是否为占位符，不豁免整行。"""
+    return bool(PLACEHOLDER_RE.search(value))
+
+
+def scan_lines(lines: list) -> list:
+    """扫描给定新增行，返回 (行号, 规则描述, 命中值)。"""
+    problems = []
+    for idx, line in enumerate(lines, start=1):
+        for rule, desc in RULES:
+            for m in rule.finditer(line):
+                val = m.group(0)
+                if is_placeholder(val):
+                    continue
+                # JavaScript 字符串拼接中的展示标签并非凭证字面量，例如：
+                # "Token: ' + meta.total_tokens + '"。
+                if desc.startswith("疑似硬编码凭证") and re.search(
+                    r":\s*[\"']\s*\+", val
+                ):
+                    continue
+                # 邮箱额外排除示例域
+                if desc.startswith("疑似个人邮箱"):
+                    domain = val.rsplit("@", 1)[-1].lower()
+                    if domain in EXAMPLE_DOMAINS:
+                        continue
+                # 避免重复报告同一行同一规则
+                problems.append((idx, desc, val))
+                break
+    return problems
+
+
+def scan() -> list:
+    """扫描暂存区新增行。"""
+    return scan_lines(staged_lines())
+
+
+def main() -> int:
+    try:
+        problems = scan()
+    except RuntimeError as exc:
+        print(f"\n❌ 敏感信息扫描失败：{exc}\n", file=sys.stderr)
+        return 2
+    if not problems:
+        return 0
+    print("\n❌ 检测到疑似敏感信息，已阻止本次提交：", file=sys.stderr)
+    for idx, desc, val in problems:
+        # 截断展示，避免回显完整密钥
+        shown = val if len(val) <= 24 else val[:10] + "…" + val[-4:]
+        print(f"  • 第 {idx} 行  [{desc}]  {shown}", file=sys.stderr)
+    print("\n请移除或改用环境变量/配置文件（如 config.yaml，已在 .gitignore 中）。", file=sys.stderr)
+    print("确认无敏感信息后重新 git add && git commit。\n", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

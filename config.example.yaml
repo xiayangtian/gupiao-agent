@@ -1,0 +1,47 @@
+# ═══════════════════════════════════════════════════════════════
+# 项目全局配置模板
+#
+# 使用方式：
+#   1. 复制本文件为 config.yaml：  cp config.example.yaml config.yaml
+#   2. 将 ai_api_key 替换为你的真实 API 密钥
+#   3. 启动服务即可（start.sh 会自动读取 config.yaml）
+#
+# 注意：
+#   - config.yaml 已被 .gitignore 忽略，不会提交到仓库（防止密钥泄露）
+#   - 本模板仅作结构示例，密钥字段为占位符
+#
+# 配置优先级：构造参数 > 环境变量 > 此配置文件
+# ═══════════════════════════════════════════════════════════════
+
+# AI 中转站配置
+ai_api_key: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # 必填：你的 API 密钥，如 "sk-xxxx"
+ai_base_url: "https://api.deepseek.com"             # 可选：OpenAI 兼容中转地址；留空使用代码内置默认值
+ai_model: "deepseek-v4-flash"                       # 可选：AI 模型名；留空使用代码内置默认模型
+
+# RAG 知识库（可选，默认关闭）
+# 启用后：python3 -m financial_report_fetcher rag ingest --all 建立索引，
+# 通用入口 POST /api/chat 与单报告问答将基于检索回答。
+rag:
+  enabled: false                  # true 启用；首次 ingest 会自动下载 bge 中文模型（约 100MB）
+  store_path: data/rag            # ChromaDB 持久化目录（已加入 .gitignore）
+  chunk_size: 800                 # 分块字符数
+  chunk_overlap: 100              # 相邻分块重叠字符数
+  top_k: 8                        # 每次问答检索片段数
+  embedding_model: "BAAI/bge-small-zh-v1.5"   # 本地 embedding 模型
+  auto_ingest: true               # 下载 / 分析完成后自动建入 RAG（需 enabled: true）
+  enhanced_analysis: true         # 分析时用 RAG 检索上下文（需 enabled: true）
+  analysis_dimensions:            # 分析页默认勾选维度；空/缺省用内置默认 5 个
+    - financial_summary
+    - risk_warning
+    - business_highlights
+    - profit_quality
+    - cashflow
+  mcp_tools: true                 # 问答时允许模型调用 MCP 工具获取更多信息（需 enabled: true）
+  mcp_tool_timeout: 30            # 单次 MCP 工具调用超时（秒）
+  mcp_max_tool_rounds: 3          # 最大工具调用轮数（防无限循环）
+  mcp_tool_whitelist: []          # 空=自动取常用 12 个；可显式指定工具名列表
+  rerank: false                   # 启用 cross-encoder 精排（需安装 sentence-transformers 并下载模型 ~1GB）
+  rerank_model: BAAI/bge-reranker-base
+  rerank_candidates: 30           # 精排前放宽召回数
+  rerank_score_threshold: 0.5     # top-1 相似度低于此值 → 判定检索质量差，触发 rerank
+  rerank_margin_threshold: 0.05   # top-1 与 top-2 差距小于此值 → 判定不确定，触发 rerank
