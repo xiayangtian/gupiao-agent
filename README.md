@@ -40,33 +40,14 @@
   通用 MCP 调用 `POST /api/stock/mcp/call`（body: `{"tool": "...", "arguments": {...}}`）
 - 未配置 `AI_API_KEY` 时界面顶部显示提醒，分析 / 问答按钮禁用并给出引导
 
-## 安装
+## 快速开始
 
-```bash
-pip install -r requirements.txt
-```
+建议使用 Python 3.12 和项目虚拟环境。完整的 Linux、macOS、Windows 安装、
+`config.yaml` 配置、前后台启停及故障排查流程见
+**[安装、配置与启动指南](docs/startup.md)**。
 
-## 配置环境变量
-
-> 配置文件模板见 `config.example.yaml`（完整结构，密钥为占位符）：
-> `cp config.example.yaml config.yaml` 后填入真实 `ai_api_key` 即可使用；
-> `config.yaml` 已在 `.gitignore` 中，不会提交到仓库。
-
-| 变量 | 必填 | 说明 |
-|---|---|---|
-| `AI_API_KEY` | 是 | AI 分析 / 问答必填，不配置则仅可下载与预览财报 |
-| `AI_BASE_URL` | 否 | OpenAI-compatible 中转站地址；缺省为内置（内网）中转地址，外部环境请显式配置 |
-| `AI_MODEL` | 否 | 默认 `DeepSeek-V4-Flash`；深度分析可换 `DeepSeek-V4-Pro` |
-| `CHINA_STOCK_MCP_CMD` | 否 | china-stock-mcp 启动命令，默认 `uvx china-stock-mcp`；可用 `CHINA_STOCK_MCP_CMD="/path/to/python -m china_stock_mcp"` 指定本地安装路径 |
-
-AI 配置优先级为：显式构造参数 > 环境变量 > `config.yaml` > 代码默认值。
-`start.sh` 不会读取、改写或回显 API Key，配置由 Python 应用层统一加载。
-
-```bash
-export AI_API_KEY="sk-xxxxxxxxxxxx"
-export AI_BASE_URL="https://xxx.com/v1"   # 可选
-export AI_MODEL="DeepSeek-V4-Flash"       # 可选
-```
+最简流程：安装 `requirements.txt`，将 `config.example.yaml` 复制为
+`config.yaml` 并填写 API Key，然后启动 Web 服务。
 
 ## CLI 用法
 
@@ -213,22 +194,21 @@ python3 -m financial_report_fetcher --model DeepSeek-V4-Pro analyze \
 
 ## 启动 Web 界面
 
-推荐使用仓库自带的启停脚本（默认监听 `127.0.0.1:8000`，端口可用 `PORT` 环境变量覆盖）：
+Linux / macOS：
 
 ```bash
-./start.sh                 # 后台启动（nohup，适合普通终端）
-./start.sh --foreground    # 前台启动（-f；适合 Codex 桌面会话等
-                           #   命令结束后会回收后台子进程的环境）
-./stop.sh                  # 停止服务（优雅终止，含 PID 安全校验）
-./restart.sh [--foreground|-f]   # 重启（透传前台模式参数）
+./start.sh
 ```
 
-- 两种模式都会把 PID 写入 `logs/app.pid`、对服务做健康检查，`stop.sh` / `restart.sh` 均通用；
-- 前台模式日志直接输出到当前终端/会话，按 `Ctrl+C` 或另开终端执行 `./stop.sh` 均可停止；
-- 注意：在 Codex 桌面等受限执行环境中，`stop.sh` 内对进程的 `kill` 需要非沙箱权限
-  （普通终端无此限制）。
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn webapp.server:app --host 127.0.0.1 --port 8000
+```
 
 浏览器打开 <http://127.0.0.1:8000>，在搜索框输入「长江电力」或「600900」即可开始使用。
+后台启动、停止、日志、健康检查和端口排查参见
+**[安装、配置与启动指南](docs/startup.md)**。
 
 ## 运行测试
 
