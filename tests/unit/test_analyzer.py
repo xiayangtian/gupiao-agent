@@ -5,7 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from financial_report_fetcher.analyzer import ReportAnalyzer
+from financial_report_fetcher.analyzer import AnalysisReport, ReportAnalyzer
+from financial_report_fetcher.facts import validate_metric_rows
 
 
 def _mock_client():
@@ -55,8 +56,132 @@ class TestAnalyzeWithMeta:
         assert report.report_year == 2024
         assert "600519" in report.company
 
+    def test_save_keeps_q1_and_q3_analysis_files_separate(self, tmp_path):
+        """同公司同年 Q1/Q3 保存时必须生成两份独立的分析 JSON。"""
+        reports = [
+            AnalysisReport(
+                source_file=f"长江电力_600900_季报_{period}.pdf",
+                company="长江电力（600900）",
+                report_year=2025,
+                period=period,
+            )
+            for period in ("2025-03-31", "2025-09-30")
+        ]
+        paths = [report.save(str(tmp_path)) for report in reports]
+
+        assert len(set(paths)) == 2
+        json_paths = sorted(tmp_path.glob("*_分析报告.json"))
+        assert [path.name for path in json_paths] == [
+            "长江电力_600900_2025-03-31_分析报告.json",
+            "长江电力_600900_2025-09-30_分析报告.json",
+        ]
+        assert [json.loads(path.read_text(encoding="utf-8"))["meta"]["period"] for path in json_paths] == [
+            "2025-03-31",
+            "2025-09-30",
+        ]
+
+    def test_cli_analyze_and_save_derives_exact_quarter_from_pdf_filename(
+        self, tmp_path, monkeypatch
+    ):
+        """CLI/batch 无 meta 时也必须让同年 Q1/Q3 分析产物同时存在。"""
+        analyzer = ReportAnalyzer(_mock_client())
+        _stub_pdf_text(analyzer, monkeypatch)
+
+        saved = []
+        for period in ("2025-03-31", "2025-09-30"):
+            report = analyzer.analyze(
+                f"长江电力_600900_季报_{period}.pdf",
+                dimensions=[],
+            )
+            saved.append(report.save(str(tmp_path)))
+
+        assert [report_path.rsplit("_", 2)[-2] for report_path in saved] == [
+            "2025-03-31",
+            "2025-09-30",
+        ]
+        assert len(set(saved)) == 2
+        assert len(list(tmp_path.glob("*_分析报告.json"))) == 2
+
 
 class TestExtractMetrics:
+    def test_default_analysis_report_has_stable_failed_validation_json(self):
+        """v2 默认报告也必须给消费者稳定的校验摘要对象。"""
+        report = AnalysisReport(
+            source_file="600519_年报_2025.pdf",
+            company="贵州茅台（600519）",
+            report_year=2025,
+        )
+
+        data = report.to_json()
+
+        assert data["validation"] == {
+            "status": "failed",
+            "messages": [{
+                "severity": "error",
+                "code": "validation_not_run",
+                "message": "尚未执行财务事实校验",
+            }],
+        }
+
+    def test_explicit_none_validation_uses_stable_failed_summary(self):
+        """调用方显式传 None 也不能破坏 v2 validation 对象契约。"""
+        report = AnalysisReport(
+            source_file="600519_年报_2025.pdf",
+            company="贵州茅台（600519）",
+            report_year=2025,
+            validation=None,
+        )
+
+        assert report.to_json()["validation"] == {
+            "status": "failed",
+            "messages": [{
+                "severity": "error",
+                "code": "validation_not_run",
+                "message": "尚未执行财务事实校验",
+            }],
+        }
+
+    def test_analysis_json_adds_facts_and_validation_without_changing_metrics(self):
+        """v2 JSON 新字段不改变原 meta/dimensions/metrics 的结构与语义。"""
+        checked = validate_metric_rows(
+            [{"year": 2025, "revenue": 100.0}], report_year=2025
+        )
+        report = AnalysisReport(
+            source_file="600519_年报_2025.pdf",
+            company="贵州茅台（600519）",
+            report_year=2025,
+            metrics=checked.metrics,
+            facts=checked.facts,
+            validation=checked.validation,
+        )
+
+        data = report.to_json()
+
+        assert data["schema_version"] == 2
+        assert data["metrics"] == [{
+            "year": 2025,
+            "revenue": 100.0,
+            "net_profit": None,
+            "roe": None,
+            "gross_margin": None,
+            "debt_ratio": None,
+        }]
+        assert data["facts"] == [
+            {
+                "metric": "revenue",
+                "value": 100.0,
+                "unit": "亿元",
+                "period": "2025",
+                "evidence": None,
+                "validation_status": "passed",
+                "validation_messages": [],
+            }
+        ]
+        assert data["validation"]["status"] == "passed"
+        assert set(data["meta"]) == {
+            "company", "source_file", "timestamp", "model", "total_tokens", "period"
+        }
+
     def test_metrics_extracted_and_period_persisted(self, monkeypatch):
         """维度分析后追加一次结构化调用：按年升序、period 落入 meta"""
         client = _mock_client()
@@ -139,6 +264,35 @@ class TestExtractMetrics:
         assert report.metrics == [
             {"year": 2025, "revenue": 900.0, "net_profit": 325.8, "roe": 17.2, "gross_margin": 61.3, "debt_ratio": 62.5},
         ]
+        assert report.validation.status == "warning"
+        assert all(fact.value == fact.value for fact in report.facts)
+
+    def test_huge_integer_metric_becomes_failed_validation_instead_of_crashing(
+        self, monkeypatch
+    ):
+        """模型返回超大整数时 analyze 必须完成并给出 invalid_number。"""
+        client = _mock_client()
+        client.chat.return_value = {
+            "content": json.dumps({
+                "metrics": [{"year": 2025, "revenue": 10**400}],
+            }),
+            "usage": {"total_tokens": 3},
+        }
+        analyzer = ReportAnalyzer(client)
+        _stub_pdf_text(analyzer, monkeypatch)
+
+        report = analyzer.analyze(
+            "600519_年报_2025.pdf",
+            dimensions=[],
+        )
+
+        assert report.metrics is None
+        assert report.facts == []
+        assert report.validation.status == "failed"
+        assert any(
+            message.code == "invalid_number" and message.metric == "revenue"
+            for message in report.validation.messages
+        )
 
     def test_metrics_extraction_failure_returns_none(self, monkeypatch):
         """结构化调用失败时不影响主流程"""
@@ -291,6 +445,19 @@ class TestRagEnhancedAnalysis:
         _stub_pdf_text(analyzer, monkeypatch)
         analyzer.analyze("贵州茅台_600519_年报_2024.pdf", dimensions=["financial_summary"])
         assert rag.calls[0]["report_id"] == "600519:2024-12-31:annual"
+
+    def test_q3_report_id_preserves_meta_period(self, monkeypatch):
+        """分析器的 Q3 检索身份必须保留 09-30 报告期。"""
+        client = _mock_client()
+        rag = _FakeRagAnalysis("片段")
+        analyzer = ReportAnalyzer(client, rag_analysis=rag)
+        _stub_pdf_text(analyzer, monkeypatch)
+        analyzer.analyze(
+            "whatever.pdf",
+            dimensions=["financial_summary"],
+            meta={"ticker": "600900", "period": "2025-09-30", "company": "长江电力"},
+        )
+        assert rag.calls[0]["report_id"] == "600900:2025-09-30:quarterly"
 
 
 class TestDimensionTemplates:

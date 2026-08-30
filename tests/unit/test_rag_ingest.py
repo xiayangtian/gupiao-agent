@@ -1,4 +1,8 @@
 import json
+import os
+
+import pytest
+
 from financial_report_fetcher.rag.ingest import IngestionService
 from financial_report_fetcher.rag.store import RagStore
 
@@ -20,6 +24,31 @@ def _write_analysis(tmp_path, code="600900", year="2025",
         "metrics": [{"year": int(year), "revenue": revenue, "net_profit": net_profit}],
     }, ensure_ascii=False), encoding="utf-8")
     return p
+
+
+def _write_quarterly_pdf(tmp_path, period):
+    pdf = tmp_path / f"长江电力_600900_季报_{period}.pdf"
+    pdf.write_bytes(b"%PDF-fake")
+    return pdf
+
+
+def _write_quarterly_analysis(tmp_path, period, source_pdf):
+    analysis = tmp_path / f"长江电力_600900_{period}_分析报告.json"
+    analysis.write_text(json.dumps({
+        "meta": {
+            "company": "长江电力（600900）",
+            "period": period,
+            "source_file": str(source_pdf),
+        },
+        "dimensions": [{
+            "id": "financial_summary",
+            "name": "财务摘要",
+            "content": f"{period} 专属分析内容",
+            "error": None,
+        }],
+        "metrics": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    return analysis
 
 
 def _make_service(tmp_path, store, analysis_dir):
@@ -58,6 +87,56 @@ def test_ingest_pdf_and_analysis_dual_source(tmp_path, fake_embedder, monkeypatc
     assert result.total_chunks >= 3  # pdf(≥1) + 财务摘要 + 指标摘要
     sources = {h["source"] for h in store.query("营业收入", top_k=10)}
     assert {"pdf", "analysis"} <= sources
+
+
+def test_ingest_q1_and_q3_associate_their_own_analysis_files(tmp_path, fake_embedder, monkeypatch):
+    """同年 Q1/Q3 摄取时，分析 JSON 只能关联对应的精确 report_id。"""
+    q1_pdf = _write_quarterly_pdf(tmp_path, "2025-03-31")
+    q3_pdf = _write_quarterly_pdf(tmp_path, "2025-09-30")
+    _write_quarterly_analysis(tmp_path, "2025-03-31", q1_pdf)
+    _write_quarterly_analysis(tmp_path, "2025-09-30", q3_pdf)
+    monkeypatch.setattr(
+        "financial_report_fetcher.rag.chunking.extract_pdf_pages",
+        lambda p: [(1, "第一节 重要提示\n季度报告内容")],
+    )
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    svc = _make_service(tmp_path, store, str(tmp_path))
+    svc.ingest_all()
+
+    q1_rid = "600900:2025-03-31:quarterly"
+    q3_rid = "600900:2025-09-30:quarterly"
+    q1_texts = [hit["text"] for hit in store.query("专属分析内容", top_k=10, where={"report_id": q1_rid})]
+    q3_texts = [hit["text"] for hit in store.query("专属分析内容", top_k=10, where={"report_id": q3_rid})]
+    assert any("2025-03-31" in text for text in q1_texts)
+    assert not any("2025-09-30" in text for text in q1_texts)
+    assert any("2025-09-30" in text for text in q3_texts)
+    assert not any("2025-03-31" in text for text in q3_texts)
+
+
+def test_list_files_rejects_ambiguous_legacy_quarter_analysis_but_keeps_annual(
+    tmp_path, fake_embedder
+):
+    """RAG 文件清单不得把旧季报分析 JSON 猜成同年年报。"""
+    annual = tmp_path / "A_600900_2025_分析报告.json"
+    legacy_quarter = tmp_path / "Z_600900_2025_分析报告.json"
+    annual.write_text(json.dumps({
+        "meta": {"source_file": "reports/长江电力_600900_年报_2025.pdf"},
+        "dimensions": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    legacy_quarter.write_text(json.dumps({
+        "meta": {"source_file": "reports/长江电力_600900_季报_2025.pdf"},
+        "dimensions": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    service = _make_service(tmp_path, store, str(tmp_path))
+
+    analysis_files = [
+        item for item in service.list_files() if item["source"] == "analysis"
+    ]
+
+    assert [(item["report_id"], item["filename"]) for item in analysis_files] == [
+        ("600900:2025-12-31:annual", annual.name),
+    ]
 
 
 def test_ingest_idempotent(tmp_path, fake_embedder, monkeypatch):
@@ -128,6 +207,179 @@ def test_status_reports_manifest(tmp_path, fake_embedder, monkeypatch):
     st = svc.status()
     assert st["total_chunks"] >= 1
     assert "600900:2025-12-31:annual" in st["reports"]
+
+
+def test_legacy_identity_migration_removes_only_quarterly_indexes(tmp_path, fake_embedder):
+    """无版本 manifest 启动时失效季度索引，保留年报索引和所有 PDF。"""
+    manifest_path = tmp_path / "manifest.json"
+    annual_id = "600900:2025-12-31:annual"
+    quarterly_ids = [
+        "600900:2025-03-31:quarterly",
+        "600900:2025-09-30:quarterly",
+    ]
+    manifest_path.write_text(json.dumps({
+        annual_id: {"pdf_hash": "annual"},
+        quarterly_ids[0]: {"pdf_hash": "old-q1"},
+        quarterly_ids[1]: {"pdf_hash": "old-q3"},
+    }, ensure_ascii=False), encoding="utf-8")
+    old_quarterly_pdf = tmp_path / "长江电力_600900_季报_2025.pdf"
+    annual_pdf = _write_pdf(tmp_path)
+    old_quarterly_pdf.write_bytes(b"%PDF-old-quarterly")
+
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    from financial_report_fetcher.rag.chunking import Chunk
+    store.upsert([
+        Chunk(annual_id, "pdf", "年报", "全文", 1, 0),
+        Chunk(quarterly_ids[0], "pdf", "旧 Q1", "全文", 1, 0),
+        Chunk(quarterly_ids[1], "pdf", "旧 Q3", "全文", 1, 0),
+    ])
+
+    service = IngestionService(store, manifest_path=str(manifest_path))
+
+    assert store.count_chunks(quarterly_ids[0]) == 0
+    assert store.count_chunks(quarterly_ids[1]) == 0
+    assert store.count_chunks(annual_id) == 1
+    assert old_quarterly_pdf.exists()
+    assert annual_pdf.exists()
+    saved_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert quarterly_ids[0] not in saved_manifest
+    assert quarterly_ids[1] not in saved_manifest
+    assert annual_id in saved_manifest
+    assert service.status()["identity_version"] == 2
+    assert service.status()["warnings"]
+
+
+def test_legacy_identity_migration_supports_basename_only_manifest_path(
+        tmp_path, fake_embedder, monkeypatch):
+    """basename-only manifest 路径也必须完成旧季度索引迁移。"""
+    monkeypatch.chdir(tmp_path)
+    quarterly_id = "600900:2025-03-31:quarterly"
+    annual_id = "600900:2025-12-31:annual"
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        quarterly_id: {"pdf_hash": "old-q1"},
+        annual_id: {"pdf_hash": "annual"},
+    }, ensure_ascii=False), encoding="utf-8")
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    from financial_report_fetcher.rag.chunking import Chunk
+    store.upsert([
+        Chunk(quarterly_id, "pdf", "旧 Q1", "全文", 1, 0),
+        Chunk(annual_id, "pdf", "年报", "全文", 1, 0),
+    ])
+
+    service = IngestionService(store, manifest_path="manifest.json")
+
+    assert store.count_chunks(quarterly_id) == 0
+    assert store.count_chunks(annual_id) == 1
+    assert service.status()["identity_version"] == 2
+    assert quarterly_id not in json.loads(
+        (tmp_path / "manifest.json").read_text(encoding="utf-8")
+    )
+
+
+def test_current_identity_migration_keeps_exact_quarterly_indexes(tmp_path, fake_embedder):
+    """版本 2 的精确 Q1/Q3 身份已可信，初始化不可删除其向量。"""
+    manifest_path = tmp_path / "manifest.json"
+    quarterly_ids = [
+        "600900:2025-03-31:quarterly",
+        "600900:2025-09-30:quarterly",
+    ]
+    manifest_path.write_text(json.dumps({
+        "__identity_version__": 2,
+        quarterly_ids[0]: {"pdf_hash": "q1"},
+        quarterly_ids[1]: {"pdf_hash": "q3"},
+    }, ensure_ascii=False), encoding="utf-8")
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    from financial_report_fetcher.rag.chunking import Chunk
+    store.upsert([
+        Chunk(quarterly_ids[0], "pdf", "Q1", "全文", 1, 0),
+        Chunk(quarterly_ids[1], "pdf", "Q3", "全文", 1, 0),
+    ])
+
+    service = IngestionService(store, manifest_path=str(manifest_path))
+
+    assert store.count_chunks(quarterly_ids[0]) == 1
+    assert store.count_chunks(quarterly_ids[1]) == 1
+    assert service.status()["identity_version"] == 2
+
+
+def test_corrupt_manifest_fails_closed_without_deleting_quarterly_vectors(
+    tmp_path, fake_embedder
+):
+    """损坏 manifest 不能被当成空旧版本并触发季度向量删除。"""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{not-valid-json", encoding="utf-8")
+    quarterly_ids = [
+        "600900:2025-03-31:quarterly",
+        "600900:2025-09-30:quarterly",
+    ]
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    from financial_report_fetcher.rag.chunking import Chunk
+    store.upsert([
+        Chunk(quarterly_ids[0], "pdf", "Q1", "全文", 1, 0),
+        Chunk(quarterly_ids[1], "pdf", "Q3", "全文", 1, 0),
+    ])
+
+    error = None
+    try:
+        IngestionService(store, manifest_path=str(manifest_path))
+    except RuntimeError as exc:
+        error = exc
+
+    assert [store.count_chunks(rid) for rid in quarterly_ids] == [1, 1]
+    assert error is not None
+    assert "manifest" in str(error).lower()
+
+
+def test_manifest_upgrade_replaces_complete_file_from_same_directory(
+    tmp_path, fake_embedder, monkeypatch
+):
+    """替换发生前旧 manifest 保持完整，且替换源临时文件与目标同目录。"""
+    manifest_path = tmp_path / "manifest.json"
+    old_manifest = {"600900:2025-12-31:annual": {"pdf_hash": "old"}}
+    manifest_path.write_text(json.dumps(old_manifest), encoding="utf-8")
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    real_replace = os.replace
+    replacements = []
+
+    def observe_replace(source, target):
+        assert os.path.dirname(source) == os.path.dirname(target) == str(tmp_path)
+        assert json.loads(manifest_path.read_text(encoding="utf-8")) == old_manifest
+        replacements.append((source, target))
+        real_replace(source, target)
+
+    monkeypatch.setattr(
+        "financial_report_fetcher.rag.ingest.os.replace", observe_replace
+    )
+
+    service = IngestionService(store, manifest_path=str(manifest_path))
+
+    assert len(replacements) == 1
+    assert service.status()["identity_version"] == 2
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))[
+        "__identity_version__"
+    ] == 2
+
+
+def test_manifest_replace_failure_preserves_old_file_and_cleans_temp(
+    tmp_path, fake_embedder, monkeypatch
+):
+    """原子替换失败时不得破坏旧 manifest，也不得遗留临时文件。"""
+    manifest_path = tmp_path / "manifest.json"
+    old_text = json.dumps({"600900:2025-12-31:annual": {"pdf_hash": "old"}})
+    manifest_path.write_text(old_text, encoding="utf-8")
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    names_before = {path.name for path in tmp_path.iterdir()}
+
+    def fail_replace(source, target):
+        raise OSError("replace blocked")
+
+    monkeypatch.setattr("financial_report_fetcher.rag.ingest.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace blocked"):
+        IngestionService(store, manifest_path=str(manifest_path))
+
+    assert manifest_path.read_text(encoding="utf-8") == old_text
+    assert {path.name for path in tmp_path.iterdir()} == names_before
 
 
 def test_ingest_file_pdf_only(tmp_path, fake_embedder, monkeypatch):

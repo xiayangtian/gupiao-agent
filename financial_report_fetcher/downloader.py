@@ -13,7 +13,8 @@ from typing import Iterator
 import requests
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
-from financial_report_fetcher.models import DownloadStatus, DownloadSummary, ReportMeta, ReportType
+from financial_report_fetcher.models import DownloadStatus, DownloadSummary, ReportMeta
+from financial_report_fetcher.report_identity import build_report_filename
 
 # 模块级日志记录器
 logger = logging.getLogger(__name__)
@@ -56,34 +57,10 @@ class ReportDownloader:
     MAX_RETRIES: int = 3            # 最大重试次数
     RETRY_WAIT_SECONDS: int = 5     # 重试间隔时间（秒）
 
-    # 财报类型到中文名称的映射
-    _REPORT_TYPE_NAMES = {
-        ReportType.ANNUAL: "年报",
-        ReportType.SEMI_ANNUAL: "半年报",
-        ReportType.QUARTERLY: "季报",
-    }
-
     @staticmethod
     def build_filename(report: ReportMeta) -> str:
-        """
-        根据财报元信息生成本地文件名。
-
-        文件名格式：{company_name}_{company_id}_{report_type}_{period}.pdf
-        示例：长江电力_600900_年报_2025.pdf
-        若公司名为空（如测试中未提供），回退为 {company_id}_{report_type}_{year}.pdf
-        示例：600519_年报_2023.pdf
-
-        :param report: 财报元信息对象
-        :return: 生成的文件名字符串
-        """
-        # 财报类型转换为中文名称
-        type_name = ReportDownloader._REPORT_TYPE_NAMES[report.report_type]
-        # 报告期只取年份
-        year = report.period.year
-        prefix = report.company_name if report.company_name else report.company_id
-        if report.company_name:
-            return f"{prefix}_{report.company_id}_{type_name}_{year}.pdf"
-        return f"{prefix}_{type_name}_{year}.pdf"
+        """委托统一身份模块生成本地文件名。"""
+        return build_report_filename(report)
 
     def download_one(self, report: ReportMeta, storage_dir: str) -> DownloadStatus:
         """

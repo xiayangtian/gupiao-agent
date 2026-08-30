@@ -12,10 +12,13 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
+
+from financial_report_fetcher.report_identity import derive_analysis_report_id
 
 from .chunking import chunk_analysis_json, chunk_pdf, parse_pdf_report_id
 from .store import RagStore
@@ -24,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 PDF_SUFFIX = ".pdf"
 ANALYSIS_SUFFIX = "_分析报告.json"
+RAG_IDENTITY_VERSION = 2
+_IDENTITY_MIGRATION_WARNING = "旧季度索引已失效，请重新下载并摄取季度报告"
 
 
 def _sha1_file(path: str) -> str:
@@ -73,6 +78,7 @@ class IngestionService:
         # 可重入锁：auto_ingest_report → ingest_pdf → ingest_file 嵌套调用安全
         self._lock = threading.RLock()
         self._manifest = self._load_manifest()
+        self._migrate_identity_version()
 
     # ── manifest ──────────────────────────────────────────────
 
@@ -80,14 +86,72 @@ class IngestionService:
         try:
             with open(self.manifest_path, encoding="utf-8") as f:
                 data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {}
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"RAG manifest JSON 损坏：{self.manifest_path}: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"无法读取 RAG manifest：{self.manifest_path}: {exc}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"RAG manifest 必须是 JSON 对象：{self.manifest_path}")
+        return data
 
     def _save_manifest(self) -> None:
-        os.makedirs(os.path.dirname(self.manifest_path), exist_ok=True)
-        with open(self.manifest_path, "w", encoding="utf-8") as f:
-            json.dump(self._manifest, f, ensure_ascii=False, indent=2)
+        target_path = os.path.abspath(self.manifest_path)
+        manifest_dir = os.path.dirname(target_path)
+        os.makedirs(manifest_dir, exist_ok=True)
+        temp_path: Optional[str] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=manifest_dir,
+                prefix=f".{os.path.basename(target_path)}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                temp_path = temp_file.name
+                json.dump(self._manifest, temp_file, ensure_ascii=False, indent=2)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, target_path)
+            temp_path = None
+            directory_fd = os.open(manifest_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temp_path is not None:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+
+    def _migrate_identity_version(self) -> None:
+        """失效版本 1 季报身份，避免旧 Q1/Q3 索引归属错误。"""
+        if self._manifest.get("__identity_version__") == RAG_IDENTITY_VERSION:
+            return
+
+        quarterly_ids = [
+            report_id for report_id in self.store.list_report_ids()
+            if report_id.endswith(":quarterly")
+        ]
+        removed_chunks = self.store.delete_reports(quarterly_ids)
+        for report_id in list(self._manifest):
+            if report_id.startswith("__"):
+                continue
+            if report_id.endswith(":quarterly"):
+                self._manifest.pop(report_id)
+        self._manifest["__identity_version__"] = RAG_IDENTITY_VERSION
+        self._manifest["__migration_warnings__"] = [_IDENTITY_MIGRATION_WARNING]
+        self._save_manifest()
+        if quarterly_ids:
+            logger.warning("已移除 %d 个失效季度索引 chunk", removed_chunks)
 
     # ── 摄取 ──────────────────────────────────────────────────
 
@@ -128,11 +192,9 @@ class IngestionService:
         返回 True 表示本次实际摄取（含更新），False 表示内容未变化而跳过。
         """
         pdf_hash = _sha1_file(pdf_path)
-        code = report_id.split(":")[0]
-        year = report_id.split(":")[1][:4]
-        analysis_path = os.path.join(self.analysis_dir, f"{self._company_label(pdf_path)}_{code}_{year}{ANALYSIS_SUFFIX}")
+        analysis_path = self._find_analysis(report_id)
         analysis_hash = None
-        if os.path.exists(analysis_path):
+        if analysis_path is not None:
             analysis_hash = _sha1_file(analysis_path)
 
         prev = self._manifest.get(report_id) or {}
@@ -142,7 +204,7 @@ class IngestionService:
         # 删除旧 chunk 后全量重建（保证删除的章节不残留）
         self.store.delete_report(report_id)
         chunks = chunk_pdf(pdf_path, report_id, self.chunk_size, self.chunk_overlap)
-        if analysis_hash is not None:
+        if analysis_path is not None:
             chunks += chunk_analysis_json(analysis_path, report_id, self.chunk_size, self.chunk_overlap)
         self.store.upsert(chunks)
 
@@ -170,10 +232,6 @@ class IngestionService:
         self.ingest_one(pdf_path, rid, force=force)
         # 单文件入口需立即落盘，否则进程重启后 hash 记录丢失、增量跳过失效
         self._save_manifest()
-
-    @staticmethod
-    def _company_label(pdf_path: str) -> str:
-        return os.path.basename(pdf_path).split("_")[0]
 
     @_locked
     def ingest_file(self, report_id: str, source: str, file_path: Optional[str] = None) -> None:
@@ -247,23 +305,14 @@ class IngestionService:
         return None
 
     def _analysis_report_id(self, json_path: str) -> Optional[str]:
-        """从分析报告 json 的 meta.source_file 解析 report_id；失败按文件名回退"""
+        """使用统一规则推导分析报告身份；歧义旧季报不做年报回退。"""
         try:
             with open(json_path, encoding="utf-8") as f:
                 data = json.load(f)
-            src = data.get("meta", {}).get("source_file")
-            if src:
-                rid = parse_pdf_report_id(src)
-                if rid:
-                    return rid
         except (OSError, json.JSONDecodeError):
-            pass
-        import re as _re
-        m = _re.search(r"_(\d{6})_(\d{4})_分析报告\.json$", os.path.basename(json_path))
-        if m:
-            code, year = m.group(1), m.group(2)
-            return f"{code}:{year}-12-31:annual"
-        return None
+            data = {}
+        meta = data.get("meta") if isinstance(data, dict) else None
+        return derive_analysis_report_id(json_path, meta)
 
     @_locked
     def list_files(self) -> List[Dict[str, Any]]:
@@ -354,6 +403,8 @@ class IngestionService:
     def status(self) -> Dict[str, Any]:
         reports = {}
         for rid, info in self._manifest.items():
+            if rid.startswith("__"):
+                continue
             # R1：manifest 已升级为分 source 统计，这里合并为总 chunks，保持返回结构兼容
             pdf_chunks = int(info.get("pdf_chunks", 0) or 0)
             analysis_chunks = int(info.get("analysis_chunks", 0) or 0)
@@ -367,4 +418,6 @@ class IngestionService:
             "store_path": os.path.dirname(self.manifest_path) or "data/rag",
             "reports": reports,
             "total_chunks": self.store.count_chunks(),
+            "warnings": list(self._manifest.get("__migration_warnings__", [])),
+            "identity_version": self._manifest.get("__identity_version__", RAG_IDENTITY_VERSION),
         }

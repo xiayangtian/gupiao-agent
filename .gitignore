@@ -49,3 +49,6 @@ data/rag/
 
 # 智能问答历史会话
 data/chat_sessions.json
+
+# 后台任务状态数据库
+data/tasks.sqlite3

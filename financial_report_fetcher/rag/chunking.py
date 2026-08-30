@@ -8,10 +8,13 @@
 
 import hashlib
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+from financial_report_fetcher.report_identity import parse_report_filename
 
 # A 股年报标准章节（按出现顺序）
 SECTION_RE = re.compile(r"第[一二三四五六七八九十百]+节\s*[^\n]{2,30}")
@@ -24,11 +27,6 @@ METRIC_LABELS = {
     "gross_margin": ("毛利率", "%"),
     "debt_ratio": ("资产负债率", "%"),
 }
-
-PDF_NAME_RE = re.compile(
-    r"^(?P<company>.+)_(?P<code>\d{6})_(?P<type>年报|半年报|季报)_(?P<year>\d{4})\.pdf$"
-)
-
 
 @dataclass
 class Chunk:
@@ -58,26 +56,8 @@ def extract_pdf_pages(pdf_path: str) -> List[Tuple[int, str]]:
 
 
 def parse_pdf_report_id(pdf_path: str) -> Optional[str]:
-    """从 PDF 文件名解析 report_id；无法解析返回 None。
-
-    命名约定（与 downloader.build_filename 对齐）：
-    {公司}_{6位代码}_{年报|半年报|季报}_{年份}.pdf
-    注意：季报文件名无法区分一季报/三季报，统一映射为 03-31（一季报）。
-    """
-    basename = os.path.basename(pdf_path)
-    m = PDF_NAME_RE.match(basename)
-    if not m:
-        return None
-    code = m.group("code")
-    year = int(m.group("year"))
-    kind = m.group("type")
-    if kind == "年报":
-        period, rtype = f"{year}-12-31", "annual"
-    elif kind == "半年报":
-        period, rtype = f"{year}-06-30", "semi_annual"
-    else:
-        period, rtype = f"{year}-03-31", "quarterly"
-    return f"{code}:{period}:{rtype}"
+    """委托统一身份模块从 PDF 文件名解析 report_id。"""
+    return parse_report_filename(pdf_path)
 
 
 def _normalize_section_title(title: str) -> str:
@@ -220,6 +200,8 @@ def chunk_metrics(metrics: Optional[List[Dict[str, Any]]], report_id: str) -> Op
             try:
                 num = float(val)
             except (TypeError, ValueError):
+                continue
+            if not math.isfinite(num):
                 continue
             # 整数去掉 .0（如 862 → "862"），小数保留
             num_str = str(int(num)) if num.is_integer() else str(num)

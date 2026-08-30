@@ -13,20 +13,27 @@ import json
 import logging
 import os
 import re
+from datetime import date
 from typing import Any, Dict, List, Optional
+
+from financial_report_fetcher.report_identity import (
+    derive_analysis_report_id,
+    parse_report_filename,
+)
 
 logger = logging.getLogger(__name__)
 
 ANALYSIS_SUFFIX = "_分析报告.json"
 PDF_NAME_RE = re.compile(
-    r"^(?P<company>.+)_(?P<code>\d{6})_(?P<type>年报|半年报|季报)_(?P<year>\d{4})\.pdf$"
+    r"^(?P<company>.+)_(?P<code>\d{6})_(?P<type>年报|半年报|季报)_"
+    r"(?P<period>\d{4}(?:-\d{2}-\d{2})?)\.pdf$"
 )
 
 
 def parse_analysis_filename(filename: str) -> Optional[Dict[str, Any]]:
-    """从分析文件名解析 (company_label, code?, year)。两种形态。
+    """从分析文件名解析 (company_label, code?, year, period?)。两种形态。
 
-    形态1: {company}_{code}_{year}_分析报告.json  → code + year
+    形态1: {company}_{code}_{year_or_period}_分析报告.json  → code + year（可带精确期次）
     形态2: {company}_{year}_分析报告.json          → year（无 code）
     无法解析年份 → None。
     """
@@ -36,12 +43,24 @@ def parse_analysis_filename(filename: str) -> Optional[Dict[str, Any]]:
     stem = basename[: -len(ANALYSIS_SUFFIX)]
     # 尝试 {company}_{code}_{year} 三部分
     parts = stem.rsplit("_", 2)
-    if len(parts) == 3 and re.fullmatch(r"\d{6}", parts[1]) and parts[2].isdigit():
-        return {
-            "company_label": parts[0],
-            "code": parts[1],
-            "year": int(parts[2]),
-        }
+    if len(parts) == 3 and re.fullmatch(r"\d{6}", parts[1]):
+        period_value = parts[2]
+        if re.fullmatch(r"\d{4}", period_value):
+            period = None
+        else:
+            try:
+                date.fromisoformat(period_value)
+            except ValueError:
+                period = None
+            else:
+                period = period_value
+        if period is not None or period_value.isdigit():
+            return {
+                "company_label": parts[0],
+                "code": parts[1],
+                "year": int(period_value[:4]),
+                "period": period,
+            }
     # 尝试 {company}_{year} 两部分
     parts = stem.rsplit("_", 1)
     if len(parts) == 2 and parts[1].isdigit():
@@ -58,20 +77,18 @@ def parse_pdf_filename(filename: str) -> Optional[Dict[str, Any]]:
 
     Returns: {filename, company, code, year, type, period, period_exact, title}
     - 年报 → clickable=True, period=YYYY-12-31
-    - 半年报/季报 → clickable=False（无法确定精确期）
+    - 半年报/带完整期次的季报 → clickable=False，period 为精确报告期
     """
     basename = filename if not os.path.sep else os.path.basename(filename)
     m = PDF_NAME_RE.match(basename)
     if not m:
         return None
-    year = int(m.group("year"))
+    report_id = parse_report_filename(basename)
+    if report_id is None:
+        return None
+    _, period, report_type = report_id.split(":")
+    year = int(period[:4])
     kind = m.group("type")
-    if kind == "年报":
-        period, exact, clickable = f"{year}-12-31", True, True
-    elif kind == "半年报":
-        period, exact, clickable = f"{year}-06-30", True, False
-    else:  # 季报 → 无法确定一季度还是三季度
-        period, exact, clickable = f"{year}-03-31", False, False
     return {
         "filename": basename,
         "company": m.group("company"),
@@ -79,8 +96,8 @@ def parse_pdf_filename(filename: str) -> Optional[Dict[str, Any]]:
         "year": year,
         "type": kind,
         "period": period,
-        "period_exact": exact,
-        "clickable": clickable,
+        "period_exact": True,
+        "clickable": report_type == "annual",
         "title": f"{m.group('company')}{year}{kind}",
     }
 
@@ -118,14 +135,12 @@ def build_flat_history(analysis_dir: str, reports_dir: str) -> List[Dict[str, An
             parsed = parse_analysis_filename(fname)
             if not parsed:
                 continue
-            code = parsed.get("code") or ""
-            year = parsed.get("year") or 0
             meta = content.get("meta", {}) if isinstance(content, dict) else {}
-            period = meta.get("period") if isinstance(meta, dict) else None
-            if not period:
-                period = f"{year}-12-31" if year else None
-            if not period or not code:
+            report_id = derive_analysis_report_id(fname, meta)
+            if report_id is None:
                 continue
+            code, period, _report_type = report_id.split(":")
+            year = int(period[:4])
             try:
                 mtime = os.path.getmtime(os.path.join(analysis_dir, fname))
             except OSError:
@@ -213,13 +228,13 @@ def analyzed_periods_for_code(analysis_dir: str, code: str) -> set:
         if content is None:
             continue
         parsed = parse_analysis_filename(fname)
-        if not parsed or parsed.get("code") != code:
+        if not parsed:
             continue
         meta = content.get("meta", {}) if isinstance(content, dict) else {}
-        period = meta.get("period") if isinstance(meta, dict) else None
-        # 兼容旧分析文件：meta.period 缺失时按年份回退到年报期（与 build_flat_history 一致）
-        if not period and parsed.get("year"):
-            period = f"{parsed['year']}-12-31"
-        if period:
+        report_id = derive_analysis_report_id(fname, meta)
+        if report_id is None:
+            continue
+        report_code, period, _report_type = report_id.split(":")
+        if report_code == code:
             periods.add(period)
     return periods

@@ -62,14 +62,19 @@ def test_try_answer_report_unknown_report_returns_none(tmp_path, fake_embedder):
     assert qa.try_answer_report("600519", "2025-12-31", "营收？") is None
 
 
-def test_try_answer_report_september_normalizes_to_march(tmp_path, fake_embedder):
-    """R3：09 分支归一化为 03-31，与 store 季报统一映射一致"""
+def test_build_report_id_keeps_q3_period():
+    """Q3 查询必须构造与入库一致的 09-30 身份。"""
+    assert RagQA.build_report_id("600900", "2025-09-30") == "600900:2025-09-30:quarterly"
+
+
+def test_try_answer_report_september_preserves_q3_period(tmp_path, fake_embedder):
+    """Q3 检索只命中 Q3 的报告身份。"""
     store = RagStore(str(tmp_path), fake_embedder)
-    store.upsert([_chunk("三季报内容", rid="600900:2025-03-31:quarterly")])
+    store.upsert([_chunk("三季报内容", rid="600900:2025-09-30:quarterly")])
     qa = RagQA(store, FakeAI(), top_k=4)
     result = qa.try_answer_report("600900", "2025-09-30", "三季报？")
     assert result is not None
-    assert result["citations"][0]["report_id"] == "600900:2025-03-31:quarterly"
+    assert result["citations"][0]["report_id"] == "600900:2025-09-30:quarterly"
 
 
 class FakeAIStream:
@@ -314,9 +319,9 @@ def test_answer_stream_without_priority_unchanged():
     assert all(c["where"] is None for c in store.calls)
 
 
-def test_build_report_id_normalizes_periods():
-    """build_report_id：年报/半年报/季报（09→03 归一化）"""
+def test_build_report_id_preserves_report_periods():
+    """build_report_id：年报、半年报、Q1 和 Q3 各自保留真实报告期。"""
     assert RagQA.build_report_id("600900", "2025-12-31") == "600900:2025-12-31:annual"
     assert RagQA.build_report_id("600900", "2025-06-30") == "600900:2025-06-30:semi_annual"
-    assert RagQA.build_report_id("600900", "2025-09-30") == "600900:2025-03-31:quarterly"
     assert RagQA.build_report_id("600900", "2025-03-31") == "600900:2025-03-31:quarterly"
+    assert RagQA.build_report_id("600900", "2025-09-30") == "600900:2025-09-30:quarterly"

@@ -236,3 +236,6 @@ reports/analysis/           # AI 分析结果（.md + .json）
 ## 开源协议
 
 本项目采用 [MIT License](LICENSE)，允许自由使用、修改、分发及商用，但须保留原版权与许可声明。
+
+仓库内置的第三方前端资源遵循其各自许可证，详见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -13,6 +13,17 @@ def test_parse_pdf_report_id_semi_annual():
     assert parse_pdf_report_id("长江电力_600900_半年报_2025.pdf") == "600900:2025-06-30:semi_annual"
 
 
+def test_parse_quarterly_filename_preserves_q1_and_q3():
+    """完整季度日期必须区分一季报和三季报身份。"""
+    assert parse_pdf_report_id("长江电力_600900_季报_2025-03-31.pdf") == "600900:2025-03-31:quarterly"
+    assert parse_pdf_report_id("长江电力_600900_季报_2025-09-30.pdf") == "600900:2025-09-30:quarterly"
+
+
+def test_parse_legacy_quarterly_filename_refuses_to_guess():
+    """仅含年份的旧季报文件名不具备可判定的季度身份。"""
+    assert parse_pdf_report_id("长江电力_600900_季报_2025.pdf") is None
+
+
 def test_parse_pdf_report_id_unknown():
     assert parse_pdf_report_id("随便一个文件.txt") is None
 
@@ -32,6 +43,19 @@ def test_chunk_metrics_natural_language():
 def test_chunk_metrics_empty_returns_none():
     assert chunk_metrics([], "x") is None
     assert chunk_metrics(None, "x") is None
+
+
+def test_chunk_metrics_skips_non_finite_values():
+    """旧 JSON 即使含 NaN/Infinity 也不得生成误导性的检索文本。"""
+    chunk = chunk_metrics(
+        [{"year": 2025, "revenue": float("nan"), "roe": float("inf"), "net_profit": 3.0}],
+        "600900:2025-12-31:annual",
+    )
+
+    assert chunk is not None
+    assert "归母净利润 3亿元" in chunk.text
+    assert "nan" not in chunk.text.lower()
+    assert "inf" not in chunk.text.lower()
 
 
 def test_chunk_metrics_has_ticker_meta():

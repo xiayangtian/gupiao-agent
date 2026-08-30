@@ -44,6 +44,23 @@ def test_delete_report(tmp_path, fake_embedder):
     assert store.list_report_ids() == ["600519:2025-12-31:annual"]
 
 
+def test_delete_reports_removes_all_requested_report_chunks(tmp_path, fake_embedder):
+    """批量删除应只移除指定报告，并返回删除的 chunk 数。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    quarterly_ids = [
+        "600900:2025-03-31:quarterly",
+        "600900:2025-09-30:quarterly",
+    ]
+    store.upsert([
+        _chunk("Q1", rid=quarterly_ids[0]),
+        _chunk("Q3", rid=quarterly_ids[1]),
+        _chunk("年报", rid="600900:2025-12-31:annual"),
+    ])
+
+    assert store.delete_reports(quarterly_ids) == 2
+    assert store.list_report_ids() == ["600900:2025-12-31:annual"]
+
+
 def test_rag_config_load(tmp_path, monkeypatch):
     """读不到配置时默认 disabled；auto_ingest 默认开启"""
     from financial_report_fetcher.rag.config import RagConfig

@@ -29,6 +29,13 @@ from typing import Optional, List, Dict, Any, Tuple
 
 from financial_report_fetcher.ai_client import AIClient
 from financial_report_fetcher.exceptions import AnalysisCancelledError
+from financial_report_fetcher.facts import (
+    FinancialFact,
+    ValidationSummary,
+    failed_validation,
+    validate_metric_rows,
+)
+from financial_report_fetcher.report_identity import build_report_id, parse_report_filename
 
 logger = logging.getLogger(__name__)
 
@@ -376,14 +383,6 @@ ANALYSIS_TEMPLATES: Dict[str, Dict[str, Any]] = {
 # 结构化指标抽取（折线图数据源）
 # ════════════════════════════════════════════════════════════════════
 
-METRICS_FIELDS = [
-    ("revenue", "营业收入（亿元）"),
-    ("net_profit", "净利润（亿元）"),
-    ("roe", "净资产收益率 ROE（%）"),
-    ("gross_margin", "毛利率（%）"),
-    ("debt_ratio", "资产负债率（%）"),
-]
-
 METRICS_PROMPT = (
     "请从以下财务报告内容中提取核心财务指标，仅输出 JSON，不要输出其他文字。\n"
     "JSON 格式：{\"metrics\": [{\"year\": 年份, \"revenue\": 数值或null, "
@@ -393,7 +392,8 @@ METRICS_PROMPT = (
     "1. year 必须是整数年份（如 2025）；只列出报告中确认出现的年份。\n"
     "2. revenue 与 net_profit 单位为亿元；roe/gross_margin/debt_ratio 为百分数数值（如 16.2 表示 16.2%）。\n"
     "3. 报告中未出现的字段用 null，严禁编造数据。\n"
-    "4. 输出必须严格为单个 JSON 对象。"
+    "4. 数值不得为 NaN、Infinity 或 -Infinity。\n"
+    "5. 输出必须严格为单个 JSON 对象。"
 )
 
 # ════════════════════════════════════════════════════════════════════
@@ -424,6 +424,10 @@ class AnalysisReport:
     # 分析结果
     dimensions: List[DimensionResult] = field(default_factory=list)
     metrics: Optional[List[Dict[str, Any]]] = None
+    facts: List[FinancialFact] = field(default_factory=list)
+    validation: Optional[ValidationSummary] = field(
+        default_factory=lambda: failed_validation("尚未执行财务事实校验", "validation_not_run")
+    )
 
     # 执行记录
     timestamp: datetime.datetime = field(default_factory=datetime.datetime.now)
@@ -475,7 +479,11 @@ class AnalysisReport:
 
     def to_json(self) -> Dict[str, Any]:
         """导出为结构化的 JSON 数据"""
+        validation = self.validation or failed_validation(
+            "尚未执行财务事实校验", "validation_not_run"
+        )
         return {
+            "schema_version": 2,
             "meta": {
                 "company": self.company,
                 "source_file": self.source_file,
@@ -494,6 +502,8 @@ class AnalysisReport:
                 for dim in self.dimensions
             ],
             "metrics": self.metrics,
+            "facts": [fact.to_dict() for fact in self.facts],
+            "validation": validation.to_dict(),
         }
 
     def save(self, output_dir: str) -> str:
@@ -618,7 +628,12 @@ class ReportAnalyzer:
         else:
             ticker, report_year = self._parse_meta(pdf_path)
             company_name = self._extract_company_name(pdf_text) or ticker
-            period = None
+            report_id = parse_report_filename(pdf_path)
+            period = (
+                report_id.split(":")[1]
+                if report_id and report_id.endswith(":quarterly")
+                else None
+            )
         display_name = f"{company_name}（{ticker}）" if company_name and company_name != ticker else ticker
 
         # 第三步：遍历维度逐个分析
@@ -757,9 +772,10 @@ class ReportAnalyzer:
 
             report.add_dimension(dim_result)
 
-        report.metrics, metrics_tokens = self._extract_metrics(
+        report.metrics, report.facts, report.validation, metrics_tokens = self._extract_metrics(
             pdf_text,
             model=report.model or model or self.client.default_model,
+            report_year=report.report_year,
         )
         report.total_tokens += metrics_tokens
 
@@ -870,7 +886,7 @@ class ReportAnalyzer:
     def _resolve_report_id(self, pdf_path: str, meta: Optional[Dict[str, Any]]) -> Optional[str]:
         """推导 RAG 检索用的 report_id；无法推导返回 None（该维度回退截断全文）。
 
-        优先级：meta.period 显式期次（归一化季度/半年报）→ 从 PDF 文件名解析
+        优先级：meta.period 显式期次 → 从 PDF 文件名解析
         → meta.ticker+year 默认年报。与 rag/ingest 的 report_id 命名保持一致，
         保证分析前自动摄取后检索能命中同一批片段。
         """
@@ -878,15 +894,7 @@ class ReportAnalyzer:
             ticker = str(meta.get("ticker") or "")
             period = str(meta.get("period") or "")
             if ticker and re.match(r"^\d{4}-\d{2}-\d{2}$", period):
-                year, month = period[:4], period[5:7]
-                if month == "06":
-                    rtype, norm = "semi_annual", f"{year}-06-30"
-                elif month in ("03", "09"):
-                    # 季报文件名无法区分一/三季报，store 统一映射为 03-31
-                    rtype, norm = "quarterly", f"{year}-03-31"
-                else:
-                    rtype, norm = "annual", f"{year}-12-31"
-                return f"{ticker}:{norm}:{rtype}"
+                return build_report_id(ticker, period)
         try:
             from .rag.chunking import parse_pdf_report_id
 
@@ -899,7 +907,7 @@ class ReportAnalyzer:
             ticker = str(meta.get("ticker") or "")
             year = meta.get("year")
             if ticker and year:
-                return f"{ticker}:{int(year)}-12-31:annual"
+                return build_report_id(ticker, f"{int(year)}-12-31")
         return None
 
     def _extract_pdf_text(self, pdf_path: str, max_chars: int = 15000) -> str:
@@ -1043,37 +1051,20 @@ class ReportAnalyzer:
         )
 
     def _extract_metrics(
-        self, pdf_text: str, model: Optional[str] = None
-    ) -> Tuple[Optional[List[Dict[str, Any]]], int]:
+        self,
+        pdf_text: str,
+        model: Optional[str] = None,
+        report_year: Optional[int] = None,
+    ) -> Tuple[Optional[List[Dict[str, Any]]], List[FinancialFact], ValidationSummary, int]:
         """
         从财报文本中抽取结构化指标（折线图数据源）。
 
         一次结构化调用（response_format=json_object，max_tokens=2000）。
-        任何失败（网络/非法 JSON/解析失败）只返回 (None, 0)，不抛异常。
+        任何失败（网络/非法 JSON/解析失败）返回失败校验摘要，不抛异常。
 
         Returns:
-            [{"year": int, "revenue": float|None, "net_profit": float|None,
-              "roe": float|None, "gross_margin": float|None,
-              "debt_ratio": float|None}, ...] 按年升序；数据全部为空返回 None；第二项为消耗 token 数。
+            (metrics, facts, validation, tokens)。兼容 metrics 按年升序；数据全部无效时为 None。
         """
-
-        def _num(value: Any) -> Optional[float]:
-            """尽力转数字：None/空串/非法字符串/非有限值 → None；字符串数字 → float"""
-            if value is None or value == "":
-                return None
-            if isinstance(value, str):
-                value = value.strip().replace(",", "")
-                if value.endswith("%"):
-                    value = value[:-1].strip()
-                if not value:
-                    return None
-            try:
-                value = float(value)
-            except (TypeError, ValueError):
-                return None
-            if value != value or value in (float("inf"), float("-inf")):
-                return None
-            return value
 
         try:
             resp = self.client.chat(
@@ -1087,56 +1078,25 @@ class ReportAnalyzer:
             )
         except Exception as exc:
             logger.warning("指标抽取失败：%s", exc)
-            return None, 0
+            return None, [], failed_validation("指标抽取请求失败"), 0
 
         metrics_tokens = int(resp.get("usage", {}).get("total_tokens", 0) or 0)
         try:
             payload = json.loads(resp["content"])
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
             logger.warning("指标抽取结果解析失败：%s", exc)
-            return None, metrics_tokens
+            return None, [], failed_validation("指标抽取结果不是有效 JSON", "invalid_json"), metrics_tokens
 
         if not isinstance(payload, dict):
-            return None, metrics_tokens
+            return None, [], failed_validation("指标抽取结果不是对象", "invalid_payload"), metrics_tokens
         rows = payload.get("metrics")
         if not isinstance(rows, list):
-            return None, metrics_tokens
+            return None, [], failed_validation("指标抽取结果缺少 metrics 数组", "invalid_payload"), metrics_tokens
 
-        now_year = datetime.date.today().year
-        by_year: Dict[int, Dict[str, Any]] = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                year = int(row.get("year"))
-            except (TypeError, ValueError):
-                continue
-            if not (2000 <= year <= now_year + 1):
-                continue
-
-            cleaned = by_year.setdefault(
-                year,
-                {"year": year, **{field_name: None for field_name, _label in METRICS_FIELDS}},
-            )
-            updated = False
-            for field_name, _label in METRICS_FIELDS:
-                value = _num(row.get(field_name))
-                if value is not None:
-                    cleaned[field_name] = value
-                    updated = True
-            if not updated and all(cleaned[field_name] is None for field_name, _ in METRICS_FIELDS):
-                by_year.pop(year, None)
-
-        if not by_year:
-            return None, metrics_tokens
-
-        metrics = [by_year[year] for year in sorted(by_year)]
-        if not any(
-            any(row[field_name] is not None for field_name, _ in METRICS_FIELDS)
-            for row in metrics
-        ):
-            return None, metrics_tokens
-        return metrics, metrics_tokens
+        if report_year is None:
+            return None, [], failed_validation("缺少报告年份，无法校验指标", "missing_report_year"), metrics_tokens
+        checked = validate_metric_rows(rows, report_year=report_year)
+        return checked.metrics, checked.facts, checked.validation, metrics_tokens
 
     def analyze_all_in_directory(
         self,

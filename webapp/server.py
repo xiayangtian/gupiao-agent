@@ -22,6 +22,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import asdict
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -67,12 +68,37 @@ stock_index = StockIndex(datasource)
 ai_client = AIClient()
 analyzer = ReportAnalyzer(ai_client)
 downloader = ReportDownloader()
-task_manager = TaskManager()
+task_manager: Optional[TaskManager] = None
+_task_manager_lifecycle_lock = threading.Lock()
 chat_sessions: Dict[str, List[Dict[str, str]]] = {}
 # 单报告会话内存表并发读改写锁
 _chat_lock = threading.Lock()
 # 智能问答历史会话（JSON 文件持久化，data/chat_sessions.json）
 chat_store = ChatStore()
+
+
+def _startup_task_manager() -> None:
+    """Create the production task store when the application starts."""
+    global task_manager
+    with _task_manager_lifecycle_lock:
+        if task_manager is None:
+            task_manager = TaskManager()
+
+
+def _shutdown_task_manager() -> None:
+    """Wait for task workers before closing their SQLite connection."""
+    global task_manager
+    with _task_manager_lifecycle_lock:
+        manager = task_manager
+        shutdown = getattr(manager, "shutdown", None)
+        if shutdown is not None:
+            shutdown()
+        if task_manager is manager:
+            task_manager = None
+
+
+app.router.add_event_handler("startup", _startup_task_manager)
+app.router.add_event_handler("shutdown", _shutdown_task_manager)
 
 
 # ── RAG 知识库（惰性初始化；未配置 rag.enabled 时保持 None）──
@@ -770,6 +796,7 @@ def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, An
             meta={
                 "ticker": meta.company_id,
                 "year": p.year,
+                "period": p.isoformat(),
                 "company": meta.company_name,
             },
             stop_event=stop_event,
@@ -1063,7 +1090,7 @@ def rag_status() -> Dict[str, Any]:
 def rag_ingest() -> Dict[str, Any]:
     if rag_service is None:
         raise HTTPException(503, "RAG 知识库未初始化：请配置 rag.enabled")
-    task_id = task_manager.submit(rag_service.ingest_all)
+    task_id = task_manager.submit(lambda: asdict(rag_service.ingest_all()))
     if task_id is None:
         raise HTTPException(409, "已有任务进行中，请稍候")
     return {"task_id": task_id}

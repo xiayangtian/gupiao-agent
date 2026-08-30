@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from financial_report_fetcher.report_identity import build_report_id
+
 from .reranker import Reranker, _maybe_rerank
 from .store import RagStore
 
@@ -101,17 +103,8 @@ class RagQA:
 
     @staticmethod
     def build_report_id(code: str, period_iso: str) -> str:
-        """按 code + 报告期推导 RAG report_id（与 ingest/store 命名一致）"""
-        year = period_iso.split("-")[0]
-        month = period_iso.split("-")[1]
-        if month == "06":
-            rtype, period = "semi_annual", f"{year}-06-30"
-        elif month in ("03", "09"):
-            # 季报文件名无法区分一/三季报，store 统一映射为 03-31（一季报）
-            rtype, period = "quarterly", f"{year}-03-31"
-        else:
-            rtype, period = "annual", f"{year}-12-31"
-        return f"{code}:{period}:{rtype}"
+        """委托统一身份模块推导与入库一致的 report_id。"""
+        return build_report_id(code, period_iso)
 
     def _query_with_priority(
         self,

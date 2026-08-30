@@ -73,6 +73,20 @@ class RagStore:
     def delete_report(self, report_id: str) -> None:
         self._collection.delete(where={"report_id": report_id})
 
+    def delete_reports(self, report_ids: List[str]) -> int:
+        """删除多个报告的全部 chunk，返回实际删除的 chunk 数。"""
+        unique_ids = list(dict.fromkeys(report_ids))
+        if not unique_ids:
+            return 0
+        res = self._collection.get(
+            where={"report_id": {"$in": unique_ids}},
+            include=["metadatas"],
+        )
+        chunk_ids = res.get("ids", [])
+        if chunk_ids:
+            self._collection.delete(ids=chunk_ids)
+        return len(chunk_ids)
+
     def delete_file(self, report_id: str, source: str) -> None:
         """删除单文件（report_id + source）的全部 chunk"""
         # chromadb 1.5.9 delete 的 where 顶层只允许一个操作符，多字段需用 $and

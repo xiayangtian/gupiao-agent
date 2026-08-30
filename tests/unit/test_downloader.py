@@ -48,12 +48,12 @@ class TestBuildFilename:
         )
         assert ReportDownloader.build_filename(report) == "万科A_000002_半年报_2022.pdf"
 
-    def test_quarterly_report_filename(self):
-        """季报文件名应包含中文"季报"，格式正确"""
+    def test_quarterly_filename_contains_exact_period(self):
+        """季度文件名必须保留完整报告期，避免一季报与三季报冲突。"""
         report = _make_report(
-            "BYD", ReportType.QUARTERLY, date(2021, 9, 30), company_name="比亚迪"
+            "600900", ReportType.QUARTERLY, date(2025, 9, 30), company_name="长江电力"
         )
-        assert ReportDownloader.build_filename(report) == "比亚迪_BYD_季报_2021.pdf"
+        assert ReportDownloader.build_filename(report) == "长江电力_600900_季报_2025-09-30.pdf"
 
     # ── 文件名格式约束 ───────────────────────────────────────────────────────
 

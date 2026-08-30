@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 import webapp.server as server
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
+from financial_report_fetcher.rag.ingest import IngestResult
 
 
 def _meta(code, rt, period, name="测试公司"):
@@ -66,6 +67,14 @@ class FakeIndex:
 @pytest.fixture()
 def env(monkeypatch, tmp_path):
     """替换 server 模块级组件为假实现；yield 组件引用供断言"""
+    task_managers = []
+
+    def make_task_manager(**kwargs):
+        db_path = tmp_path / f"tasks-{len(task_managers)}.sqlite3"
+        manager = server.TaskManager(db_path=str(db_path), **kwargs)
+        task_managers.append(manager)
+        return manager
+
     fake_ds = MagicMock()
     fake_ds.fetch_reports.return_value = [
         _meta("600900", ReportType.ANNUAL, date(2025, 12, 31), "长江电力"),
@@ -87,25 +96,65 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "ai_client", fake_ai)
     monkeypatch.setattr(server, "analyzer", fake_analyzer)
     monkeypatch.setattr(server, "downloader", fake_dl)
-    monkeypatch.setattr(server, "task_manager", server.TaskManager())
+    monkeypatch.setattr(server, "task_manager", make_task_manager())
     monkeypatch.setattr(server, "chat_sessions", {})
     # 隔离真实 reports/ 目录，downloaded 断言与本地磁盘状态无关
     monkeypatch.setattr(server, "REPORTS_DIR", str(tmp_path))
     # 隔离真实 MCP：问答端点默认不注入工具（TestMcpChat 等按需覆盖）
     monkeypatch.setattr(server, "_mcp_tool_defs", lambda: None)
 
-    return {
+    yield {
         "fake_ds": fake_ds,
         "fake_ai": fake_ai,
         "fake_analyzer": fake_analyzer,
         "fake_dl": fake_dl,
+        "make_task_manager": make_task_manager,
     }
+
+    for manager in task_managers:
+        manager.shutdown()
 
 
 @pytest.fixture()
 def client(env):
     with TestClient(server.app) as c:
         yield c
+
+
+def test_task_manager_startup_waits_for_inflight_shutdown(monkeypatch):
+    shutdown_entered = threading.Event()
+    release_shutdown = threading.Event()
+    startup_done = threading.Event()
+
+    class BlockingManager:
+        def shutdown(self):
+            shutdown_entered.set()
+            release_shutdown.wait(timeout=3.0)
+
+    replacement = object()
+    monkeypatch.setattr(server, "task_manager", BlockingManager())
+    monkeypatch.setattr(server, "TaskManager", lambda: replacement)
+
+    shutting_down = threading.Thread(target=server._shutdown_task_manager)
+    shutting_down.start()
+    assert shutdown_entered.wait(timeout=1.0)
+
+    def startup():
+        server._startup_task_manager()
+        startup_done.set()
+
+    starting_up = threading.Thread(target=startup)
+    starting_up.start()
+    try:
+        assert not startup_done.wait(timeout=0.15)
+    finally:
+        release_shutdown.set()
+
+    shutting_down.join(timeout=2.0)
+    starting_up.join(timeout=2.0)
+    assert not shutting_down.is_alive()
+    assert not starting_up.is_alive()
+    assert server.task_manager is replacement
 
 
 class TestAutocomplete:
@@ -190,6 +239,23 @@ class TestAnalyze:
         assert result["dimensions"][0]["name"] == "财务摘要"
         assert result["markdown_path"].endswith(".md")
 
+    def test_analyze_quarters_pass_exact_period_to_analysis(self, client, env):
+        """Web 分析 Q1/Q3 时必须传递精确期次，供保存与 RAG 关联使用。"""
+        env["fake_ds"].fetch_reports.return_value = [
+            _meta("600900", ReportType.QUARTERLY, date(2025, 3, 31), "长江电力"),
+            _meta("600900", ReportType.QUARTERLY, date(2025, 9, 30), "长江电力"),
+        ]
+        for period in ("2025-03-31", "2025-09-30"):
+            response = client.post(
+                f"/api/reports/600900/{period}/analyze",
+                json={"dimensions": ["financial_summary"]},
+            )
+            assert response.status_code == 200
+            assert self._poll_until_done(client, response.json()["task_id"])["status"] == "done"
+
+        periods = [call.kwargs["meta"]["period"] for call in env["fake_analyzer"].analyze.call_args_list]
+        assert periods == ["2025-03-31", "2025-09-30"]
+
     def test_analyze_queued_when_workers_full(self, client, env, monkeypatch):
         """并发化：worker 满时新分析任务排队（200）而非拒绝（409）"""
         gate = threading.Event()
@@ -199,7 +265,7 @@ class TestAnalyze:
             return "released"
 
         # 单 worker 池：先占住唯一 worker
-        tm = server.TaskManager(max_workers=1)
+        tm = env["make_task_manager"](max_workers=1)
         monkeypatch.setattr(server, "task_manager", tm)
         tid = tm.submit(blocking)
         assert tid is not None
@@ -301,6 +367,20 @@ class TestHistoryApi:
         assert cj["has_analysis"] is True
         assert cj["period"] == "2025-12-31"
         assert cj["pdf_filename"] == "长江电力_600900_年报_2025.pdf"
+
+    def test_history_api_lists_q1_and_q3_separately(self, client, tmp_path, monkeypatch):
+        """历史 API 不得忽略完整期次的季度 PDF，也不得将 Q3 合并到 Q1。"""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        for period in ("2025-03-31", "2025-09-30"):
+            (reports_dir / f"长江电力_600900_季报_{period}.pdf").write_bytes(b"%PDF")
+        monkeypatch.setattr(server, "REPORTS_DIR", str(reports_dir))
+        monkeypatch.setattr(server, "ANALYSIS_DIR", str(tmp_path / "analysis"))
+
+        response = client.get("/api/history")
+        assert response.status_code == 200
+        quarterly = [item for item in response.json()["items"] if item["type"] == "季报"]
+        assert [item["period"] for item in quarterly] == ["2025-03-31", "2025-09-30"]
 
     def test_history_detail(self, client, tmp_path, monkeypatch):
         """GET /api/history/{filename} 返回分析报告完整内容"""
@@ -410,6 +490,52 @@ class TestRagApi:
         r = client.post("/api/rag/ingest")
         assert r.status_code == 200
         assert "task_id" in r.json()
+
+    def test_rag_ingest_result_is_json_and_survives_task_manager_restart(
+        self, client, monkeypatch
+    ):
+        class FakeSvc:
+            def ingest_all(self, force=False):
+                return IngestResult(
+                    ingested=2,
+                    skipped=1,
+                    total_chunks=17,
+                    errors=["旧季报身份不明确"],
+                )
+
+        monkeypatch.setattr(server, "rag_service", FakeSvc())
+        response = client.post("/api/rag/ingest")
+        task_id = response.json()["task_id"]
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            task_response = client.get(f"/api/tasks/{task_id}")
+            task = task_response.json()
+            if task["status"] in ("done", "failed"):
+                break
+            time.sleep(0.01)
+
+        assert task_response.status_code == 200
+        assert task == {
+            "status": "done",
+            "progress": None,
+            "result": {
+                "ingested": 2,
+                "skipped": 1,
+                "total_chunks": 17,
+                "errors": ["旧季报身份不明确"],
+            },
+            "error": None,
+        }
+        json.dumps(task, allow_nan=False)
+
+        db_path = server.task_manager._db_path
+        server.task_manager.shutdown()
+        restarted = server.TaskManager(db_path=db_path)
+        monkeypatch.setattr(server, "task_manager", restarted)
+
+        restarted_response = client.get(f"/api/tasks/{task_id}")
+        assert restarted_response.status_code == 200
+        assert restarted_response.json()["result"] == task["result"]
 
 
 class TestRagFilesApi:
@@ -841,6 +967,32 @@ class TestChatSessionsApi:
         assert r.status_code == 503
 
 
+class TestTaskResultApi:
+    @pytest.mark.parametrize(
+        "value",
+        [float("nan"), float("inf"), float("-inf")],
+        ids=["nan", "positive-infinity", "negative-infinity"],
+    )
+    def test_non_finite_task_result_returns_json_failed_state(self, client, value):
+        """任务 API 对非有限结果仍应返回可编码的 failed 快照。"""
+        task_id = server.task_manager.submit(lambda: {"value": value})
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            snapshot = server.task_manager.get(task_id)
+            if snapshot["status"] in ("done", "failed"):
+                break
+            time.sleep(0.01)
+
+        response = client.get(f"/api/tasks/{task_id}")
+
+        assert response.status_code == 200
+        task = response.json()
+        assert task["status"] == "failed"
+        assert task["result"] is None
+        assert "JSON" in task["error"]
+        json.dumps(task, allow_nan=False)
+
+
 class TestCancelAnalysisTask:
     def test_cancel_task_endpoint(self, client, env, monkeypatch):
         """POST /api/tasks/{id}/cancel 调用 task_manager.cancel"""
@@ -875,7 +1027,7 @@ class TestCancelAnalysisTask:
 
         from financial_report_fetcher.exceptions import AnalysisCancelledError
 
-        tm = server.TaskManager()
+        tm = env["make_task_manager"]()
         monkeypatch.setattr(server, "task_manager", tm)
         entered = _threading.Event()
 
