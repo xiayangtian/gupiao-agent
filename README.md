@@ -46,22 +46,6 @@
 pip install -r requirements.txt
 ```
 
-## 敏感信息防护（pre-commit 钩子）
-
-仓库内置 `.githooks/pre-commit` 钩子：提交前自动扫描暂存区中的
-API Key / Token、硬编码凭证、大陆手机号、身份证号、个人邮箱等敏感信息，命中即阻止提交。
-
-clone 后启用一次：
-
-```bash
-git config core.hooksPath .githooks
-```
-
-说明：
-- 只扫描 `git diff --cached` 中本次新增的行，不影响删除行与上下文
-- 占位符（如 `sk-xxxxxxxxxxxx`）、f-string 模板（如 `Bearer {self.api_key}`）、示例域名（`example.com`）不会误报
-- 真实密钥请放入 `config.yaml`（已在 `.gitignore` 中）或环境变量，勿写入代码
-
 ## 配置环境变量
 
 > 配置文件模板见 `config.example.yaml`（完整结构，密钥为占位符）：
@@ -266,3 +250,9 @@ reports/analysis/           # AI 分析结果（.md + .json）
 
 本项目数据来源为巨潮资讯网（http://www.cninfo.com.cn），仅供学习研究使用，
 不构成任何投资建议。
+
+第三方数据、模型与接口的使用须遵守其各自的服务条款和许可要求。
+
+## 开源协议
+
+本项目采用 [MIT License](LICENSE)，允许自由使用、修改、分发及商用，但须保留原版权与许可声明。

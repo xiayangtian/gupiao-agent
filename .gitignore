@@ -1,3 +1,8 @@
+# 本地开发工具配置
+.claude/
+.kiro/
+.githooks/
+
 __pycache__/
 *.pyc
 .pytest_cache/
