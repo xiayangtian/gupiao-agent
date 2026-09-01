@@ -526,6 +526,23 @@ def get_history(search: str = Query(default="")) -> Dict[str, Any]:
     return {"items": items}
 
 
+@app.get("/api/history-pdf/{filename:path}")
+def get_history_pdf(filename: str) -> FileResponse:
+    """以内联方式返回历史记录中的本地 PDF，不触发远端查询或下载。"""
+    safe_name = os.path.basename(filename)
+    if safe_name != filename or not safe_name.lower().endswith(".pdf"):
+        raise HTTPException(404, "PDF 文件不存在")
+    path = os.path.join(REPORTS_DIR, safe_name)
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        raise HTTPException(404, f"PDF 文件不存在：{safe_name}")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=safe_name,
+        content_disposition_type="inline",
+    )
+
+
 @app.get("/api/history/{filename:path}")
 def get_history_detail(filename: str) -> Dict[str, Any]:
     """返回单份分析报告的完整内容"""

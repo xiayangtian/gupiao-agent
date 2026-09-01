@@ -206,9 +206,18 @@
             <span id="history-detail-badge" class="badge"></span>
           </div>
         </div>
-        <div class="panel-body scroll">
-          <div id="history-detail" class="hint">
-            点击左侧任意报告查看分析结果或触发 AI 分析
+        <div id="history-view-tabs" class="history-view-tabs hidden" role="tablist" aria-label="历史报告内容">
+          <button class="history-view-tab active" data-history-view="analysis" role="tab" aria-selected="true">分析结果</button>
+          <button class="history-view-tab" data-history-view="pdf" role="tab" aria-selected="false">PDF 原文</button>
+        </div>
+        <div class="history-view-stage">
+          <div id="history-analysis-pane" class="history-view-pane panel-body scroll">
+            <div id="history-detail" class="hint">
+              点击左侧任意报告查看分析结果或触发 AI 分析
+            </div>
+          </div>
+          <div id="history-pdf-pane" class="history-view-pane hidden">
+            <iframe id="history-pdf-frame" class="history-pdf-frame" src="about:blank" title="PDF 原文"></iframe>
           </div>
         </div>
       </section>

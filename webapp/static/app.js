@@ -49,6 +49,7 @@ const STATE = {
   historySelected: null,
   pendingHistoryReport: null, // 财报页跳转历史页后待自动选中的 {code, period}
   historyAnalysisByReport: {}, // "code:period" -> 上次请求维度，用于重新分析默认勾选
+  historyView: 'analysis',       // 历史详情当前 Tab
   chatFocusReport: null,        // {code, period, company} 历史记录跳转：聚焦该报告（提升 RAG 权重）
 
   // Chart instances
@@ -1114,6 +1115,7 @@ async function selectHistoryItem(code, period) {
   if (!item) return;
 
   STATE.historySelected = item;
+  STATE.historyView = item.has_analysis || !item.pdf_filename ? 'analysis' : 'pdf';
   STATE.historyFiltered = null;          // 选中后恢复全量列表（分组状态保留）
   renderHistoryList(STATE.historyItems); // re-render to update selected
   // 详情面板右上角「重新分析」：仅已分析的报告可重新触发
@@ -1135,6 +1137,8 @@ async function selectHistoryItem(code, period) {
 
   var detail = $('#history-detail');
   if (!detail) return;
+
+  prepareHistoryViews(item);
 
   // 两个页面读取同一份任务状态；切页后仍展示进行中/终态。
   if (renderHistoryAnalysisState(item)) return;
@@ -1188,6 +1192,46 @@ function renderHistoryAnalysisState(item) {
     return true;
   }
   return false;
+}
+
+function prepareHistoryViews(item) {
+  var tabs = $('#history-view-tabs');
+  var pdfTab = $('[data-history-view="pdf"]', tabs);
+  var analysisTab = $('[data-history-view="analysis"]', tabs);
+  var frame = $('#history-pdf-frame');
+  if (tabs) tabs.classList.remove('hidden');
+  if (pdfTab) pdfTab.disabled = !item.pdf_filename;
+  if (analysisTab) analysisTab.disabled = false;
+  if (frame) {
+    frame.src = item.pdf_filename
+      ? '/api/history-pdf/' + encodeURIComponent(item.pdf_filename)
+      : 'about:blank';
+  }
+  setHistoryView(STATE.historyView);
+}
+
+function setHistoryView(view) {
+  if (view === 'pdf' && (!STATE.historySelected || !STATE.historySelected.pdf_filename)) {
+    view = 'analysis';
+  }
+  STATE.historyView = view;
+  $$('.history-view-tab').forEach(function (tab) {
+    var active = tab.dataset.historyView === view;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  var analysisPane = $('#history-analysis-pane');
+  var pdfPane = $('#history-pdf-pane');
+  if (analysisPane) analysisPane.classList.toggle('hidden', view !== 'analysis');
+  if (pdfPane) pdfPane.classList.toggle('hidden', view !== 'pdf');
+}
+
+var historyViewTabs = $('#history-view-tabs');
+if (historyViewTabs) {
+  historyViewTabs.addEventListener('click', function (event) {
+    var tab = event.target.closest ? event.target.closest('.history-view-tab') : null;
+    if (tab && !tab.disabled) setHistoryView(tab.dataset.historyView);
+  });
 }
 
 function showHistoryNoAnalysis(item) {

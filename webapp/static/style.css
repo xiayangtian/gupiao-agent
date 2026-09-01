@@ -1375,6 +1375,62 @@ input, select, button { font-family: inherit; font-size: inherit; }
   gap: var(--space-sm);
 }
 
+.history-view-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+
+.history-view-tab {
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+}
+
+.history-view-tab.active {
+  margin-bottom: -1px;
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.history-view-tab:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+.history-view-stage,
+.history-view-pane {
+  min-height: 0;
+  flex: 1;
+}
+
+.history-view-stage {
+  display: flex;
+  overflow: hidden;
+}
+
+.history-view-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.history-pdf-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 560px;
+  border: 0;
+  background: #fff;
+}
+
 #history-detail-title {
   flex: 1;
   overflow: hidden;

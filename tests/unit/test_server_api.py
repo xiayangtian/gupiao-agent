@@ -463,6 +463,26 @@ class TestHistoryApi:
         r = client.get("/api/history/不存在的文件.json")
         assert r.status_code == 404
 
+    def test_history_pdf_serves_local_file_inline(self, client, tmp_path, monkeypatch):
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        filename = "长江电力_600900_年报_2025.pdf"
+        content = b"%PDF-1.4 local history pdf"
+        (reports_dir / filename).write_bytes(content)
+        monkeypatch.setattr(server, "REPORTS_DIR", str(reports_dir))
+
+        response = client.get(f"/api/history-pdf/{filename}")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/pdf"
+        assert response.headers["content-disposition"].startswith("inline;")
+        assert response.content == content
+
+    def test_history_pdf_rejects_non_pdf(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(server, "REPORTS_DIR", str(tmp_path))
+        response = client.get("/api/history-pdf/not-a-pdf.txt")
+        assert response.status_code == 404
+
     def test_list_reports_analyzed_flag(self, client, tmp_path, monkeypatch):
         """精确 period（年报）→ analyzed=True；无匹配（季报）→ False"""
         a_dir = tmp_path / "analysis"
