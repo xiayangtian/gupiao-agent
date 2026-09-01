@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from financial_report_fetcher.evidence.document import DocumentExtractor
 from financial_report_fetcher.report_identity import parse_report_filename
 
 # A 股年报标准章节（按出现顺序）
@@ -48,11 +49,10 @@ class Chunk:
 # ── PDF ─────────────────────────────────────────────────────────
 
 def extract_pdf_pages(pdf_path: str) -> List[Tuple[int, str]]:
-    """pypdf 逐页全量提取，返回 [(页码从1起, 页文本), ...]"""
-    from pypdf import PdfReader
-
-    reader = PdfReader(pdf_path)
-    return [(i + 1, page.extract_text() or "") for i, page in enumerate(reader.pages)]
+    """复用统一提取器，返回兼容的 ``[(页码从1起, 页文本), ...]``。"""
+    report_id = parse_report_filename(pdf_path) or os.path.basename(pdf_path)
+    extraction = DocumentExtractor().extract(pdf_path, report_id)
+    return [(page.page_number, page.text) for page in extraction.pages]
 
 
 def parse_pdf_report_id(pdf_path: str) -> Optional[str]:

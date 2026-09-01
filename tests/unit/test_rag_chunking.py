@@ -1,8 +1,34 @@
 import json
 from financial_report_fetcher.rag.chunking import (
+    extract_pdf_pages,
     parse_pdf_report_id,
     chunk_metrics,
 )
+
+
+def test_extract_pdf_pages_reuses_document_extractor(monkeypatch):
+    """RAG 必须复用统一逐页提取器，避免维护第二套 pypdf 逻辑。"""
+    from financial_report_fetcher.evidence.document import DocumentExtraction, DocumentPage
+    from financial_report_fetcher.rag import chunking
+
+    extraction = DocumentExtraction(
+        report_id="report.pdf",
+        pdf_hash="a" * 64,
+        pages=(
+            DocumentPage(1, "第一页", 3, 0.0, 0.0, 0.0, 1.0, False),
+            DocumentPage(2, "第二页", 3, 0.0, 0.0, 0.0, 1.0, False),
+        ),
+    )
+
+    class FakeExtractor:
+        def extract(self, pdf_path, report_id):
+            assert pdf_path == "report.pdf"
+            assert report_id == "report.pdf"
+            return extraction
+
+    monkeypatch.setattr(chunking, "DocumentExtractor", FakeExtractor)
+
+    assert extract_pdf_pages("report.pdf") == [(1, "第一页"), (2, "第二页")]
 
 
 def test_parse_pdf_report_id_annual():
