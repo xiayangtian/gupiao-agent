@@ -770,6 +770,93 @@ input, select, button { font-family: inherit; font-size: inherit; }
   margin-left: auto;
 }
 
+.analysis-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 48px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: 0 18px 60px rgb(15 23 42 / 24%);
+}
+
+.analysis-dialog[open] {
+  animation: analysis-dialog-enter 180ms ease-out;
+}
+
+.analysis-dialog::backdrop {
+  background: rgb(15 23 42 / 48%);
+  backdrop-filter: blur(2px);
+  animation: analysis-dialog-backdrop-enter 180ms ease-out;
+}
+
+@keyframes analysis-dialog-enter {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes analysis-dialog-backdrop-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .analysis-dialog[open],
+  .analysis-dialog::backdrop { animation: none; }
+}
+
+.analysis-dialog-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: 20px 22px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.analysis-dialog-head h2 { margin: 0 0 4px; font-size: 18px; }
+.analysis-dialog-head p { margin: 0; }
+
+.dialog-close {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dialog-close:hover { background: var(--surface-alt); }
+
+.analysis-dialog-dims {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: 420px;
+  overflow: auto;
+  padding: 16px 22px 8px;
+  margin: 0;
+}
+
+.analysis-dialog-toolbar { padding: 8px 22px 16px; margin: 0; }
+
+.analysis-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  padding: 14px 22px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 560px) {
+  .analysis-dialog-dims { grid-template-columns: 1fr; }
+}
+
 .dim-card {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -994,6 +1081,82 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .dim-panel-financial .dim-card h2, .dim-panel-financial .dim-card h3 { border-left-color: var(--accent); }
 .dim-panel-risk .dim-card h2, .dim-panel-risk .dim-card h3 { border-left-color: var(--danger); }
 .dim-panel-highlight .dim-card h2, .dim-panel-highlight .dim-card h3 { border-left-color: var(--success); }
+
+/* ═════════ 分析实时进度 ═════════ */
+
+.analysis-progress-card {
+  margin: var(--space-md) 0;
+  padding: var(--space-md);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  background: var(--accent-light);
+}
+
+.analysis-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  font-size: 13px;
+}
+
+.analysis-progress-current { color: var(--text-primary); font-weight: 650; }
+.analysis-progress-percent { color: var(--accent); font-family: var(--font-mono); font-weight: 700; }
+
+.analysis-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--accent-border);
+}
+
+.analysis-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--transition-normal);
+}
+
+.analysis-steps {
+  display: grid;
+  gap: 7px;
+  margin: var(--space-md) 0 0;
+  list-style: none;
+}
+
+.analysis-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.analysis-step-marker {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  border: 2px solid var(--border-hover);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.analysis-step-done { color: var(--text-secondary); }
+.analysis-step-done .analysis-step-marker { border-color: var(--success); background: var(--success); }
+.analysis-step-current { color: var(--accent); font-weight: 650; }
+.analysis-step-current .analysis-step-marker {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
+}
+
+.analysis-progress-hint { margin-top: var(--space-md); text-align: left; }
+
+@media (prefers-reduced-motion: reduce) {
+  .analysis-progress-track > span { transition: none; }
+}
 
 /* ═════════ 问答 ═════════ */
 

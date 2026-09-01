@@ -1,6 +1,7 @@
 """webapp.tasks — SQLite 持久化的并发长任务执行器。"""
 
 import logging
+import math
 import os
 import threading
 import uuid
@@ -70,13 +71,14 @@ class TaskManager:
 
     def submit(
         self,
-        fn: Callable[[], Any],
+        fn: Callable[..., Any],
         stop_event: Optional[threading.Event] = None,
+        progressive: bool = False,
     ) -> Optional[str]:
         """提交任务并排队执行，返回 task_id。
 
-        stop_event: 可选取消信号；cancel(task_id) 会 set 该事件，
-        任务函数内部应定期检查并以 AnalysisCancelledError 主动退出。
+        stop_event: 可选取消信号；cancel(task_id) 会 set 该事件。
+        progressive: 为 True 时 fn 接收 report_progress(float) 回调，进度会持久化。
         """
         with self._condition:
             if self._state != _STATE_ACCEPTING:
@@ -91,7 +93,12 @@ class TaskManager:
             if stop_event is not None:
                 self._stop_events[task_id] = stop_event
             try:
-                future = self._executor.submit(self._run_task, task_id, fn)
+                submitted_fn = fn
+                if progressive:
+                    submitted_fn = lambda accepted_fn=fn: accepted_fn(
+                        self._progress_reporter(task_id)
+                    )
+                future = self._executor.submit(self._run_task, task_id, submitted_fn)
             except RuntimeError:
                 try:
                     store.update(
@@ -188,6 +195,21 @@ class TaskManager:
                 self._condition.notify_all()
 
     # ── 内部 ─────────────────────────────────────────────
+
+    def _progress_reporter(self, task_id: str) -> Callable[[float], None]:
+        def report(value: float) -> None:
+            progress = float(value)
+            if not math.isfinite(progress):
+                raise ValueError("任务进度必须是有限数字")
+            progress = max(0.0, min(1.0, progress))
+            with self._condition:
+                store = self._ensure_store()
+                try:
+                    store.update(task_id, progress=progress)
+                except TaskStorageError as exc:
+                    self._record_storage_failure_locked(task_id, exc)
+
+        return report
 
     def _run_task(self, task_id: str, fn: Callable[[], Any]) -> None:
         with self._condition:

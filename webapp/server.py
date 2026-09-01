@@ -31,7 +31,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from financial_report_fetcher.ai_client import AIClient
-from financial_report_fetcher.analyzer import ANALYSIS_TEMPLATES, ReportAnalyzer
+from financial_report_fetcher.analyzer import (
+    ANALYSIS_TEMPLATES,
+    ReportAnalyzer,
+    clean_analysis_payload,
+)
 from financial_report_fetcher.datasource import CNINFODatasource
 from financial_report_fetcher.downloader import ReportDownloader
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
@@ -528,7 +532,7 @@ def get_history_detail(filename: str) -> Dict[str, Any]:
     content = get_analysis_detail(ANALYSIS_DIR, filename)
     if content is None:
         raise HTTPException(404, f"分析报告不存在：{filename}")
-    return content
+    return clean_analysis_payload(content)
 
 
 # ── 股票行情（腾讯免费 API）───────────────────────────────────────
@@ -773,6 +777,21 @@ def analysis_dimensions() -> Dict[str, Any]:
 
 # ── 分析任务 ───────────────────────────────────────────────
 
+def _analysis_progress_value(event: Dict[str, Any]) -> float:
+    """把分析器阶段事件映射到供前端轮询的 0~1 总进度。"""
+    stage = event.get("stage")
+    if stage == "extracting_pdf":
+        return 0.20
+    if stage in ("dimension_started", "dimension_completed"):
+        total = max(1, int(event.get("total") or 1))
+        completed = max(0, min(total, int(event.get("completed") or 0)))
+        return 0.25 + 0.55 * completed / total
+    if stage == "extracting_metrics":
+        return 0.82
+    if stage == "analysis_completed":
+        return 0.92
+    return 0.18
+
 @app.post("/api/reports/{code}/{period}/analyze")
 def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, Any]:
     _require_ai()
@@ -787,9 +806,12 @@ def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, An
     # 停止信号：POST /api/tasks/{id}/cancel 时置位，analyze 维度循环间感知后中断
     stop_event = threading.Event()
 
-    def _run() -> Dict[str, Any]:
+    def _run(report_progress: Callable[[float], None]) -> Dict[str, Any]:
+        report_progress(0.03)
         path = _ensure_pdf(meta)
+        report_progress(0.08)
         _auto_ingest_report(path)  # 分析前确保 RAG 已就绪（幂等，失败不影响分析）
+        report_progress(0.18)
         report = analyzer.analyze(
             path,
             dimensions=dims,
@@ -800,17 +822,23 @@ def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, An
                 "company": meta.company_name,
             },
             stop_event=stop_event,
+            progress_callback=lambda event: report_progress(
+                _analysis_progress_value(event)
+            ),
         )
+        report_progress(0.94)
         md_path = report.save(ANALYSIS_DIR)  # 落盘 reports/analysis/（与 CLI 互通）
+        report_progress(0.97)
         _auto_ingest_report(path)  # RAG 自动摄取，连带分析报告双源（失败不影响分析结果）
         data = report.to_json()
         data["markdown_path"] = md_path
+        report_progress(1.0)
         return data
 
-    task_id = task_manager.submit(_run, stop_event=stop_event)
+    task_id = task_manager.submit(_run, stop_event=stop_event, progressive=True)
     if task_id is None:
         raise HTTPException(409, "已有分析任务进行中，请稍候")
-    return {"task_id": task_id}
+    return {"task_id": task_id, "dimensions": dims}
 
 
 @app.post("/api/tasks/{task_id}/cancel")
@@ -905,7 +933,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     """流式全局问答（SSE）。事件：session / delta / done / error。
 
     - session: 会话 id（新建或沿用 body.session_id）
-    - delta:   模型内容增量 {text, reasoning}；首个 delta 前前端显示「思考中」
+    - delta:   模型回答内容增量 {text}；首个 delta 前前端显示「思考中」
     - done:    完成 {answer, citations, session_id}
     - error:   失败 {error}
     回答后自动把 {user, assistant} 写入会话历史（多轮上下文用最近 4 轮）。
@@ -982,7 +1010,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     text = evt.get("text", "")
                     if text:
                         answer_parts.append(text)
-                    yield _sse("delta", {"text": text, "reasoning": evt.get("reasoning", "")})
+                        yield _sse("delta", {"text": text})
                 elif evt["type"] == "tool_call":
                     # 前端展示「正在调用 MCP 工具 xxx」
                     yield _sse("tool_call", {
@@ -1138,17 +1166,21 @@ def rag_delete_index(report_id: str, source: str) -> Dict[str, Any]:
 # ── 静态页面 ───────────────────────────────────────────────
 
 def _render_index() -> HTMLResponse:
-    """渲染首页 HTML，并把 app.js 版本号替换为文件修改时间。
+    """渲染首页 HTML，并把前端脚本版本号替换为最新修改时间。
 
-    这样每次修改 app.js 后版本号自动变化，浏览器强制加载新版，
+    这样每次修改前端脚本后版本号自动变化，浏览器强制加载新版，
     无需手动清缓存，也无需手动维护版本号。
     """
     index_path = os.path.join(STATIC_DIR, "index.html")
-    app_js_path = os.path.join(STATIC_DIR, "app.js")
+    versioned_assets = (
+        os.path.join(STATIC_DIR, "app.js"),
+        os.path.join(STATIC_DIR, "analysis_workflow.js"),
+        os.path.join(STATIC_DIR, "style.css"),
+    )
     with open(index_path, encoding="utf-8") as f:
         html = f.read()
     try:
-        version = str(int(os.path.getmtime(app_js_path)))
+        version = str(int(max(os.path.getmtime(path) for path in versioned_assets)))
     except OSError:
         version = "0"
     # 首页禁用缓存（no-cache：每次重新验证），确保拿到最新版本号从而加载最新静态资源

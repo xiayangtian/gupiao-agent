@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from financial_report_fetcher import analyzer as analyzer_module
 from financial_report_fetcher.analyzer import AnalysisReport, ReportAnalyzer
 from financial_report_fetcher.facts import validate_metric_rows
 
@@ -26,6 +27,109 @@ def _stub_pdf_text(analyzer, monkeypatch, text="长江电力股份有限公司20
     Web 端文件路径由调用方传入、文件名任意，桩文本同样覆盖该场景。
     """
     monkeypatch.setattr(analyzer, "_extract_pdf_text", lambda *args, **kwargs: text)
+
+
+class TestAnalysisContentCleanup:
+    def test_json_keeps_requested_dimensions_even_when_empty_tabs_are_removed(self):
+        """重新分析应能恢复上次勾选项，不能因无数据 Tab 被清理而丢失选择。"""
+        report = AnalysisReport(
+            source_file="600900_年报_2025.pdf",
+            company="长江电力（600900）",
+            report_year=2025,
+        )
+        report.requested_dimensions = ["financial_summary", "cashflow"]
+
+        assert report.to_json().get("requested_dimensions") == [
+            "financial_summary", "cashflow"
+        ]
+
+    def test_table_drops_only_rows_whose_all_data_cells_are_missing(self):
+        """表格数据列全缺失才删行；任一数据列有效就保留整行。"""
+        content = """| 指标 | 数值 | 同比变化 |
+| --- | --- | --- |
+| 营业收入 | 数据未披露 | 未披露 |
+| 总资产 | 487,846.74亿元 | 数据未披露 |
+| 净利润 | 暂无数据 | +3.2% |
+"""
+        clean = getattr(analyzer_module, "clean_analysis_markdown", lambda value: value)
+
+        result = clean(content)
+
+        assert "营业收入" not in result
+        assert "| 总资产 | 487,846.74亿元 | 数据未披露 |" in result
+        assert "| 净利润 | 暂无数据 | +3.2% |" in result
+
+    def test_payload_hides_missing_only_dimension_but_keeps_errors_and_real_content(self):
+        """纯缺失维度不展示 Tab；技术错误和含有效事实的维度仍保留。"""
+        payload = {
+            "dimensions": [
+                {"id": "empty", "name": "空维度", "content": "- 数据未披露", "error": None},
+                {"id": "failed", "name": "失败维度", "content": "", "error": "模型超时"},
+                {"id": "valid", "name": "有效维度", "content": "- 营业收入 100 亿元", "error": None},
+            ]
+        }
+        clean = getattr(analyzer_module, "clean_analysis_payload", lambda value: value)
+
+        result = clean(payload)
+
+        assert [item["id"] for item in result["dimensions"]] == ["failed", "valid"]
+        assert result["dimensions"][0]["error"] == "模型超时"
+
+    def test_narrative_drops_missing_only_items_but_keeps_lines_with_real_values(self):
+        """叙述内容只删无披露项，含有效数字的同一行仍应保留。"""
+        content = """### 研发与创新
+- 研发投入金额未披露
+- 专利数量 70 项，研发费用率未披露
+### 估值
+- 市盈率暂无数据
+"""
+        clean = getattr(analyzer_module, "clean_analysis_markdown", lambda value: value)
+
+        result = clean(content)
+
+        assert "研发投入金额" not in result
+        assert "专利数量 70 项" in result
+        assert "市盈率" not in result
+
+    def test_narrative_keeps_qualitative_conclusion_and_drops_year_only_missing_note(self):
+        """无数字的有效定性结论不能误删；年份本身不能让纯缺失项被保留。"""
+        content = """- 毛利率未披露，但盈利能力显著改善
+- 截至 2025 年研发投入未披露
+- 公司未提供分部数据，无法评估
+"""
+        result = analyzer_module.clean_analysis_markdown(content)
+
+        assert "盈利能力显著改善" in result
+        assert "2025 年研发投入" not in result
+        assert "分部数据" not in result
+
+    def test_tables_without_outer_pipes_clean_rows_and_support_escaped_pipes(self):
+        """标准 Markdown 可省略外侧竖线；转义竖线不能被误当作分列符。"""
+        content = """指标 | 数值 | 备注
+--- | :---: | ---:
+营业收入 | 未披露 | 暂无数据
+经营判断 | 盈利能力改善 | 未披露
+研发方向 | A \\| B | 未披露
+"""
+        result = analyzer_module.clean_analysis_markdown(content)
+
+        assert "营业收入" not in result
+        assert "经营判断 | 盈利能力改善 | 未披露" in result
+        assert "研发方向 | A \\| B | 未披露" in result
+
+    def test_payload_hides_all_missing_table_without_outer_pipes(self):
+        payload = {
+            "requested_dimensions": "invalid-old-schema",
+            "dimensions": [{
+                "id": "summary", "name": "摘要", "error": None,
+                "content": "指标 | 数值\n--- | ---\n营业收入 | 未披露",
+            }],
+        }
+
+        result = analyzer_module.clean_analysis_payload(payload)
+
+        assert result["dimensions"] == []
+        assert result["requested_dimensions"] == []
 
 
 class TestAnalyzeWithMeta:
@@ -563,6 +667,56 @@ class TestAnalysisCancellation:
             )
         # 只执行了第一个维度；指标抽取也被跳过
         assert calls["n"] == 1
+
+
+class TestAnalysisProgress:
+    def test_analyze_reports_pdf_dimensions_and_metrics_stages(self, monkeypatch):
+        """分析器应按真实执行边界报告阶段，供任务进度映射使用。"""
+        client = _mock_client()
+        analyzer = ReportAnalyzer(client)
+        _stub_pdf_text(analyzer, monkeypatch)
+        events = []
+
+        analyzer.analyze(
+            "whatever.pdf",
+            dimensions=["financial_summary", "risk_warning"],
+            meta={"ticker": "600900", "year": 2025, "company": "长江电力"},
+            progress_callback=events.append,
+        )
+
+        assert events == [
+            {"stage": "extracting_pdf", "completed": 0, "total": 2},
+            {
+                "stage": "dimension_started",
+                "completed": 0,
+                "total": 2,
+                "dimension": "financial_summary",
+                "name": "财务摘要",
+            },
+            {
+                "stage": "dimension_completed",
+                "completed": 1,
+                "total": 2,
+                "dimension": "financial_summary",
+                "name": "财务摘要",
+            },
+            {
+                "stage": "dimension_started",
+                "completed": 1,
+                "total": 2,
+                "dimension": "risk_warning",
+                "name": "风险识别",
+            },
+            {
+                "stage": "dimension_completed",
+                "completed": 2,
+                "total": 2,
+                "dimension": "risk_warning",
+                "name": "风险识别",
+            },
+            {"stage": "extracting_metrics", "completed": 2, "total": 2},
+            {"stage": "analysis_completed", "completed": 2, "total": 2},
+        ]
 
 
 class TestEmptyDimensionContent:

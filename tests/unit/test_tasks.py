@@ -77,6 +77,29 @@ def test_normal_task_unaffected_by_cancel_api(tmp_path):
     tm.shutdown()
 
 
+def test_progressive_task_persists_intermediate_progress(tmp_path):
+    """渐进任务应让轮询端在任务完成前读到最新进度。"""
+    tm = TaskManager(db_path=_db_path(tmp_path))
+    reported = threading.Event()
+    release = threading.Event()
+
+    def fn(report_progress):
+        report_progress(0.42)
+        reported.set()
+        release.wait(timeout=5.0)
+        return "ok"
+
+    task_id = tm.submit(fn, progressive=True)
+    assert reported.wait(timeout=3.0)
+    task = tm.get(task_id)
+    assert task["status"] == "running"
+    assert task["progress"] == pytest.approx(0.42)
+
+    release.set()
+    assert _wait_status(tm, task_id, ("done",))["result"] == "ok"
+    tm.shutdown()
+
+
 def test_task_failure_keeps_failed_status(tmp_path):
     """fn 抛普通异常仍标记 failed（不影响既有行为）"""
     tm = TaskManager(db_path=_db_path(tmp_path))

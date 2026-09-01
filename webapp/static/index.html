@@ -140,7 +140,7 @@
         <iframe id="pdf-frame" class="pdf-frame" src="about:blank" title="财报预览"></iframe>
       </section>
 
-      <!-- 右栏：AI 分析 + 问答 -->
+      <!-- 右栏：AI 分析 + 智能问答入口 -->
       <aside class="panel analysis-panel">
         <div class="panel-head">
           <h2>AI 分析</h2>
@@ -160,11 +160,8 @@
 
           <div class="qa-box">
             <h3>自由问答</h3>
-            <div id="qa-history" class="qa-history"></div>
-            <div class="qa-input-row">
-              <input id="qa-input" type="text" placeholder="针对当前财报提问…（先选中左侧财报）" disabled />
-              <button id="qa-btn" class="btn" disabled>发送</button>
-            </div>
+            <button id="analysis-qa-goto-btn" class="btn primary full-btn" disabled>💬 去智能问答提问（聚焦本报告）</button>
+            <p class="hint" style="font-size:12px;margin-top:6px">跳转到智能问答并开启新会话，检索将优先当前报告内容</p>
           </div>
         </div>
       </aside>
@@ -217,6 +214,28 @@
       </section>
     </div>
   </section>
+
+  <dialog id="history-dim-dialog" class="analysis-dialog" aria-labelledby="history-dim-title"
+          aria-describedby="history-dim-report">
+    <div class="analysis-dialog-head">
+      <div>
+        <h2 id="history-dim-title">选择分析维度</h2>
+        <p id="history-dim-report" class="hint"></p>
+      </div>
+      <button id="history-dim-cancel" type="button" class="dialog-close" aria-label="关闭">×</button>
+    </div>
+    <div id="history-dims" class="dim-checkboxes analysis-dialog-dims" role="group"
+         aria-labelledby="history-dim-title"></div>
+    <div class="dim-toolbar analysis-dialog-toolbar">
+      <button id="history-dims-select-all" type="button" class="btn dim-tool-btn">全选</button>
+      <button id="history-dims-clear" type="button" class="btn dim-tool-btn">清空</button>
+      <span id="history-dims-count" class="dim-count"></span>
+    </div>
+    <div class="analysis-dialog-actions">
+      <button id="history-dim-cancel-bottom" type="button" class="btn">取消</button>
+      <button id="history-dim-confirm" type="button" class="btn primary">开始分析</button>
+    </div>
+  </dialog>
 
   <!-- ═══════════ RAG 知识库页 ═══════════ -->
   <section id="page-rag" class="page hidden">
@@ -275,6 +294,7 @@
   </script>
   <script src="/static/vendor/markdown-it.min.js" onerror="console.warn('markdown-it load failed, continuing...')"></script>
   <script src="/static/vendor/chart.umd.min.js" onerror="console.warn('Chart.js load failed, continuing...')"></script>
+  <script src="/static/analysis_workflow.js?v=__APP_VERSION__"></script>
   <!-- 版本号由服务端按 app.js 修改时间自动注入，改 JS 后无需手动维护 -->
   <script src="/static/app.js?v=__APP_VERSION__"></script>
 </body>

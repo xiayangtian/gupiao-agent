@@ -36,8 +36,9 @@ const STATE = {
   pendingSearch: null,      // 首页快捷搜索 → 分析页自动查询
   selected: null,
   selectedReport: null,
-  analyzingReport: null,    // { code, period } 正在分析的报告（按报告隔离，切换报告不影响）
-  analysisCache: {},        // "code:period" -> { status: pending|running|done|failed, data?, error?, dims? }
+  analysisCache: {},        // 两个页面共享："code:period" -> { status, taskId?, data?, error?, dims? }
+  analysisPolls: {},        // taskId -> true，防止恢复/切页时重复轮询
+  analysisRestoreStarted: false,
   analysisDimensions: [],   // GET /api/analysis/dimensions 返回的可勾选维度
   currentReports: [],
   downloading: {},          // "code:period" -> true（财报下载中，按钮转圈）
@@ -46,11 +47,9 @@ const STATE = {
   historyItems: [],
   historyCollapsed: {},      // code -> true（历史记录公司分组收起）
   historySelected: null,
-  historyAnalysis: null,
-  historyAnalyzingReport: null,  // 历史页正在分析的报告
-  historyAnalysisCache: {},      // "code:period" -> { status, data?, error? }
+  pendingHistoryReport: null, // 财报页跳转历史页后待自动选中的 {code, period}
+  historyAnalysisByReport: {}, // "code:period" -> 上次请求维度，用于重新分析默认勾选
   chatFocusReport: null,        // {code, period, company} 历史记录跳转：聚焦该报告（提升 RAG 权重）
-  historyPollId: null,
 
   // Chart instances
   charts: { revenue: null, ratio: null },
@@ -58,6 +57,8 @@ const STATE = {
   // Request dedup
   reqIds: { reports: 0, analyze: 0, qa: 0, suggestions: 0 },
 };
+
+var analysisTaskRegistry = window.AnalysisWorkflow.createAnalysisTaskRegistry(window.localStorage);
 
 const TYPE_LABEL = { annual: '年报', semi_annual: '半年报', quarterly: '季报' };
 
@@ -226,7 +227,7 @@ function selectStock(code, name) {
 var searchBtn = $('#search-btn');
 if (searchBtn) searchBtn.addEventListener('click', loadReports);
 
-function initAnalysisPage() {
+async function initAnalysisPage() {
   clearError();
   loadHealth();
   loadAnalysisDimensions();
@@ -236,7 +237,29 @@ function initAnalysisPage() {
     STATE.pendingSearch = null;
     var inp = $('#stock-input');
     if (inp) inp.value = val;
-    loadReports();
+    await loadReports();
+  } else if (!STATE.selected && !STATE.analysisRestoreStarted) {
+    var active = analysisTaskRegistry.active();
+    if (active.length) {
+      STATE.analysisRestoreStarted = true;
+      await restoreAnalysisSelection(active[active.length - 1]);
+    }
+  }
+}
+
+async function restoreAnalysisSelection(task) {
+  var inp = $('#stock-input');
+  if (inp) inp.value = (task.company ? task.company + ' ' : '') + task.code;
+  var year = parseInt(String(task.period).slice(0, 4), 10);
+  if (year) {
+    var startInput = $('#year-start'), endInput = $('#year-end');
+    if (startInput && parseInt(startInput.value, 10) > year) startInput.value = year;
+    if (endInput && parseInt(endInput.value, 10) < year) endInput.value = year;
+  }
+  await loadReports();
+  if (STATE.currentPage === 'analysis'
+      && STATE.currentReports.some(function (report) { return report.period === task.period; })) {
+    await selectReport(task.period);
   }
 }
 
@@ -286,6 +309,8 @@ function renderReports(list) {
   var selCode = STATE.selected ? STATE.selected.code : '';
   rl.innerHTML = sorted.map(function (r) {
     var dlKey = selCode + ':' + r.period;
+    var task = STATE.analysisCache[analysisKey(selCode, r.period)];
+    var taskRunning = task && (task.status === 'pending' || task.status === 'running');
     var markHtml = r.downloaded ? '✓'
       : (STATE.downloading && STATE.downloading[dlKey])
         ? '<span class="mark-spinner"></span>'
@@ -293,7 +318,8 @@ function renderReports(list) {
     return '<div class="report-item" data-period="' + r.period + '">'
       + '<span class="tag tag-' + r.type + '">' + (TYPE_LABEL[r.type] || escapeHtml(r.type)) + '</span>'
       + '<span class="title">' + escapeHtml(r.title || r.period) + '</span>'
-      + (r.analyzed ? '<span class="mark-analyzed">已分析</span>' : '')
+      + (taskRunning ? '<span class="mark-analyzed">分析中</span>'
+          : (r.analyzed ? '<span class="mark-analyzed">已分析</span>' : ''))
       + (r.analyzed
           ? '<button class="reanalyze-mini" data-period="' + r.period + '" title="重新触发 AI 分析">重新分析</button>'
           : '')
@@ -362,16 +388,22 @@ async function selectReport(period) {
 function finishDownload(code, period, key, pf) {
   STATE.downloading = STATE.downloading || {};
   STATE.downloading[key] = false;
-  (STATE.currentReports || []).forEach(function (r) {
-    if (r.period === period) r.downloaded = true;
-  });
-  renderReports(STATE.currentReports);
-  if (pf && !pf.src) {
-    hidePdfLoading();  // 下载完成：隐藏提示并加载预览
-    pf.src = '/api/reports/' + code + '/' + period + '.pdf';
-  } else {
-    hidePdfLoading();
+  var selected = STATE.selected && STATE.selectedReport ? {
+    code: STATE.selected.code,
+    period: STATE.selectedReport.period,
+  } : null;
+  var effect = window.AnalysisWorkflow.downloadCompletionEffect(selected, code, period);
+  if (effect.sameCompany) {
+    (STATE.currentReports || []).forEach(function (r) {
+      if (r.period === period) r.downloaded = true;
+    });
+    renderReports(STATE.currentReports);
   }
+  // 下载期间若用户已切换报告，不用旧任务覆盖当前预览。
+  var previewUrl = effect.sameReport
+    ? window.AnalysisWorkflow.downloadedPdfPreviewUrl(selected, code, period) : null;
+  if (pf && previewUrl && pf.getAttribute('src') !== previewUrl) pf.src = previewUrl;
+  if (effect.sameReport) hidePdfLoading();
 }
 
 // 下载财报：转圈 → 打钩 → 预览（幂等）
@@ -381,42 +413,72 @@ async function downloadAndPreview(code, period, key, pf) {
   STATE.downloading[key] = true;
   renderReports(STATE.currentReports);  // 立即显示转圈
   showPdfLoading('正在下载财报…');       // 预览区明显提示
+  var res;
   try {
-    var res = await fetch('/api/reports/' + code + '/' + period + '/download', { method: 'POST' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    finishDownload(code, period, key, pf);
+    res = await fetch('/api/reports/' + code + '/' + period + '/download', { method: 'POST' });
   } catch (err) {
-    // 后端无 download 端点（旧代码/未重启）：回退 iframe 自动下载预览
-    //（serve_pdf 会自动下载，iframe 加载完成即视为下载完成）
-    if (pf) {
-      pf.onload = function () {
-        pf.onload = null;
-        finishDownload(code, period, key, pf);
-      };
-      pf.src = '/api/reports/' + code + '/' + period + '.pdf';
-    } else {
+    failReportDownload(code, period, key, '网络请求失败');
+    return;
+  }
+  if (res.ok) {
+    finishDownload(code, period, key, pf);
+    return;
+  }
+
+  var selected = STATE.selected && STATE.selectedReport ? {
+    code: STATE.selected.code,
+    period: STATE.selectedReport.period,
+  } : null;
+  // 仅兼容明确缺少 POST 端点的旧服务；并再次确认原报告仍在选中。
+  var fallbackUrl = window.AnalysisWorkflow.pdfDownloadFallbackUrl(
+    selected, code, period, res.status
+  );
+  if (fallbackUrl && pf) {
+    pf.onload = function () {
+      pf.onload = null;
       finishDownload(code, period, key, pf);
-    }
+    };
+    pf.src = fallbackUrl;
+    return;
+  }
+  failReportDownload(code, period, key, 'HTTP ' + res.status);
+}
+
+function failReportDownload(code, period, key, message) {
+  STATE.downloading = STATE.downloading || {};
+  STATE.downloading[key] = false;
+  var selected = STATE.selected && STATE.selectedReport ? {
+    code: STATE.selected.code,
+    period: STATE.selectedReport.period,
+  } : null;
+  var effect = window.AnalysisWorkflow.downloadCompletionEffect(selected, code, period);
+  if (effect.sameCompany) renderReports(STATE.currentReports);
+  if (effect.sameReport) {
+    hidePdfLoading();
+    showError('财报下载失败：' + message);
   }
 }
 
 function updateAnalysisState() {
-  var isAnalyzing = STATE.analyzingReport
-    && STATE.selected && STATE.selected.code === STATE.analyzingReport.code
-    && STATE.selectedReport && STATE.selectedReport.period === STATE.analyzingReport.period;
+  var key = analysisKey(
+    STATE.selected && STATE.selected.code,
+    STATE.selectedReport && STATE.selectedReport.period
+  );
+  var task = STATE.analysisCache[key];
+  var isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
   var ready = STATE.aiConfigured && !!STATE.selectedReport && !isAnalyzing;
-  var ab = $('#analyze-btn'), qb = $('#qa-btn'), qi = $('#qa-input');
+  var ab = $('#analyze-btn'), gotoChat = $('#analysis-qa-goto-btn');
   var local = findLocalAnalysis(
     STATE.selected && STATE.selected.code,
     STATE.selectedReport && STATE.selectedReport.period
   );
   if (ab) {
     ab.disabled = !ready;
-    // 已分析过的报告支持一键重新触发分析
-    ab.textContent = local ? '重新分析' : '开始分析';
+    ab.setAttribute('aria-busy', isAnalyzing ? 'true' : 'false');
+    // 已分析过的报告支持一键重新触发分析；运行中明确反馈并防重复提交。
+    ab.textContent = isAnalyzing ? '分析中…' : (local ? '重新分析' : '开始分析');
   }
-  if (qb) qb.disabled = !ready;
-  if (qi) qi.disabled = !ready;
+  if (gotoChat) gotoChat.disabled = !STATE.selectedReport;
 
   var vlb = $('#view-local-btn');
   if (vlb) vlb.classList.toggle('hidden', !local);
@@ -440,12 +502,9 @@ if (viewLocalBtn) {
       STATE.selected && STATE.selected.code,
       STATE.selectedReport && STATE.selectedReport.period
     );
-    if (!local || !local.analysis_filename) return;
-    loadAndShowAnalysis(local.analysis_filename, function (content) {
-      renderAnalysisInDetail(
-        local.company, local.code, local.period, local.year,
-        content, '来源于: reports/analysis/' + local.analysis_filename
-      );
+    if (!local) return;
+    window.AnalysisWorkflow.goToHistoryReport(STATE, local, function (hash) {
+      window.location.hash = hash;
     });
   });
 }
@@ -464,7 +523,7 @@ async function submitAnalysis(code, period, dims) {
       body: JSON.stringify({ dimensions: dims }) });
   var data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
-  return data.task_id;
+  return data;
 }
 
 function showRetryBtn(container, btnId, label, onClick) {
@@ -490,11 +549,8 @@ function renderAnalysisPanel(key) {
   var st = STATE.analysisCache[key];
   if (!st) { ar.innerHTML = ''; return; }
   if (st.status === 'pending' || st.status === 'running') {
-    var dimCount = st.dims && st.dims.length ? st.dims.length : 5;
-    var hint = st.status === 'pending'
-      ? '<div class="hint">任务已提交（' + dimCount + ' 个维度），等待执行…</div>'
-      : '<div class="hint">分析进行中…（' + dimCount + ' 个维度，逐维度请求 AI，通常 1–' + Math.max(3, dimCount) + ' 分钟）</div>';
-    ar.innerHTML = hint + '<button id="stop-analyze-btn" class="btn danger full-btn">⏹ 停止分析</button>';
+    ar.innerHTML = renderAnalysisProgress(st)
+      + '<button id="stop-analyze-btn" class="btn danger full-btn">⏹ 停止分析</button>';
     var stopBtn = $('#stop-analyze-btn');
     if (stopBtn) {
       stopBtn.addEventListener('click', function () { stopAnalysis(key, st.taskId); });
@@ -527,7 +583,10 @@ var FALLBACK_DIMENSIONS = [
 
 async function loadAnalysisDimensions() {
   var dimsBox = $('#dims');
-  if (!dimsBox) return;
+  if (STATE.analysisDimensions && STATE.analysisDimensions.length) {
+    if (dimsBox) renderDimensionCheckboxes();
+    return STATE.analysisDimensions;
+  }
   var items = [];
   try {
     var res = await fetch('/api/analysis/dimensions');
@@ -537,16 +596,14 @@ async function loadAnalysisDimensions() {
     }
   } catch (_) { /* 网络异常走兜底清单 */ }
   STATE.analysisDimensions = items.length ? items : FALLBACK_DIMENSIONS;
-  renderDimensionCheckboxes();
+  if (dimsBox) renderDimensionCheckboxes();
+  return STATE.analysisDimensions;
 }
 
-function renderDimensionCheckboxes() {
-  var dimsBox = $('#dims');
-  if (!dimsBox) return;
-  var items = STATE.analysisDimensions;
-  if (!items || !items.length) return;
-  dimsBox.innerHTML = items.map(function (d) {
-    var checked = d.default ? ' checked' : '';
+function dimensionCheckboxesHtml(items, selectedIds) {
+  var selected = selectedIds || [];
+  return (items || []).map(function (d) {
+    var checked = selected.indexOf(String(d.id)) >= 0 ? ' checked' : '';
     var title = d.description
       ? ' title="' + escapeHtml(d.description) + '"'
       : '';
@@ -555,6 +612,15 @@ function renderDimensionCheckboxes() {
       + escapeHtml(d.name)
       + '</label>';
   }).join('');
+}
+
+function renderDimensionCheckboxes() {
+  var dimsBox = $('#dims');
+  if (!dimsBox) return;
+  var items = STATE.analysisDimensions;
+  if (!items || !items.length) return;
+  var defaults = window.AnalysisWorkflow.historyDimensionDefaults(items, []);
+  dimsBox.innerHTML = dimensionCheckboxesHtml(items, defaults);
   updateDimCount();
 }
 
@@ -600,47 +666,82 @@ async function startAnalysis() {
   var period = STATE.selectedReport && STATE.selectedReport.period;
   if (!code || !period) return;
   var key = analysisKey(code, period);
-  // 该报告已在分析中则不重复发起
-  if (STATE.analyzingReport && STATE.analyzingReport.code === code
-      && STATE.analyzingReport.period === period) return;
-  STATE.analyzingReport = { code: code, period: period };
   var dims = $$('#dims input:checked').map(function (i) { return i.value; });
-  STATE.analysisCache[key] = { status: 'pending', dims: dims };
-  renderAnalysisPanel(key);
-  updateAnalysisState();
+  await startReportAnalysis({
+    code: code,
+    period: period,
+    company: STATE.selected.name || code,
+  }, dims);
+}
+
+async function startReportAnalysis(report, dims) {
+  var code = report.code, period = report.period;
+  var key = analysisKey(code, period);
+  var existing = STATE.analysisCache[key];
+  if (existing && (existing.status === 'pending' || existing.status === 'running')) return;
+  STATE.analysisCache[key] = { status: 'pending', dims: dims, progress: 0 };
+  refreshAnalysisViews(code, period);
   try {
-    var taskId = await submitAnalysis(code, period, dims);
-    STATE.analysisCache[key] = { status: 'running', taskId: taskId };
-    if (isCurrentAnalysis(code, period)) renderAnalysisPanel(key);
-    pollTask(taskId, code, period);
+    var submitted = await submitAnalysis(code, period, dims);
+    var taskId = submitted.task_id;
+    var acceptedDims = submitted.dimensions || dims;
+    var tracked = analysisTaskRegistry.track({
+      taskId: taskId,
+      code: code,
+      period: period,
+      company: report.company || code,
+      dims: acceptedDims,
+    });
+    STATE.analysisCache[key] = {
+      status: 'running', taskId: taskId, dims: acceptedDims,
+      company: tracked.company, progress: 0,
+    };
+    refreshAnalysisViews(code, period);
+    pollTask(tracked);
   } catch (err) {
-    STATE.analyzingReport = null;
     STATE.analysisCache[key] = { status: 'failed', error: err.message };
-    renderAnalysisPanel(key);
-    updateAnalysisState();
+    refreshAnalysisViews(code, period);
   }
 }
 
-async function pollTask(taskId, code, period) {
+async function pollTask(task) {
+  var taskId = task.taskId, code = task.code, period = task.period;
   var key = analysisKey(code, period);
+  if (STATE.analysisPolls[taskId]) return;
+  STATE.analysisPolls[taskId] = true;
   try {
     var res = await fetch('/api/tasks/' + taskId);
+    if (res.status >= 400 && res.status < 500) {
+      delete STATE.analysisPolls[taskId];
+      analysisTaskRegistry.remove(code, period);
+      STATE.analysisCache[key] = {
+        status: 'failed', error: '任务记录已失效，请重新提交分析',
+      };
+      refreshAnalysisViews(code, period);
+      return;
+    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     var t = await res.json();
   } catch (_) {
-    setTimeout(function () { pollTask(taskId, code, period); }, 2000);
+    delete STATE.analysisPolls[taskId];
+    setTimeout(function () { pollTask(task); }, 2000);
     return;
   }
   if (t.status === 'running' || t.status === 'pending') {
-    // 仅当用户仍停留在此报告时更新进度
-    if (isCurrentAnalysis(code, period)) renderAnalysisPanel(key);
-    setTimeout(function () { pollTask(taskId, code, period); }, 2000);
+    var previous = STATE.analysisCache[key] || {};
+    STATE.analysisCache[key] = {
+      status: t.status, taskId: taskId, dims: task.dims || [],
+      company: task.company || code, progress: t.progress,
+    };
+    if (previous.status !== t.status || previous.progress !== t.progress) {
+      refreshAnalysisViews(code, period);
+    }
+    delete STATE.analysisPolls[taskId];
+    setTimeout(function () { pollTask(task); }, 2000);
     return;
   }
-  // 终态：写入按报告隔离的缓存；切走再切回也能看到结果/失败
-  if (STATE.analyzingReport && STATE.analyzingReport.code === code
-      && STATE.analyzingReport.period === period) {
-    STATE.analyzingReport = null;
-  }
+  delete STATE.analysisPolls[taskId];
+  analysisTaskRegistry.remove(code, period);
   if (t.status === 'failed') {
     STATE.analysisCache[key] = { status: 'failed', error: t.error || '未知错误' };
   } else if (t.status === 'cancelled') {
@@ -648,12 +749,77 @@ async function pollTask(taskId, code, period) {
   } else {
     STATE.analysisCache[key] = { status: 'done', data: t.result || {} };
   }
-  if (isCurrentAnalysis(code, period)) {
-    renderAnalysisPanel(key);
-    updateAnalysisState();
-  }
-  // Refresh history items so the new analysis appears
   await loadHistoryItemsSilent();
+  var currentReports = STATE.selected && STATE.selected.code === code
+    ? STATE.currentReports : [];
+  var reconciled = window.AnalysisWorkflow.reconcileAnalysisTerminal({
+    code: code, period: period, status: t.status,
+    reports: currentReports,
+    historyItems: STATE.historyItems,
+    historySelected: STATE.historySelected,
+  });
+  if (STATE.selected && STATE.selected.code === code) {
+    STATE.currentReports = reconciled.reports;
+  }
+  STATE.historySelected = reconciled.historySelected;
+  refreshAnalysisViews(code, period);
+  renderHistoryList(STATE.historyFiltered || STATE.historyItems);
+}
+
+function restoreAnalysisTasks() {
+  analysisTaskRegistry.active().forEach(function (task) {
+    STATE.analysisCache[analysisKey(task.code, task.period)] = {
+      status: 'running', taskId: task.taskId, dims: task.dims || [],
+      company: task.company || task.code, progress: 0,
+    };
+    pollTask(task);
+  });
+}
+
+function refreshAnalysisViews(code, period) {
+  if (isCurrentAnalysis(code, period)) {
+    renderAnalysisPanel(analysisKey(code, period));
+    updateAnalysisState();
+    renderReports(STATE.currentReports);
+  }
+  if (STATE.historySelected && STATE.historySelected.code === code
+      && STATE.historySelected.period === period) {
+    renderHistoryAnalysisState(STATE.historySelected);
+  }
+  if (STATE.currentPage === 'history') {
+    renderHistoryList(STATE.historyFiltered || STATE.historyItems);
+  }
+}
+
+function analysisDimensionNameMap() {
+  var names = {};
+  FALLBACK_DIMENSIONS.concat(STATE.analysisDimensions || []).forEach(function (dim) {
+    if (dim && dim.id) names[dim.id] = dim.name || dim.id;
+  });
+  return names;
+}
+
+function renderAnalysisProgress(task) {
+  var model = window.AnalysisWorkflow.analysisProgressModel(
+    task || {}, analysisDimensionNameMap()
+  );
+  var steps = model.steps.map(function (step) {
+    return '<li class="analysis-step analysis-step-' + step.state + '">'
+      + '<span class="analysis-step-marker" aria-hidden="true"></span>'
+      + '<span>' + escapeHtml(step.label) + '</span></li>';
+  }).join('');
+  return '<div class="analysis-progress-card">'
+    + '<div class="analysis-progress-head">'
+    + '<span class="analysis-progress-current" aria-live="polite">'
+    + escapeHtml(model.current) + '</span>'
+    + '<span class="analysis-progress-percent">' + model.percent + '%</span></div>'
+    + '<div class="analysis-progress-track" role="progressbar" aria-label="财报分析进度"'
+    + ' aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + model.percent + '"'
+    + ' aria-valuetext="' + escapeHtml(model.current) + '，' + model.percent + '%">'
+    + '<span style="width:' + model.percent + '%"></span></div>'
+    + '<ol class="analysis-steps">' + steps + '</ol>'
+    + '<p class="hint analysis-progress-hint">分析逐维度执行，通常需要数分钟；可切换页面或刷新后继续查看。</p>'
+    + '</div>';
 }
 
 // ── 渲染分析结果 ──
@@ -747,31 +913,18 @@ function renderMarkdown(text) {
   return mdRenderer.render(String(text));
 }
 
-// ── 问答 ──
+// ── 问答入口：统一跳转智能问答并聚焦当前报告 ──
 
-var qaBtn = $('#qa-btn'), qaInput = $('#qa-input');
-if (qaBtn) qaBtn.addEventListener('click', function () { sendAnalysisQA(); });
-if (qaInput) qaInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') sendAnalysisQA(); });
-
-async function sendAnalysisQA() {
-  var inp = $('#qa-input');
-  var q = inp.value.trim();
-  if (!q || !STATE.selectedReport || !STATE.selected) return;
-  inp.value = '';
-  appendQa('#qa-history', 'user', q);
-  try {
-    var res = await fetch(
-      '/api/reports/' + STATE.selected.code + '/' + STATE.selectedReport.period + '/chat',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q }) });
-    var data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
-    appendQa('#qa-history', 'assistant', data.answer);
-    // RAG 命中时后端会返回 citations，渲染在答案下方
-    appendCitations('#qa-history', data.citations || []);
-  } catch (err) {
-    appendQa('#qa-history', 'assistant', '⚠️ ' + err.message);
-  }
+var analysisQaGotoBtn = $('#analysis-qa-goto-btn');
+if (analysisQaGotoBtn) {
+  analysisQaGotoBtn.addEventListener('click', function () {
+    if (!STATE.selected || !STATE.selectedReport) return;
+    goToReportChat({
+      code: STATE.selected.code,
+      period: STATE.selectedReport.period,
+      company: STATE.selected.name || STATE.selected.code,
+    });
+  });
 }
 
 function appendQa(sel, role, content) {
@@ -793,6 +946,7 @@ async function initHistoryPage() {
   if (list) list.innerHTML = '<p class="hint">正在读取本地数据…</p>';
   await loadHistoryItems();
   bindHistoryFilters();
+  await window.AnalysisWorkflow.openPendingHistoryReport(STATE, selectHistoryItem);
 }
 
 async function loadHistoryItems() {
@@ -836,14 +990,16 @@ function renderHistoryList(items) {
   function historyItemHtml(item) {
     var selected = STATE.historySelected && STATE.historySelected.code === item.code
       && STATE.historySelected.period === item.period;
+    var task = STATE.analysisCache[analysisKey(item.code, item.period)];
+    var taskRunning = task && (task.status === 'pending' || task.status === 'running');
     return '<div class="history-item' + (selected ? ' selected' : '') + '"'
       + ' data-code="' + escapeHtml(item.code) + '"'
       + ' data-period="' + escapeHtml(item.period) + '">'
       + '<span class="h-type h-type-' + (item.type || '年报') + '">' + (item.type || '年报') + '</span>'
       + '<span class="h-company" title="' + escapeHtml(item.company) + '">' + escapeHtml(item.company) + '</span>'
       + '<span class="h-year">' + (item.year || '—') + '</span>'
-      + '<span class="h-status ' + (item.has_analysis ? 'h-status-analyzed' : 'h-status-pending') + '">'
-      + (item.has_analysis ? '已分析' : '未分析') + '</span>'
+      + '<span class="h-status ' + ((item.has_analysis || taskRunning) ? 'h-status-analyzed' : 'h-status-pending') + '">'
+      + (taskRunning ? '分析中' : (item.has_analysis ? '已分析' : '未分析')) + '</span>'
       + '</div>';
   }
 
@@ -969,45 +1125,69 @@ async function selectHistoryItem(code, period) {
   if (title) title.textContent = item.company + ' · ' + (item.year || '') + (item.type || '');
   var badge = $('#history-detail-badge');
   if (badge) {
-    badge.textContent = item.has_analysis ? '已分析' : '未分析';
-    badge.className = 'badge ' + (item.has_analysis ? 'badge-purple' : 'badge-warn');
+    var selectedTask = STATE.analysisCache[analysisKey(item.code, item.period)];
+    var badgeModel = window.AnalysisWorkflow.analysisTerminalBadge(
+      selectedTask && selectedTask.status, item.has_analysis
+    );
+    badge.textContent = badgeModel.text;
+    badge.className = badgeModel.className;
   }
 
   var detail = $('#history-detail');
   if (!detail) return;
 
-  // 分析状态按报告隔离：切回分析中/已完成的报告时展示对应状态
-  var cacheKey = analysisKey(code, period);
-  var cached = STATE.historyAnalysisCache[cacheKey];
+  // 两个页面读取同一份任务状态；切页后仍展示进行中/终态。
+  if (renderHistoryAnalysisState(item)) return;
+
+  if (item.has_analysis && item.analysis_filename) {
+    await loadAndShowAnalysis(item.analysis_filename, function (content) {
+      if (!window.AnalysisWorkflow.historySelectionIsCurrent(STATE, item)) return;
+      renderAnalysisInDetail(
+        item.company, item.code, item.period, item.year,
+        content, '来源：reports/analysis/' + item.analysis_filename
+      );
+    }, function () {
+      return window.AnalysisWorkflow.historySelectionIsCurrent(STATE, item);
+    });
+  } else {
+    showHistoryNoAnalysis(item);
+  }
+}
+
+function renderHistoryAnalysisState(item) {
+  if (!item) return false;
+  var cached = STATE.analysisCache[analysisKey(item.code, item.period)];
+  var detail = $('#history-detail');
+  if (!cached || !detail) return false;
+  var badge = $('#history-detail-badge');
+  if (badge) {
+    var badgeModel = window.AnalysisWorkflow.analysisTerminalBadge(cached.status, item.has_analysis);
+    badge.textContent = badgeModel.text;
+    badge.className = badgeModel.className;
+  }
   if (cached && (cached.status === 'pending' || cached.status === 'running')) {
-    detail.innerHTML = '<p class="hint">分析进行中…（逐维度请求 AI，通常 1–3 分钟）</p>';
-    return;
+    detail.innerHTML = renderAnalysisProgress(cached);
+    return true;
   }
   if (cached && cached.status === 'failed') {
     detail.innerHTML = '<div class="error-card">分析失败：' + escapeHtml(cached.error || '未知错误') + '</div>';
     showRetryBtn(detail, 'history-retry-btn', '重试分析', function () {
-      startHistoryAnalysis({ code: code, period: period });
+      startHistoryAnalysis(item);
     });
-    return;
+    return true;
+  }
+  if (cached && cached.status === 'cancelled') {
+    detail.innerHTML = '<p class="hint">⏹ 分析已停止</p>';
+    return true;
   }
   if (cached && cached.status === 'done' && cached.data) {
     renderAnalysisInDetail(
       item.company, item.code, item.period, item.year,
       cached.data, '来源：reports/analysis/' + (item.analysis_filename || '')
     );
-    return;
+    return true;
   }
-
-  if (item.has_analysis && item.analysis_filename) {
-    await loadAndShowAnalysis(item.analysis_filename, function (content) {
-      renderAnalysisInDetail(
-        item.company, item.code, item.period, item.year,
-        content, '来源：reports/analysis/' + item.analysis_filename
-      );
-    });
-  } else {
-    showHistoryNoAnalysis(item);
-  }
+  return false;
 }
 
 function showHistoryNoAnalysis(item) {
@@ -1031,7 +1211,7 @@ function showHistoryNoAnalysis(item) {
   }
 }
 
-async function loadAndShowAnalysis(filename, callback) {
+async function loadAndShowAnalysis(filename, callback, isCurrent) {
   try {
     var res = await fetch('/api/history/' + encodeURIComponent(filename));
     if (res.ok) {
@@ -1039,17 +1219,30 @@ async function loadAndShowAnalysis(filename, callback) {
       callback(content);
     } else {
       var detail = $('#history-detail');
-      if (detail) detail.innerHTML = '<p class="hint">无法读取分析文件</p>';
+      if (detail && (!isCurrent || isCurrent())) {
+        detail.innerHTML = '<p class="hint">无法读取分析文件</p>';
+      }
     }
   } catch (_) {
     var detail2 = $('#history-detail');
-    if (detail2) detail2.innerHTML = '<p class="hint">读取分析文件失败</p>';
+    if (detail2 && (!isCurrent || isCurrent())) {
+      detail2.innerHTML = '<p class="hint">读取分析文件失败</p>';
+    }
   }
 }
 
 function renderAnalysisInDetail(company, code, period, year, content, source) {
   var detail = $('#history-detail');
   if (!detail) return;
+
+  var contentDims = Array.isArray(content.dimensions) ? content.dimensions : [];
+  var requestedDims = Array.isArray(content.requested_dimensions)
+    ? content.requested_dimensions : contentDims.map(function (dim) { return dim.id; });
+  STATE.historyAnalysisByReport[analysisKey(code, period)] = {
+    code: code,
+    period: period,
+    requestedDimensions: requestedDims.slice(),
+  };
 
   var html = '';
   // Source footer
@@ -1058,7 +1251,7 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
       + escapeHtml(source) + '</p>';
   }
   // Dimensions（Tab 切换，一次展示一个维度）
-  html += renderDimensionTabs(content.dimensions || []);
+  html += renderDimensionTabs(contentDims);
 
   // Meta info
   var meta = content.meta || {};
@@ -1085,12 +1278,18 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   var hQaGoto = $('#h-qa-goto-btn');
   if (hQaGoto) {
     hQaGoto.addEventListener('click', function () {
-      STATE.chatFocusReport = { code: code, period: period, company: company || '' };
-      // 聚焦跳转：自动开启新会话，避免聚焦检索混入当前会话上下文
-      newChatSession();
-      window.location.hash = '#/chat';
+      goToReportChat({ code: code, period: period, company: company || '' });
     });
   }
+}
+
+function goToReportChat(report) {
+  window.AnalysisWorkflow.goToReportChat(
+    STATE,
+    report,
+    function () { newChatSession(); },
+    function (hash) { window.location.hash = hash; }
+  );
 }
 
 // ── 历史页触发 AI 分析 ──
@@ -1103,94 +1302,99 @@ if (historyReanalyzeBtn) {
 }
 
 async function startHistoryAnalysis(item) {
-  var code = item.code, period = item.period;
-  var key = analysisKey(code, period);
-  // 该报告已在分析中则不重复发起
-  if (STATE.historyAnalyzingReport && STATE.historyAnalyzingReport.code === code
-      && STATE.historyAnalyzingReport.period === period) return;
-  STATE.historyAnalyzingReport = { code: code, period: period };
-  STATE.historyAnalysisCache[key] = { status: 'pending' };
+  await openHistoryDimensionPicker(item);
+}
 
-  var detail = $('#history-detail');
-  if (detail) detail.innerHTML = '<p class="hint">任务已提交，等待执行…</p>';
+async function openHistoryDimensionPicker(item) {
+  if (!item) return;
+  historyDimTrigger = document.activeElement;
+  var dimensions = await loadAnalysisDimensions();
+  if (!window.AnalysisWorkflow.historySelectionIsCurrent(STATE, item)) return;
+  var dialog = $('#history-dim-dialog');
+  var box = $('#history-dims');
+  if (!dialog || !box) return;
+  var previous = [];
+  var priorAnalysis = STATE.historyAnalysisByReport[analysisKey(item.code, item.period)];
+  if (priorAnalysis) {
+    previous = Array.isArray(priorAnalysis.requestedDimensions)
+      ? priorAnalysis.requestedDimensions : [];
+  }
+  var selected = window.AnalysisWorkflow.historyDimensionDefaults(dimensions, previous);
+  box.innerHTML = dimensionCheckboxesHtml(dimensions, selected);
+  dialog.dataset.code = item.code;
+  dialog.dataset.period = item.period;
+  var reportLabel = $('#history-dim-report');
+  if (reportLabel) {
+    reportLabel.textContent = (item.company || item.code) + ' · '
+      + (item.year || item.period || '') + (item.type || '');
+  }
+  updateHistoryDimCount();
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', '');
+  var firstChoice = box.querySelector('input');
+  if (firstChoice) firstChoice.focus();
+}
 
-  try {
-    var res = await fetch(
-      '/api/reports/' + code + '/' + period + '/analyze',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dimensions: ['financial_summary', 'risk_warning', 'business_highlights'] }) });
-    var data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
-    STATE.historyAnalysisCache[key] = { status: 'running' };
-    pollHistoryTask(data.task_id, item);
-  } catch (err) {
-    STATE.historyAnalyzingReport = null;
-    STATE.historyAnalysisCache[key] = { status: 'failed', error: err.message };
-    if (detail) {
-      detail.innerHTML = '<div class="error-card">' + escapeHtml(err.message) + '</div>';
-      showRetryBtn(detail, 'history-retry-btn', '重试分析', function () { startHistoryAnalysis(item); });
-    }
+function updateHistoryDimCount() {
+  var count = $$('#history-dims input:checked').length;
+  var countEl = $('#history-dims-count');
+  var confirm = $('#history-dim-confirm');
+  if (countEl) countEl.textContent = count ? '已选 ' + count + ' 个维度' : '请至少选择 1 个维度';
+  if (confirm) confirm.disabled = count === 0;
+}
+
+function closeHistoryDimensionPicker() {
+  var dialog = $('#history-dim-dialog');
+  if (!dialog) return;
+  if (typeof dialog.close === 'function') dialog.close();
+  else dialog.removeAttribute('open');
+  if (historyDimTrigger && typeof historyDimTrigger.focus === 'function') {
+    historyDimTrigger.focus();
   }
 }
 
-async function pollHistoryTask(taskId, item) {
-  var code = item.code, period = item.period;
-  var key = analysisKey(code, period);
-  var isSelected = function () {
-    return STATE.historySelected && STATE.historySelected.code === code
-      && STATE.historySelected.period === period;
-  };
-  try {
-    var res = await fetch('/api/tasks/' + taskId);
-    var t = await res.json();
-  } catch (_) {
-    STATE.historyPollId = setTimeout(function () { pollHistoryTask(taskId, item); }, 2000);
-    return;
-  }
-  if (t.status === 'running' || t.status === 'pending') {
-    // 仅当用户仍停留在此报告时更新详情
-    if (isSelected()) {
-      var detail = $('#history-detail');
-      if (detail) detail.innerHTML = '<p class="hint">分析进行中…（逐维度请求 AI，通常 1–3 分钟）</p>';
-    }
-    STATE.historyPollId = setTimeout(function () { pollHistoryTask(taskId, item); }, 2000);
-    return;
-  }
-  // 终态：写入按报告隔离的缓存
-  if (STATE.historyAnalyzingReport && STATE.historyAnalyzingReport.code === code
-      && STATE.historyAnalyzingReport.period === period) {
-    STATE.historyAnalyzingReport = null;
-  }
-  if (t.status === 'failed') {
-    STATE.historyAnalysisCache[key] = { status: 'failed', error: t.error || '未知错误' };
-    if (isSelected()) {
-      var detail2 = $('#history-detail');
-      if (detail2) {
-        detail2.innerHTML = '<div class="error-card">分析失败：' + escapeHtml(t.error || '未知错误') + '</div>';
-        showRetryBtn(detail2, 'history-retry-btn', '重试分析', function () { startHistoryAnalysis(item); });
-      }
-    }
-    return;
-  }
-  // Success: refresh history list and show result
-  await loadHistoryItemsSilent();
-  var updatedItem = null;
-  for (var i = 0; i < STATE.historyItems.length; i++) {
-    if (STATE.historyItems[i].code === code && STATE.historyItems[i].period === period) {
-      updatedItem = STATE.historyItems[i];
-      break;
-    }
-  }
-  STATE.historySelected = (updatedItem || item);
-  if (updatedItem && updatedItem.has_analysis && updatedItem.analysis_filename) {
-    await loadAndShowAnalysis(updatedItem.analysis_filename, function (content) {
-      renderAnalysisInDetail(
-        updatedItem.company, updatedItem.code, updatedItem.period, updatedItem.year,
-        content, '来源：reports/analysis/' + updatedItem.analysis_filename
-      );
+var historyDimTrigger = null;
+
+var historyDimsBox = $('#history-dims');
+if (historyDimsBox) {
+  historyDimsBox.addEventListener('change', updateHistoryDimCount);
+}
+
+['history-dim-cancel', 'history-dim-cancel-bottom'].forEach(function (id) {
+  var button = $('#' + id);
+  if (button) button.addEventListener('click', closeHistoryDimensionPicker);
+});
+
+var historyDimsSelectAll = $('#history-dims-select-all');
+if (historyDimsSelectAll) {
+  historyDimsSelectAll.addEventListener('click', function () {
+    $$('#history-dims input').forEach(function (input) { input.checked = true; });
+    updateHistoryDimCount();
+  });
+}
+
+var historyDimsClear = $('#history-dims-clear');
+if (historyDimsClear) {
+  historyDimsClear.addEventListener('click', function () {
+    $$('#history-dims input').forEach(function (input) { input.checked = false; });
+    updateHistoryDimCount();
+  });
+}
+
+var historyDimConfirm = $('#history-dim-confirm');
+if (historyDimConfirm) {
+  historyDimConfirm.addEventListener('click', async function () {
+    var dialog = $('#history-dim-dialog');
+    var item = STATE.historySelected;
+    if (!dialog || !item || item.code !== dialog.dataset.code
+        || item.period !== dialog.dataset.period) return;
+    var dimensions = $$('#history-dims input:checked').map(function (input) {
+      return input.value;
     });
-  }
-  renderHistoryList(STATE.historyItems);
+    if (!dimensions.length) return;
+    closeHistoryDimensionPicker();
+    await startReportAnalysis(item, dimensions);
+  });
 }
 
 // ── 历史页对话 ──
@@ -1855,13 +2059,11 @@ async function submitQuestion(q, key) {
     sendBtn.onclick = function () { stopChatStream(); };
   }
 
-  // 思考状态：模型首个内容前提示「正在处理中」；推理/工具调用均有可见中间态
+  // 思考状态：模型首个内容前提示「正在处理中」；工具调用展示可解释中间态。
   var st = { reader: null, stopped: false, answerText: '', hasContent: false,
              finishedNormally: false, draftsTaken: false, toolStepCount: 0 };
   chatStreams[key] = st;
   var thinkingEl = appendThinkingBubble('#chat-history');
-  var reasoningEl = null;   // 推理过程区块（模型思考中，灰色流式）
-  var reasoningText = '';
   var toolStepsEl = null;   // 工具调用步骤区块（⏳ 调用中 → ✅ 已获取）
   var assistantEl = null;
 
@@ -1901,44 +2103,14 @@ async function submitQuestion(q, key) {
         }
       } else if (parsed.event === 'delta') {
         var text = parsed.data.text || '';
-        var reasoning = parsed.data.reasoning || '';
-        if (reasoning && !text) {
-          // 模型思考阶段：流式展示推理进度，避免用户以为中断
-          st.hasThinking = true;
-          reasoningText += reasoning;
-          if (!isCurrentChatStream(key)) return;  // 已切走：后台累积
-          if (!reasoningEl) {
-            reasoningEl = document.createElement('div');
-            reasoningEl.className = 'chat-msg assistant reasoning';
-            reasoningEl.innerHTML = '<div class="chat-reasoning-head">🧠 模型思考中…</div>'
-              + '<div class="chat-reasoning-body"></div>';
-            // 中间态始终插在最终内容（assistantEl）之前，避免回答在上思考在下
-            if (assistantEl && assistantEl.parentNode) {
-              assistantEl.parentNode.insertBefore(reasoningEl, assistantEl);
-            } else if (thinkingEl && thinkingEl.parentNode) {
-              thinkingEl.parentNode.insertBefore(reasoningEl, thinkingEl.nextSibling);
-            } else {
-              $('#chat-history').appendChild(reasoningEl);
-            }
-          }
-          var rBody = reasoningEl.querySelector ? reasoningEl.querySelector('.chat-reasoning-body') : null;
-          if (rBody) {
-            rBody.textContent = reasoningText.length > 600
-              ? reasoningText.slice(-600) + ' …'
-              : reasoningText;
-          }
-          scrollChatToBottom();
-        }
         if (text) {
           st.hasContent = true;
           st.answerText += text;
           if (!isCurrentChatStream(key)) return;  // 已切到别的会话：后台累积
           if (!assistantEl) {
-            // 首个内容增量：移除思考气泡与推理块，切换为流式文本容器
+            // 首个内容增量：移除思考气泡，切换为流式文本容器。
             if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
             thinkingEl = null;
-            if (reasoningEl && reasoningEl.parentNode) reasoningEl.parentNode.removeChild(reasoningEl);
-            reasoningEl = null;
             assistantEl = document.createElement('div');
             assistantEl.className = 'chat-msg assistant streaming';
             assistantEl.textContent = '';
@@ -1958,8 +2130,6 @@ async function submitQuestion(q, key) {
             // 工具步骤同样保持在最终内容之前
             if (assistantEl && assistantEl.parentNode) {
               assistantEl.parentNode.insertBefore(toolStepsEl, assistantEl);
-            } else if (reasoningEl && reasoningEl.parentNode) {
-              reasoningEl.parentNode.insertBefore(toolStepsEl, reasoningEl.nextSibling);
             } else if (thinkingEl && thinkingEl.parentNode) {
               thinkingEl.parentNode.insertBefore(toolStepsEl, thinkingEl.nextSibling);
             } else {
@@ -2002,8 +2172,6 @@ async function submitQuestion(q, key) {
           if (assistantEl && assistantEl.parentNode) assistantEl.parentNode.removeChild(assistantEl);
           if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
           thinkingEl = null;
-          if (reasoningEl && reasoningEl.parentNode) reasoningEl.parentNode.removeChild(reasoningEl);
-          reasoningEl = null;
           appendChatMsg('#chat-history', 'assistant', st.answerText);
           appendCitations('#chat-history', parsed.data.citations || []);
           // MCP 工具徽章
@@ -2173,6 +2341,7 @@ function appendCitations(sel, citations) {
 // ═══════════════════════════════════════════════════════════════
 
 // 路由器必须立即初始化，不能等 loadHealth 异步返回
+restoreAnalysisTasks();
 initRouter();
 // 后台异步检查 AI 健康状态
 loadHealth();

@@ -25,7 +25,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass, field, asdict
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Callable
 
 from financial_report_fetcher.ai_client import AIClient
 from financial_report_fetcher.exceptions import AnalysisCancelledError
@@ -38,6 +38,169 @@ from financial_report_fetcher.facts import (
 from financial_report_fetcher.report_identity import build_report_id, parse_report_filename
 
 logger = logging.getLogger(__name__)
+
+
+_MISSING_SIGNAL_RE = re.compile(
+    r"数据未披露|未披露|未提供|数据缺失|暂无(?:相关)?数据|无相关数据|"
+    r"不适用|无法(?:判断|评估|计算|获取|分析)"
+)
+_TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
+
+
+def _table_cells(line: str) -> List[str]:
+    stripped = line.strip()
+    cells: List[str] = []
+    current: List[str] = []
+    for index, char in enumerate(stripped):
+        if char == "|" and (index == 0 or stripped[index - 1] != "\\"):
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    cells.append("".join(current).strip())
+    if len(cells) < 2:
+        return []
+    if cells and not cells[0]:
+        cells.pop(0)
+    if cells and not cells[-1]:
+        cells.pop()
+    return cells
+
+
+def _is_missing_cell(cell: str) -> bool:
+    value = re.sub(r"[*_`~]", "", cell).strip()
+    if not value:
+        return True
+    if value.lower() in {"-", "—", "--", "/", "n/a", "na", "null"}:
+        return True
+    return bool(re.fullmatch(
+        r"(?:数据|信息|内容|指标)?(?:未披露|未提供|缺失|暂无(?:相关)?数据|"
+        r"无相关数据|不适用|无法(?:判断|评估|计算|获取|分析))"
+        r"(?:[（(][^）)]*[）)])?[。；;]?",
+        value,
+    ))
+
+
+def _drop_empty_markdown_headings(lines: List[str]) -> List[str]:
+    result: List[str] = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^\s*(#{1,6})\s+", line)
+        if not match:
+            result.append(line)
+            continue
+        level = len(match.group(1))
+        has_content = False
+        for following in lines[index + 1:]:
+            next_heading = re.match(r"^\s*(#{1,6})\s+", following)
+            if next_heading and len(next_heading.group(1)) <= level:
+                break
+            stripped = following.strip()
+            if stripped and not next_heading and not re.fullmatch(r"[-*_]{3,}", stripped):
+                has_content = True
+                break
+        if has_content:
+            result.append(line)
+    return result
+
+
+def _is_missing_only_narrative(line: str) -> bool:
+    text = re.sub(r"^\s*(?:[-+*]|\d+[.)]|>)+\s*", "", line.strip())
+    text = re.sub(r"[*_`~]", "", text)
+    if not _MISSING_SIGNAL_RE.search(text):
+        return False
+    clauses = [part.strip(" ，,。；;：:") for part in re.split(r"[，,。；;]", text)]
+    substantive = [part for part in clauses if part and part not in {"但", "但是", "然而", "不过"}]
+    return bool(substantive) and all(_MISSING_SIGNAL_RE.search(part) for part in substantive)
+
+
+def clean_analysis_markdown(content: str) -> str:
+    """删除分析 Markdown 中纯缺失项，同时保留至少含一项有效值的表格行。"""
+    source_lines = str(content or "").splitlines()
+    table_cleaned: List[Tuple[str, bool]] = []
+    index = 0
+    while index < len(source_lines):
+        header = _table_cells(source_lines[index])
+        separator = (
+            _table_cells(source_lines[index + 1])
+            if index + 1 < len(source_lines) else []
+        )
+        if header and separator and len(header) == len(separator) and all(
+            _TABLE_SEPARATOR_CELL_RE.fullmatch(cell) for cell in separator
+        ):
+            row_index = index + 2
+            rows: List[str] = []
+            while row_index < len(source_lines) and _table_cells(source_lines[row_index]):
+                cells = _table_cells(source_lines[row_index])
+                data_cells = cells[1:] if len(cells) > 1 else cells
+                if data_cells and not all(_is_missing_cell(cell) for cell in data_cells):
+                    rows.append(source_lines[row_index])
+                row_index += 1
+            if rows:
+                table_cleaned.extend(
+                    (line, True)
+                    for line in [source_lines[index], source_lines[index + 1], *rows]
+                )
+            index = row_index
+            continue
+        table_cleaned.append((source_lines[index], False))
+        index += 1
+
+    narrative_cleaned: List[str] = []
+    for line, is_table_line in table_cleaned:
+        if not is_table_line and _is_missing_only_narrative(line):
+            continue
+        narrative_cleaned.append(line.rstrip())
+
+    narrative_cleaned = _drop_empty_markdown_headings(narrative_cleaned)
+    compact: List[str] = []
+    previous_blank = False
+    for line in narrative_cleaned:
+        blank = not line.strip()
+        if blank and previous_blank:
+            continue
+        compact.append(line)
+        previous_blank = blank
+    return "\n".join(compact).strip()
+
+
+def is_analysis_content_meaningful(content: str) -> bool:
+    """判断清理后的 Markdown 是否仍包含可供用户阅读的正文或数据。"""
+    for line in str(content or "").splitlines():
+        stripped = line.strip()
+        if not stripped or re.match(r"^#{1,6}\s+", stripped):
+            continue
+        if re.fullmatch(r"[-*_]{3,}", stripped):
+            continue
+        return True
+    return False
+
+
+def clean_analysis_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """精简历史 JSON 的维度内容；返回副本，不修改磁盘读取结果。"""
+    cleaned_payload = dict(payload)
+    cleaned_dimensions: List[Dict[str, Any]] = []
+    dimensions = payload.get("dimensions") or []
+    if not isinstance(dimensions, list):
+        dimensions = []
+    for dimension in dimensions:
+        if not isinstance(dimension, dict):
+            continue
+        cleaned_dimension = dict(dimension)
+        cleaned_content = clean_analysis_markdown(cleaned_dimension.get("content") or "")
+        cleaned_dimension["content"] = cleaned_content
+        if cleaned_dimension.get("error") or is_analysis_content_meaningful(cleaned_content):
+            cleaned_dimensions.append(cleaned_dimension)
+    cleaned_payload["dimensions"] = cleaned_dimensions
+    requested = payload.get("requested_dimensions")
+    if isinstance(requested, list):
+        cleaned_payload["requested_dimensions"] = [
+            str(item) for item in requested if isinstance(item, (str, int, float))
+        ]
+    else:
+        cleaned_payload["requested_dimensions"] = [
+            str(item.get("id")) for item in cleaned_dimensions if item.get("id")
+        ]
+    return cleaned_payload
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -423,6 +586,7 @@ class AnalysisReport:
 
     # 分析结果
     dimensions: List[DimensionResult] = field(default_factory=list)
+    requested_dimensions: List[str] = field(default_factory=list)
     metrics: Optional[List[Dict[str, Any]]] = None
     facts: List[FinancialFact] = field(default_factory=list)
     validation: Optional[ValidationSummary] = field(
@@ -501,6 +665,7 @@ class AnalysisReport:
                 }
                 for dim in self.dimensions
             ],
+            "requested_dimensions": list(self.requested_dimensions),
             "metrics": self.metrics,
             "facts": [fact.to_dict() for fact in self.facts],
             "validation": validation.to_dict(),
@@ -589,6 +754,7 @@ class ReportAnalyzer:
         max_chars: int = 15000,
         meta: Optional[Dict[str, Any]] = None,
         stop_event: Optional[threading.Event] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> AnalysisReport:
         """
         基于已下载的 PDF 文件进行全维度自动化分析。
@@ -605,6 +771,7 @@ class ReportAnalyzer:
                  原正则解析不完整）；缺省时维持原文件名解析行为。
             stop_event:  可选取消信号（Web 端「停止分析」按钮使用）。
                  维度循环间检查，置位时抛 AnalysisCancelledError 终止分析。
+            progress_callback: 可选阶段事件回调；仅报告步骤摘要，不包含模型推理内容。
 
         Return:
             AnalysisReport 对象，可用 .save() 直接导出到分析报告
@@ -614,7 +781,17 @@ class ReportAnalyzer:
 
         logger.info("开始分析 %s [维度=%s, model=%s]", pdf_path, dimensions, model or self.client.default_model)
 
+        total_dimensions = len(dimensions)
+
+        def emit_progress(stage: str, completed: int, **extra: Any) -> None:
+            if progress_callback is None:
+                return
+            event = {"stage": stage, "completed": completed, "total": total_dimensions}
+            event.update(extra)
+            progress_callback(event)
+
         # 第一步：提取 PDF 文本
+        emit_progress("extracting_pdf", 0)
         pdf_text = self._extract_pdf_text(pdf_path, max_chars=max_chars)
         if not pdf_text.strip():
             raise ValueError(f"PDF 文件为空或无法抽取文字：{pdf_path}")
@@ -643,12 +820,13 @@ class ReportAnalyzer:
             report_year=report_year,
             period=period,
             model=model or self.client.default_model,
+            requested_dimensions=list(dimensions),
         )
 
         # RAG 检索用的报告 ID（惰性推导，仅当注入 rag_analysis 且维度配置了 retrieval 时使用）
         rag_report_id: Optional[str] = None
 
-        for dim_id in dimensions:
+        for dim_index, dim_id in enumerate(dimensions):
             if stop_event is not None and stop_event.is_set():
                 raise AnalysisCancelledError("分析已由用户停止")
             dim_config = ANALYSIS_TEMPLATES.get(dim_id)
@@ -663,11 +841,18 @@ class ReportAnalyzer:
                 logger.info("  跳过自定义维度（无预设提示词）")
                 continue
 
+            emit_progress(
+                "dimension_started",
+                dim_index,
+                dimension=dim_id,
+                name=dim_config["name"],
+            )
+
             # 构造 system prompt
             system_prompt = (
                 "你是一位专业的金融分析师，擅长阅读和分析上市公司财务报告。\n"
                 "请根据用户提供的财报内容，基于事实回答问题。\n"
-                "如果内容不足以回答，请明确指出哪些数据缺失。\n"
+                "如果内容不足以回答，不要编造，也不要输出纯粹的未披露项目、空表格行或空章节。\n"
                 "注意：财报内容较长，请聚焦在关键财务数据和重要信息上。"
             )
 
@@ -700,7 +885,9 @@ class ReportAnalyzer:
                 f"{content_source}\n"
                 f"--- 财报内容结束 ---\n\n"
                 f"以下是需要你完成的分析任务：\n"
-                f"{dim_config['prompt']}"
+                f"{dim_config['prompt']}\n\n"
+                "精简要求：缺失数据直接省略；表格中某行所有数据列均缺失时删除该行，"
+                "只要仍有一项有效数据就保留整行；不要生成没有有效事实的章节。"
             )
 
             # 模型空返回防护：最多调用 2 次（首次返回空内容时自动重试一次，
@@ -770,8 +957,23 @@ class ReportAnalyzer:
                 # 记录实际使用的模型名
                 report.model = resp.get("model", report.model)
 
-            report.add_dimension(dim_result)
+            if not dim_result.error:
+                dim_result.content = clean_analysis_markdown(dim_result.content)
+            if dim_result.error or is_analysis_content_meaningful(dim_result.content):
+                report.add_dimension(dim_result)
+            else:
+                # 维度无有效数据时不生成空 Tab，但仍记录本次调用的 Token 消耗。
+                report.total_tokens += dim_result.tokens
+                logger.info("  省略无有效数据的维度：%s", dim_id)
 
+            emit_progress(
+                "dimension_completed",
+                dim_index + 1,
+                dimension=dim_id,
+                name=dim_config["name"],
+            )
+
+        emit_progress("extracting_metrics", total_dimensions)
         report.metrics, report.facts, report.validation, metrics_tokens = self._extract_metrics(
             pdf_text,
             model=report.model or model or self.client.default_model,
@@ -783,6 +985,8 @@ class ReportAnalyzer:
             "分析完成 [维度数=%d, total_tokens=%d]",
             len(report.dimensions), report.total_tokens,
         )
+
+        emit_progress("analysis_completed", total_dimensions)
 
         return report
 

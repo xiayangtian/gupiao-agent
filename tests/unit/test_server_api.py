@@ -232,12 +232,46 @@ class TestAnalyze:
         )
         assert r.status_code == 200
         task_id = r.json()["task_id"]
+        assert r.json()["dimensions"] == ["financial_summary"]
 
         task = self._poll_until_done(client, task_id)
         assert task["status"] == "done"
         result = task["result"]
         assert result["dimensions"][0]["name"] == "财务摘要"
         assert result["markdown_path"].endswith(".md")
+
+    def test_analyze_task_exposes_dimension_progress_while_running(self, client, env):
+        """分析尚未完成时，任务接口应返回当前维度对应的持久进度。"""
+        reported = threading.Event()
+        release = threading.Event()
+        report = env["fake_analyzer"].analyze.return_value
+
+        def progressive_analyze(*args, **kwargs):
+            kwargs["progress_callback"]({
+                "stage": "dimension_started",
+                "completed": 1,
+                "total": 2,
+                "dimension": "risk_warning",
+                "name": "风险识别",
+            })
+            reported.set()
+            release.wait(timeout=5.0)
+            return report
+
+        env["fake_analyzer"].analyze.side_effect = progressive_analyze
+        try:
+            response = client.post(
+                "/api/reports/600900/2025-12-31/analyze",
+                json={"dimensions": ["financial_summary", "risk_warning"]},
+            )
+            task_id = response.json()["task_id"]
+            assert reported.wait(timeout=3.0)
+
+            task = client.get(f"/api/tasks/{task_id}").json()
+            assert task["status"] == "running"
+            assert task["progress"] == pytest.approx(0.525)
+        finally:
+            release.set()
 
     def test_analyze_quarters_pass_exact_period_to_analysis(self, client, env):
         """Web 分析 Q1/Q3 时必须传递精确期次，供保存与 RAG 关联使用。"""
@@ -396,6 +430,33 @@ class TestHistoryApi:
         r = client.get(f"/api/history/{fname}")
         assert r.status_code == 200
         assert r.json()["dimensions"][0]["content"] == "测试内容"
+
+    def test_history_detail_cleans_missing_rows_and_hides_empty_dimensions(
+        self, client, tmp_path, monkeypatch
+    ):
+        """旧分析文件读取时也应精简无披露内容，无需迁移磁盘文件。"""
+        a_dir = tmp_path / "analysis"
+        a_dir.mkdir(parents=True)
+        fname = "长江电力_600900_2025_分析报告.json"
+        (a_dir / fname).write_text(json.dumps({
+            "meta": {"company": "长江电力（600900）", "period": "2025-12-31"},
+            "dimensions": [
+                {"id": "empty", "name": "空维度", "content": "数据未披露", "error": None},
+                {"id": "summary", "name": "财务摘要", "error": None,
+                 "content": "| 指标 | 数值 | 同比 |\n|---|---|---|\n"
+                            "| 营业收入 | 未披露 | 暂无数据 |\n"
+                            "| 总资产 | 100亿元 | 未披露 |"},
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(server, "ANALYSIS_DIR", str(a_dir))
+
+        response = client.get(f"/api/history/{fname}")
+
+        assert response.status_code == 200
+        dimensions = response.json()["dimensions"]
+        assert [item["id"] for item in dimensions] == ["summary"]
+        assert "营业收入" not in dimensions[0]["content"]
+        assert "总资产" in dimensions[0]["content"]
 
     def test_history_detail_404(self, client, tmp_path, monkeypatch):
         monkeypatch.setattr(server, "ANALYSIS_DIR", str(tmp_path))
@@ -944,6 +1005,28 @@ class TestChatSessionsApi:
             {"role": "assistant", "content": "营收增长"},
         ]
 
+    def test_chat_stream_never_exposes_model_reasoning(self, client, env, monkeypatch, tmp_path):
+        """SSE 只发送回答内容与可解释工具阶段，不发送模型私有推理。"""
+        from webapp.chat_store import ChatStore
+
+        monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "sessions.json")))
+
+        class FakeRagQA:
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+                yield {"type": "delta", "text": "", "reasoning": "这是不应暴露的私有推理"}
+                yield {"type": "delta", "text": "公开回答", "reasoning": "另一个私有片段"}
+                yield {"type": "done", "answer": "公开回答",
+                       "reasoning": "完整私有推理", "citations": [], "model": "m",
+                       "usage": {"total_tokens": 3}}
+
+        monkeypatch.setattr(server, "rag_qa", FakeRagQA())
+        response = client.post("/api/chat/stream", json={"question": "问题"})
+
+        assert response.status_code == 200
+        assert "公开回答" in response.text
+        assert "reasoning" not in response.text
+        assert "私有推理" not in response.text
+
     def test_chat_stream_empty_retrieval_default_answer(self, client, env, monkeypatch, tmp_path):
         from webapp.chat_store import ChatStore
 
@@ -1461,13 +1544,17 @@ class TestDownloadReport:
 
 class TestIndexCache:
     def test_index_no_cache_and_versioned_assets(self, client):
-        """首页禁用缓存，且 app.js / style.css 均带版本号（防止浏览器用旧资源）"""
+        """首页禁用缓存，且前端资源带版本号并按依赖顺序加载。"""
         r = client.get("/")
         assert r.status_code == 200
         assert r.headers.get("cache-control") == "no-cache"
         body = r.text
+        workflow_src = "/static/analysis_workflow.js?v="
+        app_src = "/static/app.js?v="
+        assert workflow_src in body
         assert "/static/app.js?v=" in body
         assert "/static/style.css?v=" in body
+        assert body.index(workflow_src) < body.index(app_src)
 
 
 class TestHealthStartedAt:
