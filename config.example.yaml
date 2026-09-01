@@ -18,6 +18,21 @@ ai_api_key: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # 必填：你的 API 密钥
 ai_base_url: "https://api.deepseek.com"             # 可选：OpenAI 兼容中转地址；留空使用代码内置默认值
 ai_model: "deepseek-v4-flash"                       # 可选：AI 模型名；留空使用代码内置默认模型
 
+# 证据化财报分析（可选；以下均为代码默认值）
+analysis:
+  detail_score_threshold: 75       # 正式详细主题的最低内部质量分
+  observation_score_threshold: 60  # 待验证观察的最低内部质量分
+  max_detailed_sections: 6         # 最多展示的详细主题数
+  max_quick_conclusions: 3         # 快速结论最多条数
+  ocr_enabled: true                # OCR 依赖可用时，按页面质量选择性启用
+  ocr_min_chars: 120               # 少于该字符数的页面进入 OCR 候选
+  numeric_relative_tolerance: 0.001
+  structured_providers: [tushare, akshare]
+  evidence_cache_dir: data/evidence_cache
+  quick_io_workers: 2
+  deep_workers: 2
+  ocr_workers: 1
+
 # RAG 知识库（可选，默认关闭）
 # 启用后：python3 -m financial_report_fetcher rag ingest --all 建立索引，
 # 通用入口 POST /api/chat 与单报告问答将基于检索回答。
