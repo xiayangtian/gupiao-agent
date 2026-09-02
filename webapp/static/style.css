@@ -1904,6 +1904,7 @@ input, select, button { font-family: inherit; font-size: inherit; }
 
 .chat-tool-step.running { color: #7c3aed; border-color: #c4b5fd; }
 .chat-tool-step.done { color: var(--text-secondary); }
+.chat-tool-step.stage { color: var(--text-muted); border-style: dashed; max-width: 100%; overflow-wrap: anywhere; }
 
 .chat-tool-step-icon { font-size: 13px; }
 
@@ -1928,6 +1929,26 @@ input, select, button { font-family: inherit; font-size: inherit; }
   color: #92400e;
   font-size: 12px;
 }
+
+.chat-web-sources {
+  align-self: flex-start;
+  max-width: 92%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid #2563eb;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chat-web-sources-head { color: var(--text-secondary); font-weight: 600; margin-bottom: 4px; }
+.chat-web-sources ul { margin: 0; padding-left: 18px; }
+.chat-web-sources li + li { margin-top: 5px; }
+.chat-web-sources a { overflow-wrap: anywhere; }
+.web-source-date { color: var(--text-muted); margin-left: 6px; }
+.web-source-preview { color: var(--text-muted); margin-top: 1px; overflow-wrap: anywhere; }
 
 @keyframes chatBlink {
   0%, 80%, 100% { opacity: 0.2; }

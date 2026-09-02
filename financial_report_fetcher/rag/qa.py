@@ -25,6 +25,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是一位专业的金融分析师，基于检索�
 2. 片段信息不足时明确回答"检索内容中未找到相关信息"，不得编造。
 3. 涉及数字时保持与片段一致，可补充说明数据来源（公司、年份、章节）。
 4. 回答使用简体中文，结构清晰简洁。
+5. 若提供工具，先判断现有证据能否可靠回答；仅在缺少必要的实时、外部或结构化信息时调用最少的工具。工具结果返回后重新核验，避免重复相同查询。财报数字以本地片段为准，网页内容仅作为补充并明确标示来源。
 
 检索片段：
 {context}"""
@@ -35,7 +36,8 @@ RETRIEVAL_FALLBACK_PROMPT = """你是一位专业的金融分析师。当前本�
 
 EMPTY_RETRIEVAL_TOOL_PROMPT = """你是一位专业的金融分析师。本地知识库没有检索到相关财报片段，
 但你可以调用提供的 MCP 工具查询实时行情、财务指标和公司基本面。优先使用合适的工具回答；
-没有工具数据支撑时明确说明无法核验，不得编造 PDF 引用、具体数字或出处。回答使用简体中文。"""
+也可用网页搜索补充公开信息。先判断是否需要补充信息；没有工具数据支撑时明确说明无法核验，
+不得编造 PDF 引用、具体数字或出处。回答使用简体中文。"""
 
 
 @dataclass
@@ -55,6 +57,7 @@ class RagQA:
         top_k: int = 8,
         tool_executor: Optional[Callable[[str, Dict[str, Any]], str]] = None,
         max_tool_rounds: int = 3,
+        max_tool_calls: int = 6,
         tool_result_max_chars: int = 2000,
         reranker: Optional[Reranker] = None,
         rerank_candidates: int = 30,
@@ -70,6 +73,7 @@ class RagQA:
         self.top_k = top_k
         self.tool_executor = tool_executor
         self.max_tool_rounds = max_tool_rounds
+        self.max_tool_calls = max(1, max_tool_calls)
         self.tool_result_max_chars = tool_result_max_chars
         self.reranker = reranker
         self.rerank_candidates = rerank_candidates
@@ -187,6 +191,27 @@ class RagQA:
         except json.JSONDecodeError:
             return {}
 
+    @staticmethod
+    def _web_sources(result: str) -> List[Dict[str, str]]:
+        """从网页搜索工具的受控 JSON 中提取可展示来源。"""
+        try:
+            data = json.loads(result)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, dict) or data.get("source") != "web_search":
+            return []
+        sources = []
+        for row in data.get("results") or []:
+            if not isinstance(row, dict) or not row.get("url"):
+                continue
+            sources.append({
+                "title": str(row.get("title") or row["url"]),
+                "url": str(row["url"]),
+                "content": str(row.get("content") or "")[:300],
+                "published_date": str(row.get("published_date") or ""),
+            })
+        return sources
+
     def answer_stream(
         self,
         question: str,
@@ -263,9 +288,14 @@ class RagQA:
 
         # 工具编排路径
         tools_used: List[str] = []
+        web_sources: List[Dict[str, str]] = []
+        seen_tool_calls = set()
+        total_tool_calls = 0
         round_no = 0
         while True:
             round_no += 1
+            yield {"type": "reasoning_stage", "stage": "assess", "round": round_no,
+                   "message": "正在判断现有证据是否足够…"}
             # 每轮都保留工具定义，允许模型在参数校验失败后修正并重试；达到
             # max_tool_rounds 后才进入下方无工具的最终总结调用。
             use_tools = tools
@@ -292,19 +322,35 @@ class RagQA:
                     for c in calls:
                         name = c["name"]
                         args = self._parse_args(c.get("arguments"))
-                        try:
-                            result = self.tool_executor(name, args)
-                            ok = not result.startswith((
-                                "工具调用失败", "MCP 服务暂不可用",
-                                "无法解析股票", "未获取到",
-                            ))
-                        except Exception as exc:
-                            result = f"工具调用失败：{exc}"
+                        identity = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True)}"
+                        yield {"type": "reasoning_stage", "stage": "retrieve", "round": round_no,
+                               "message": f"正在补充信息：调用 {name}…"}
+                        yield {"type": "tool_call", "name": name, "arguments": args}
+                        if identity in seen_tool_calls:
+                            result = "工具调用失败：检测到重复调用，已使用此前结果，请基于已有信息继续回答"
                             ok = False
+                        elif total_tool_calls >= self.max_tool_calls:
+                            result = "工具调用失败：已达到本次问答的工具调用上限，请基于已有信息回答"
+                            ok = False
+                        else:
+                            seen_tool_calls.add(identity)
+                            total_tool_calls += 1
+                            try:
+                                result = self.tool_executor(name, args)
+                                ok = not result.startswith((
+                                    "工具调用失败", "MCP 服务暂不可用",
+                                    "无法解析股票", "未获取到",
+                                ))
+                            except Exception as exc:
+                                result = f"工具调用失败：{exc}"
+                                ok = False
                         if ok:
                             tools_used.append(name)  # 仅成功执行的工具计入（避免假徽章）
-                        yield {"type": "tool_call", "name": name, "arguments": args}
+                            if name == "web_search":
+                                web_sources.extend(self._web_sources(result))
                         yield {"type": "tool_result", "name": name, "summary": result[:200], "ok": ok}
+                        yield {"type": "reasoning_stage", "stage": "review", "round": round_no,
+                               "message": "已获取补充信息，正在核验并决定是否还需查询…"}
                         messages.append({
                             "role": "tool",
                             "tool_call_id": c["id"],
@@ -312,6 +358,8 @@ class RagQA:
                         })
                 elif evt["type"] == "done":
                     answer_text = evt.get("answer") or ""
+                    yield {"type": "reasoning_stage", "stage": "answer", "round": round_no,
+                           "message": "正在基于已核验的信息组织回答…"}
                     yield {
                         "type": "done",
                         "answer": answer_text,
@@ -320,6 +368,7 @@ class RagQA:
                         "model": evt.get("model"),
                         "usage": evt.get("usage") or {},
                         "tools_used": tools_used,
+                        "web_sources": web_sources,
                         "retrieval_degraded": retrieval_degraded,
                     }
                     return
@@ -328,6 +377,8 @@ class RagQA:
             break
 
         # 达到工具轮数上限：最后用已有上下文生成最终答案（不带工具）
+        yield {"type": "reasoning_stage", "stage": "answer", "round": round_no,
+               "message": "正在基于已核验的信息组织回答…"}
         for evt in self.ai_client.chat_stream(messages=messages, system=system):
             if evt["type"] == "delta":
                 yield evt
@@ -344,6 +395,7 @@ class RagQA:
                     "model": evt.get("model"),
                     "usage": evt.get("usage") or {},
                     "tools_used": tools_used,
+                    "web_sources": web_sources,
                     "retrieval_degraded": retrieval_degraded,
                 }
                 return

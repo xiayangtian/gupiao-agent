@@ -1352,6 +1352,22 @@ class TestMcpChat:
         assert "event: done" in body
         assert store.list_sessions()[0]["message_count"] == 2
 
+    def test_chat_stream_passthrough_reasoning_and_web_sources(self, client, env, monkeypatch, tmp_path):
+        from webapp.chat_store import ChatStore
+
+        monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "sessions.json")))
+
+        class FakeRagQA:
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+                yield {"type": "reasoning_stage", "stage": "assess", "round": 1, "message": "正在判断"}
+                yield {"type": "done", "answer": "答案", "citations": [], "tools_used": ["web_search"],
+                       "web_sources": [{"title": "公告", "url": "https://example.com/a", "content": "摘要", "published_date": "2026-09-01"}]}
+
+        monkeypatch.setattr(server, "rag_qa", FakeRagQA())
+        r = client.post("/api/chat/stream", json={"question": "问什么？"})
+        assert "event: reasoning_stage" in r.text
+        assert "web_sources" in r.text
+
     def test_chat_stream_use_mcp_false_still_streams(self, client, env, monkeypatch, tmp_path):
         """use_mcp=false 时仍正常流式（工具开关不改变响应结构）"""
         from webapp.chat_store import ChatStore
@@ -1459,8 +1475,8 @@ class TestMcpToolExecutor:
 
 
 class TestMcpToolDefs:
-    def test_mcp_tool_defs_none_when_list_fails(self, monkeypatch):
-        """MCP 清单获取失败时不注入工具（避免模型调用必失败的工具）"""
+    def test_mcp_tool_defs_fallback_when_list_fails(self, monkeypatch):
+        """MCP 清单获取失败时仍注入内置工具定义。"""
         class FakeMCP:
             def list_tools(self, timeout=None):
                 raise RuntimeError("MCP 不可用")
@@ -1468,7 +1484,21 @@ class TestMcpToolDefs:
         monkeypatch.setattr(server, "stock_mcp", FakeMCP())
         monkeypatch.setattr(server, "_mcp_tool_defs_cache", None)
         monkeypatch.setattr(server, "_mcp_tool_defs_ready", False)
-        assert server._mcp_tool_defs() is None
+        defs = server._mcp_tool_defs()
+        assert defs and any(item["function"]["name"] == "get_financial_metrics" for item in defs)
+
+    def test_chat_tool_defs_adds_web_search_when_key_configured(self, monkeypatch):
+        class FakeSearch:
+            available = True
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(server, "TavilyWebSearch", FakeSearch)
+        monkeypatch.setattr(server, "_mcp_tool_defs", lambda: [])
+        cfg = type("C", (), {"mcp_tools": False, "web_search": True, "web_search_timeout": 15})()
+        defs = server._build_chat_tool_defs(cfg)
+        assert [item["function"]["name"] for item in defs] == ["web_search"]
 
     def test_mcp_tool_defs_built_when_available(self, monkeypatch):
         """MCP 可用时构建工具定义并缓存"""

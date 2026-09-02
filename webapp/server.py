@@ -44,12 +44,13 @@ from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportTy
 from financial_report_fetcher.report_identity import build_report_id
 from financial_report_fetcher.market import stock_mcp, tencent_quote
 from financial_report_fetcher.rag.analysis import RagAnalysis
-from financial_report_fetcher.rag.mcp_tools import build_tool_defs
+from financial_report_fetcher.rag.mcp_tools import WEB_SEARCH_TOOL, build_tool_defs, to_openai_tools
 from financial_report_fetcher.rag.config import RagConfig
 from financial_report_fetcher.rag.embedding import LocalEmbedder
 from financial_report_fetcher.rag.ingest import IngestionService
 from financial_report_fetcher.rag.qa import RagQA
 from financial_report_fetcher.rag.store import RagStore
+from financial_report_fetcher.rag.web_search import TavilyWebSearch
 
 from .autocomplete import StockIndex
 from .chat_store import ChatStore
@@ -125,7 +126,7 @@ _mcp_diagnose_cache: Dict[str, Any] = {}
 
 
 def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
-    """返回注入模型的工具定义；MCP 不可用时返回 None（不注入，避免模型调用必失败的工具）"""
+    """返回 MCP 工具定义；清单失败时使用内置定义，避免功能整体静默降级。"""
     global _mcp_tool_defs_cache, _mcp_tool_defs_ready, _mcp_tool_input_schemas
     if not mcp_breaker.allow():
         return None  # 熔断冷却中：不注入 MCP 工具（纯 RAG，避免持续失败）
@@ -141,12 +142,8 @@ def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
     try:
         listed = stock_mcp.list_tools(timeout=timeout)
     except Exception:
-        logger.warning("MCP 工具清单获取失败，问答将不启用 MCP 工具")
-        _mcp_tool_defs_cache = None
-        return None
-    if not listed:
-        _mcp_tool_defs_cache = None
-        return None
+        logger.warning("MCP 工具清单获取失败，将使用内置工具定义")
+        listed = []
     _mcp_tool_input_schemas = {
         str(tool.get("name")): tool.get("input_schema")
         for tool in listed
@@ -158,6 +155,15 @@ def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
         max_tools=12,
     ) or None
     return _mcp_tool_defs_cache
+
+
+def _build_chat_tool_defs(cfg: Any) -> Optional[List[Dict[str, Any]]]:
+    """组合 MCP 与内部网页搜索工具，网页搜索不受 MCP 熔断影响。"""
+    definitions = list(_mcp_tool_defs() or []) if getattr(cfg, "mcp_tools", False) else []
+    web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
+    if getattr(cfg, "web_search", True) and web.available:
+        definitions.extend(to_openai_tools([WEB_SEARCH_TOOL]))
+    return definitions or None
 
 
 # 股票名称 → 代码 词典缓存（来源：MCP get_stock_a_code_name，加载一次复用）
@@ -293,6 +299,26 @@ def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]
     return _executor
 
 
+def _build_chat_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]], str]]:
+    """统一调度 MCP 与网页搜索，任一可用即启用工具编排。"""
+    mcp_executor = _build_mcp_tool_executor(cfg)
+    web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
+    web_enabled = getattr(cfg, "web_search", True) and web.available
+    if mcp_executor is None and not web_enabled:
+        return None
+
+    def _executor(name: str, arguments: Dict[str, Any]) -> str:
+        if name == "web_search":
+            if not web_enabled:
+                return "工具调用失败：网页搜索未配置 TAVILY_API_KEY"
+            return web.search(**dict(arguments or {}))
+        if mcp_executor is None:
+            return "工具调用失败：MCP 工具未启用"
+        return mcp_executor(name, arguments)
+
+    return _executor
+
+
 def _build_reranker(cfg) -> Optional[Any]:
     """cfg.rerank 开启时构造 CrossEncoderReranker；失败仅警告并回退 None（零回归）。
 
@@ -338,8 +364,9 @@ def _init_rag() -> None:
             rag_store,
             ai_client,
             top_k=cfg.top_k,
-            tool_executor=_build_mcp_tool_executor(cfg),
+            tool_executor=_build_chat_tool_executor(cfg),
             max_tool_rounds=getattr(cfg, "mcp_max_tool_rounds", 3),
+            max_tool_calls=getattr(cfg, "mcp_max_tool_calls", 6),
             reranker=reranker,
             rerank_candidates=getattr(cfg, "rerank_candidates", 30),
             rerank_score_threshold=getattr(cfg, "rerank_score_threshold", 0.5),
@@ -1081,8 +1108,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
     history = session.get("messages", [])[-8:]  # 传给模型的最近 4 轮
-    # MCP 工具：默认开启；use_mcp=false 或工具定义不可用时不注入（纯 RAG）
-    tools = _mcp_tool_defs() if body.use_mcp else None
+    # 外部工具：默认开启；use_mcp=false 时保持纯 RAG。
+    tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
     # 聚焦报告：解析为 report_id 后提升其检索权重（历史记录跳转场景）
     priority_report_id = None
     fr = body.focus_report or {}
@@ -1150,6 +1177,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         "name": evt.get("name", ""),
                         "arguments": evt.get("arguments", {}),
                     })
+                elif evt["type"] == "reasoning_stage":
+                    yield _sse("reasoning_stage", {
+                        "stage": evt.get("stage", ""), "round": evt.get("round", 0),
+                        "message": evt.get("message", ""),
+                    })
                 elif evt["type"] == "tool_result":
                     yield _sse("tool_result", {
                         "name": evt.get("name", ""),
@@ -1179,6 +1211,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         "citations": evt.get("citations", []),
                         "session_id": sid,
                         "tools_used": evt.get("tools_used", []),
+                        "web_sources": evt.get("web_sources", []),
                         "retrieval_degraded": evt.get("retrieval_degraded", False),
                     })
                     return

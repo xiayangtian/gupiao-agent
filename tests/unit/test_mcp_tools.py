@@ -4,6 +4,7 @@ import pytest
 
 from financial_report_fetcher.rag.mcp_tools import (
     FALLBACK_MCP_TOOLS,
+    WEB_SEARCH_TOOL,
     build_tool_defs,
     to_openai_tools,
 )
@@ -121,3 +122,11 @@ def test_fallback_tools_have_parameters():
         params = fn["parameters"]["properties"]
         assert "symbol" in params
         assert "output_format" in params
+
+
+def test_web_search_tool_has_bounded_query_schema():
+    converted = to_openai_tools([WEB_SEARCH_TOOL])
+    fn = converted[0]["function"]
+    assert fn["name"] == "web_search"
+    assert fn["parameters"]["required"] == ["query"]
+    assert fn["parameters"]["properties"]["max_results"]["maximum"] == 5

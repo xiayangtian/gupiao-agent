@@ -47,7 +47,10 @@ class RagConfig:
     mcp_tools: bool = True
     mcp_tool_timeout: int = 30          # 单次工具调用超时（秒）
     mcp_max_tool_rounds: int = 3        # 最大工具调用轮数
+    mcp_max_tool_calls: int = 6         # 单次问答总工具调用上限
     mcp_tool_whitelist: List[str] = field(default_factory=list)  # 空=自动常用清单
+    web_search: bool = True             # 配置 TAVILY_API_KEY 时允许网页搜索
+    web_search_timeout: int = 15        # 单次网页搜索超时（秒）
     # 自适应 rerank：仅检索质量差/不确定时用 cross-encoder 精排（需安装 sentence-transformers）
     rerank: bool = False
     rerank_model: str = "BAAI/bge-reranker-base"
@@ -74,8 +77,11 @@ class RagConfig:
             mcp_tools=_to_bool(raw.get("mcp_tools"), True),
             mcp_tool_timeout=int(raw.get("mcp_tool_timeout", 30)),
             mcp_max_tool_rounds=int(raw.get("mcp_max_tool_rounds", 3)),
+            mcp_max_tool_calls=int(raw.get("mcp_max_tool_calls", 6)),
             mcp_tool_whitelist=[str(w) for w in raw.get("mcp_tool_whitelist", [])]
             if isinstance(raw.get("mcp_tool_whitelist"), list) else [],
+            web_search=_to_bool(raw.get("web_search"), True),
+            web_search_timeout=int(raw.get("web_search_timeout", 15)),
             rerank=_to_bool(raw.get("rerank"), False),
             rerank_model=str(raw.get("rerank_model", "BAAI/bge-reranker-base")),
             rerank_candidates=int(raw.get("rerank_candidates", 30)),

@@ -61,6 +61,24 @@ FALLBACK_MCP_TOOLS: List[Dict[str, Any]] = [
     },
 ]
 
+# 内部工具，不经过 MCP。仅在运行环境配置 TAVILY_API_KEY 时注入模型。
+WEB_SEARCH_TOOL: Dict[str, Any] = {
+    "name": "web_search",
+    "description": (
+        "搜索公开网页并返回标题、URL、摘要与发布日期。仅用于补充外部或实时信息；"
+        "财报数字必须优先采用本地财报证据。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "简洁、明确的搜索关键词"},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 5, "description": "返回条数"},
+            "search_depth": {"type": "string", "enum": ["basic", "advanced"]},
+        },
+        "required": ["query"],
+    },
+}
+
 
 def _default_parameters() -> Dict[str, Any]:
     """兜底参数模板（MCP 未提供 inputSchema 时使用）"""
@@ -120,7 +138,7 @@ def build_tool_defs(
         listed = []
 
     if not listed:
-        return to_openai_tools(list(FALLBACK_MCP_TOOLS))
+        return to_openai_tools(list(FALLBACK_MCP_TOOLS)[:max_tools])
 
     if whitelist:
         wanted = {w for w in whitelist if w}

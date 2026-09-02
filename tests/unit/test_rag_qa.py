@@ -275,9 +275,54 @@ def test_answer_stream_respects_max_tool_rounds(tmp_path, fake_embedder):
     events = list(qa.answer_stream("有何新闻？", tools=[{"type": "function"}]))
     done = events[-1]
     assert done["type"] == "done"
-    assert done["tools_used"] == ["get_news_data", "get_news_data"]
+    # 相同工具和参数的第二次调用被去重，避免模型空转。
+    assert done["tools_used"] == ["get_news_data"]
     # 共 3 次模型调用：2 轮工具 + 1 轮最终答案
     assert len(ai.calls) == 3
+
+
+def test_answer_stream_emits_stages_and_web_sources_across_rounds(tmp_path, fake_embedder):
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("本地财报内容")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{"id": "c1", "name": "web_search", "arguments": '{"query":"某公司公告"}'}])],
+        [_tool_calls_event([{"id": "c2", "name": "get_news_data", "arguments": '{"symbol":"600519"}'}])],
+        [_done_event("综合本地财报和网页来源后的回答")],
+    ])
+
+    def _execute(name, args):
+        if name == "web_search":
+            return '{"source":"web_search","results":[{"title":"公告","url":"https://example.com/a","content":"摘要","published_date":"2026-09-01"}]}'
+        return '{"news":"最新公告"}'
+
+    qa = RagQA(store, ai, top_k=4, max_tool_rounds=3, tool_executor=_execute)
+    events = list(qa.answer_stream("请结合最新公告分析", tools=[{"type": "function"}]))
+
+    stages = [event["stage"] for event in events if event["type"] == "reasoning_stage"]
+    assert stages == ["assess", "retrieve", "review", "assess", "retrieve", "review", "assess", "answer"]
+    done = events[-1]
+    assert done["tools_used"] == ["web_search", "get_news_data"]
+    assert done["web_sources"] == [{"title": "公告", "url": "https://example.com/a", "content": "摘要", "published_date": "2026-09-01"}]
+
+
+def test_answer_stream_skips_duplicate_tool_call(tmp_path, fake_embedder):
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容D")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{"id": "c1", "name": "web_search", "arguments": '{"query":"重复查询"}'}])],
+        [_tool_calls_event([{"id": "c2", "name": "web_search", "arguments": '{"query":"重复查询"}'}])],
+        [_done_event("最终答案")],
+    ])
+    calls = []
+    qa = RagQA(store, ai, top_k=4, max_tool_rounds=2,
+               tool_executor=lambda name, args: calls.append((name, args)) or '{"source":"web_search","results":[]}')
+
+    events = list(qa.answer_stream("测试", tools=[{"type": "function"}]))
+
+    assert calls == [("web_search", {"query": "重复查询"})]
+    results = [event for event in events if event["type"] == "tool_result"]
+    assert results[1]["ok"] is False
+    assert "重复调用" in results[1]["summary"]
 
 
 def test_answer_stream_tool_failure_not_in_tools_used(tmp_path, fake_embedder):

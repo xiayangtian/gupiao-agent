@@ -56,7 +56,10 @@ rag:
   mcp_tools: true                 # 问答时允许模型调用 MCP 工具获取更多信息（需 enabled: true）
   mcp_tool_timeout: 30            # 单次 MCP 工具调用超时（秒）
   mcp_max_tool_rounds: 3          # 最大工具调用轮数（防无限循环）
+  mcp_max_tool_calls: 6           # 单次问答总工具调用上限
   mcp_tool_whitelist: []          # 空=自动取常用 12 个；可显式指定工具名列表
+  web_search: true                # 设置环境变量 TAVILY_API_KEY 后启用网页补充搜索（密钥不写入配置）
+  web_search_timeout: 15          # 单次网页搜索超时（秒）
   rerank: false                   # 启用 cross-encoder 精排（需安装 sentence-transformers 并下载模型 ~1GB）
   rerank_model: BAAI/bge-reranker-base
   rerank_candidates: 30           # 精排前放宽召回数

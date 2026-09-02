@@ -2192,6 +2192,27 @@ function setThinkingText(thinkingEl, text) {
   if (txtEl) txtEl.textContent = text;
 }
 
+function appendWebSources(sel, sources) {
+  var box = $(sel);
+  if (!box || !sources || !sources.length) return;
+  var rows = sources.filter(function (source) {
+    return source && /^https?:\/\//i.test(String(source.url || ''));
+  }).map(function (source) {
+    var title = escapeHtml(source.title || source.url);
+    var url = escapeHtml(source.url);
+    var meta = source.published_date ? '<span class="web-source-date">' + escapeHtml(source.published_date) + '</span>' : '';
+    var preview = source.content ? '<div class="web-source-preview">' + escapeHtml(source.content) + '</div>' : '';
+    return '<li><a href="' + url + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' + meta + preview + '</li>';
+  });
+  if (!rows.length) return;
+  var div = document.createElement('section');
+  div.className = 'chat-web-sources';
+  div.setAttribute('aria-label', '网页补充来源');
+  div.innerHTML = '<div class="chat-web-sources-head">网页补充来源</div><ul>' + rows.join('') + '</ul>';
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
 function parseSseFrame(frame) {
   var event = '', dataLines = [];
   frame.split('\n').forEach(function (line) {
@@ -2322,6 +2343,7 @@ async function submitQuestion(q, key) {
   chatStreams[key] = st;
   var thinkingEl = appendThinkingBubble('#chat-history');
   var toolStepsEl = null;   // 工具调用步骤区块（⏳ 调用中 → ✅ 已获取）
+  var stageEl = null;
   var assistantEl = null;
 
   try {
@@ -2376,6 +2398,29 @@ async function submitQuestion(q, key) {
           assistantEl.textContent = st.answerText;
           scrollChatToBottom();
         }
+      } else if (parsed.event === 'reasoning_stage') {
+        if (isCurrentChatStream(key)) {
+          var stageMessage = parsed.data.message || '正在处理补充信息…';
+          if (thinkingEl) setThinkingText(thinkingEl, stageMessage);
+          if (!toolStepsEl) {
+            toolStepsEl = document.createElement('div');
+            toolStepsEl.className = 'chat-tool-steps';
+            toolStepsEl.setAttribute('role', 'status');
+            toolStepsEl.setAttribute('aria-live', 'polite');
+            if (thinkingEl && thinkingEl.parentNode) {
+              thinkingEl.parentNode.insertBefore(toolStepsEl, thinkingEl.nextSibling);
+            } else {
+              $('#chat-history').appendChild(toolStepsEl);
+            }
+          }
+          if (!stageEl) {
+            stageEl = document.createElement('div');
+            stageEl.className = 'chat-tool-step stage';
+            toolStepsEl.appendChild(stageEl);
+          }
+          stageEl.textContent = '分析进度：' + stageMessage;
+          scrollChatToBottom();
+        }
       } else if (parsed.event === 'tool_call') {
         // MCP 工具调用：更新思考文案 + 添加工具步骤（⏳ 调用中）
         var toolName = parsed.data.name || '';
@@ -2384,6 +2429,8 @@ async function submitQuestion(q, key) {
           if (!toolStepsEl) {
             toolStepsEl = document.createElement('div');
             toolStepsEl.className = 'chat-tool-steps';
+            toolStepsEl.setAttribute('role', 'status');
+            toolStepsEl.setAttribute('aria-live', 'polite');
             // 工具步骤同样保持在最终内容之前
             if (assistantEl && assistantEl.parentNode) {
               assistantEl.parentNode.insertBefore(toolStepsEl, assistantEl);
@@ -2431,6 +2478,7 @@ async function submitQuestion(q, key) {
           thinkingEl = null;
           appendChatMsg('#chat-history', 'assistant', st.answerText);
           appendCitations('#chat-history', parsed.data.citations || []);
+          appendWebSources('#chat-history', parsed.data.web_sources || []);
           if (parsed.data.retrieval_degraded) {
             var retrievalWarning = document.createElement('div');
             retrievalWarning.className = 'chat-retrieval-warning';
