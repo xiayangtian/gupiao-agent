@@ -31,6 +31,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from financial_report_fetcher.ai_client import AIClient
+from financial_report_fetcher.analysis_ai import build_progressive_pipeline
+from financial_report_fetcher.analysis_pipeline import AnalysisPipelineRequest
 from financial_report_fetcher.analyzer import (
     ANALYSIS_TEMPLATES,
     ReportAnalyzer,
@@ -39,6 +41,7 @@ from financial_report_fetcher.analyzer import (
 from financial_report_fetcher.datasource import CNINFODatasource
 from financial_report_fetcher.downloader import ReportDownloader
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
+from financial_report_fetcher.report_identity import build_report_id
 from financial_report_fetcher.market import stock_mcp, tencent_quote
 from financial_report_fetcher.rag.analysis import RagAnalysis
 from financial_report_fetcher.rag.mcp_tools import build_tool_defs
@@ -71,6 +74,7 @@ datasource = CNINFODatasource()
 stock_index = StockIndex(datasource)
 ai_client = AIClient()
 analyzer = ReportAnalyzer(ai_client)
+progressive_pipeline = None
 downloader = ReportDownloader()
 task_manager: Optional[TaskManager] = None
 _task_manager_lifecycle_lock = threading.Lock()
@@ -422,7 +426,16 @@ async def _access_log_middleware(request: Request, call_next):
 # ── 请求体模型 ─────────────────────────────────────────────
 
 class AnalyzeRequest(BaseModel):
+    interests: List[str] = Field(default_factory=list)
     dimensions: List[str] = Field(default_factory=list)
+
+    def resolved_interests(self) -> List[str]:
+        if self.interests:
+            requested = self.interests
+        else:
+            requested = [LEGACY_INTEREST_ALIASES.get(item, item) for item in self.dimensions]
+        selected = [item for item in requested if item in SUPPORTED_INTEREST_IDS]
+        return list(dict.fromkeys(selected)) or list(DEFAULT_INTERESTS)
 
 
 class ChatRequest(BaseModel):
@@ -802,6 +815,39 @@ def _default_analysis_dimensions() -> List[str]:
     return configured or list(ReportAnalyzer.DEFAULT_DIMENSIONS)
 
 
+SUPPORTED_INTERESTS = (
+    {"id": "financial_overview", "name": "财务概览", "description": "关键规模、增速与结构变化"},
+    {"id": "cash_flow", "name": "现金流", "description": "现金创造、回款与偿债质量"},
+    {"id": "risks", "name": "风险", "description": "异常波动、承诺事项与经营风险"},
+    {"id": "earnings_quality", "name": "盈利质量", "description": "利润含金量与可持续性"},
+    {"id": "business", "name": "经营变化", "description": "业务结构、客户与增长动因"},
+    {"id": "governance", "name": "治理", "description": "治理、关联交易与股东事项"},
+    {"id": "industry_position", "name": "行业位置", "description": "竞争地位与行业变化"},
+)
+SUPPORTED_INTEREST_IDS = frozenset(item["id"] for item in SUPPORTED_INTERESTS)
+DEFAULT_INTERESTS = ("financial_overview", "cash_flow", "risks")
+LEGACY_INTEREST_ALIASES = {
+    "financial_summary": "financial_overview",
+    "cashflow": "cash_flow",
+    "risk_warning": "risks",
+    "profit_quality": "earnings_quality",
+    "business_highlights": "business",
+    "governance": "governance",
+    "industry_position": "industry_position",
+}
+
+
+@app.get("/api/analysis/interests")
+def analysis_interests() -> Dict[str, Any]:
+    defaults = set(DEFAULT_INTERESTS)
+    return {
+        "interests": [
+            {**item, "default": item["id"] in defaults} for item in SUPPORTED_INTERESTS
+        ],
+        "defaults": list(DEFAULT_INTERESTS),
+    }
+
+
 @app.get("/api/analysis/dimensions")
 def analysis_dimensions() -> Dict[str, Any]:
     """返回全部可选分析维度元数据（前端勾选面板渲染 + 全选/默认勾选用）"""
@@ -820,6 +866,13 @@ def analysis_dimensions() -> Dict[str, Any]:
 
 
 # ── 分析任务 ───────────────────────────────────────────────
+
+
+def _get_progressive_pipeline():
+    global progressive_pipeline
+    if progressive_pipeline is None:
+        progressive_pipeline = build_progressive_pipeline(ai_client, ANALYSIS_DIR)
+    return progressive_pipeline
 
 def _analysis_progress_value(event: Dict[str, Any]) -> float:
     """把分析器阶段事件映射到供前端轮询的 0~1 总进度。"""
@@ -843,47 +896,82 @@ def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, An
     p = _parse_period(period)
     meta = _find_report_meta(code, p)
 
-    # 仅保留已知且带预设提示词的维度；过滤后为空则回退配置/内置默认维度
-    dims = [d for d in body.dimensions if ANALYSIS_TEMPLATES.get(d, {}).get("prompt")]
-    if not dims:
-        dims = _default_analysis_dimensions()
-
-    # 停止信号：POST /api/tasks/{id}/cancel 时置位，analyze 维度循环间感知后中断
+    interests = body.resolved_interests()
     stop_event = threading.Event()
+    analysis_id = f"{meta.company_name}_{code}_{p.isoformat()}_分析报告"
+    report_id = build_report_id(code, p, meta.report_type)
 
-    def _run(report_progress: Callable[[float], None]) -> Dict[str, Any]:
-        report_progress(0.03)
+    def _run(emit: Callable[[str, Dict[str, Any]], None]):
         path = _ensure_pdf(meta)
-        report_progress(0.08)
-        _auto_ingest_report(path)  # 分析前确保 RAG 已就绪（幂等，失败不影响分析）
-        report_progress(0.18)
-        report = analyzer.analyze(
-            path,
-            dimensions=dims,
-            meta={
-                "ticker": meta.company_id,
-                "year": p.year,
-                "period": p.isoformat(),
-                "company": meta.company_name,
-            },
-            stop_event=stop_event,
-            progress_callback=lambda event: report_progress(
-                _analysis_progress_value(event)
-            ),
+        request = AnalysisPipelineRequest(
+            analysis_id=analysis_id,
+            report_id=report_id,
+            company_code=code,
+            company_name=meta.company_name,
+            period=p.isoformat(),
+            pdf_path=path,
+            interests=tuple(interests),
         )
-        report_progress(0.94)
-        md_path = report.save(ANALYSIS_DIR)  # 落盘 reports/analysis/（与 CLI 互通）
-        report_progress(0.97)
-        _auto_ingest_report(path)  # RAG 自动摄取，连带分析报告双源（失败不影响分析结果）
-        data = report.to_json()
-        data["markdown_path"] = md_path
-        report_progress(1.0)
-        return data
+        document = _get_progressive_pipeline().run(request, emit, stop_event)
+        _auto_ingest_report(path)
+        return document
 
-    task_id = task_manager.submit(_run, stop_event=stop_event, progressive=True)
+    task_id = task_manager.submit(_run, stop_event=stop_event, eventful=True)
     if task_id is None:
         raise HTTPException(409, "已有分析任务进行中，请稍候")
-    return {"task_id": task_id, "dimensions": dims}
+    return {
+        "task_id": task_id,
+        "analysis_id": analysis_id,
+        "interests": interests,
+        "dimensions": list(body.dimensions),
+        "status_url": f"/api/tasks/{task_id}",
+        "event_url": f"/api/analysis/tasks/{task_id}/events",
+    }
+
+
+_TERMINAL_TASK_STATUSES = {"done", "failed", "cancelled", "partial"}
+
+
+async def _analysis_event_stream(task_id: str, after_id: int):
+    cursor = after_id
+    while True:
+        events = await asyncio.to_thread(
+            task_manager.wait_for_events, task_id, cursor, 15.0
+        )
+        if not events:
+            yield ": keep-alive\n\n"
+        for event in events:
+            cursor = event.id
+            yield (
+                f"id: {event.id}\n"
+                f"event: {event.event_type}\n"
+                f"data: {json.dumps(event.payload, ensure_ascii=False)}\n\n"
+            )
+        task = task_manager.get(task_id)
+        if task is None or task["status"] in _TERMINAL_TASK_STATUSES:
+            break
+
+
+@app.get("/api/analysis/tasks/{task_id}/events")
+async def analysis_task_events(
+    task_id: str,
+    request: Request,
+    after: int = Query(default=0, ge=0),
+) -> StreamingResponse:
+    if task_manager.get(task_id) is None:
+        raise HTTPException(404, f"未知任务：{task_id}")
+    header_cursor = request.headers.get("Last-Event-ID")
+    try:
+        cursor = int(header_cursor) if header_cursor is not None else after
+    except ValueError as exc:
+        raise HTTPException(400, "Last-Event-ID 必须是整数") from exc
+    if cursor < 0:
+        raise HTTPException(400, "事件游标不能为负数")
+    return StreamingResponse(
+        _analysis_event_stream(task_id, cursor),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/tasks/{task_id}/cancel")

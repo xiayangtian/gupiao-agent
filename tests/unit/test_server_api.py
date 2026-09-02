@@ -41,6 +41,38 @@ class _FakeReport:
         return os.path.join(output_dir, "长江电力_600900_2025_分析报告.md")
 
 
+class _FakeV3Document:
+    def __init__(self, stage="completed"):
+        self.stage = stage
+
+    def to_dict(self):
+        return {
+            "schema_version": 3,
+            "analysis_id": "长江电力_600900_2025-12-31_分析报告",
+            "report_id": "600900:2025-12-31:annual",
+            "stage": self.stage,
+            "quick": {"conclusions": [{"claim": "营收保持稳定"}]},
+            "sections": [{"section_id": "financial-overview", "title": "财务概览"}],
+        }
+
+
+class FakeProgressivePipeline:
+    def __init__(self):
+        self.requests = []
+        self.side_effect = None
+
+    def run(self, request, emit, stop_event):
+        self.requests.append(request)
+        if self.side_effect is not None:
+            return self.side_effect(request, emit, stop_event)
+        document = _FakeV3Document()
+        emit("job.stage_changed", {"stage": "fast_ready"})
+        emit("quick.ready", {"quick": document.to_dict()["quick"]})
+        emit("section.ready", {"section": document.to_dict()["sections"][0]})
+        emit("job.completed", {"analysis": document.to_dict()})
+        return document
+
+
 class FakeIndex:
     """模拟 StockIndex（方法面足够即可，不继承）"""
 
@@ -90,12 +122,14 @@ def env(monkeypatch, tmp_path):
 
     fake_dl = MagicMock()
     fake_dl.download_one.return_value = DownloadStatus.SUCCESS
+    fake_pipeline = FakeProgressivePipeline()
 
     monkeypatch.setattr(server, "datasource", fake_ds)
     monkeypatch.setattr(server, "stock_index", FakeIndex())
     monkeypatch.setattr(server, "ai_client", fake_ai)
     monkeypatch.setattr(server, "analyzer", fake_analyzer)
     monkeypatch.setattr(server, "downloader", fake_dl)
+    monkeypatch.setattr(server, "progressive_pipeline", fake_pipeline)
     monkeypatch.setattr(server, "task_manager", make_task_manager())
     monkeypatch.setattr(server, "chat_sessions", {})
     # 隔离真实 reports/ 目录，downloaded 断言与本地磁盘状态无关
@@ -108,6 +142,7 @@ def env(monkeypatch, tmp_path):
         "fake_ai": fake_ai,
         "fake_analyzer": fake_analyzer,
         "fake_dl": fake_dl,
+        "fake_pipeline": fake_pipeline,
         "make_task_manager": make_task_manager,
     }
 
@@ -237,28 +272,21 @@ class TestAnalyze:
         task = self._poll_until_done(client, task_id)
         assert task["status"] == "done"
         result = task["result"]
-        assert result["dimensions"][0]["name"] == "财务摘要"
-        assert result["markdown_path"].endswith(".md")
+        assert result["schema_version"] == 3
+        assert result["quick"]["conclusions"]
+        assert result["sections"][0]["section_id"] == "financial-overview"
 
     def test_analyze_task_exposes_dimension_progress_while_running(self, client, env):
         """分析尚未完成时，任务接口应返回当前维度对应的持久进度。"""
         reported = threading.Event()
         release = threading.Event()
-        report = env["fake_analyzer"].analyze.return_value
-
-        def progressive_analyze(*args, **kwargs):
-            kwargs["progress_callback"]({
-                "stage": "dimension_started",
-                "completed": 1,
-                "total": 2,
-                "dimension": "risk_warning",
-                "name": "风险识别",
-            })
+        def progressive_analyze(request, emit, stop_event):
+            emit("job.stage_changed", {"stage": "deep_processing"})
             reported.set()
             release.wait(timeout=5.0)
-            return report
+            return _FakeV3Document()
 
-        env["fake_analyzer"].analyze.side_effect = progressive_analyze
+        env["fake_pipeline"].side_effect = progressive_analyze
         try:
             response = client.post(
                 "/api/reports/600900/2025-12-31/analyze",
@@ -269,7 +297,7 @@ class TestAnalyze:
 
             task = client.get(f"/api/tasks/{task_id}").json()
             assert task["status"] == "running"
-            assert task["progress"] == pytest.approx(0.525)
+            assert task["result"]["stage"] == "deep_processing"
         finally:
             release.set()
 
@@ -287,7 +315,7 @@ class TestAnalyze:
             assert response.status_code == 200
             assert self._poll_until_done(client, response.json()["task_id"])["status"] == "done"
 
-        periods = [call.kwargs["meta"]["period"] for call in env["fake_analyzer"].analyze.call_args_list]
+        periods = [request.period for request in env["fake_pipeline"].requests]
         assert periods == ["2025-03-31", "2025-09-30"]
 
     def test_analyze_queued_when_workers_full(self, client, env, monkeypatch):
@@ -331,6 +359,84 @@ class TestAnalyze:
         )
         assert r.status_code == 400
         assert "AI_API_KEY" in r.json()["detail"]
+
+
+class TestProgressiveAnalyzeApi:
+    class FakeDocument:
+        def to_dict(self):
+            return {"schema_version": 3, "stage": "completed", "quick": {"conclusions": []}}
+
+    class FakePipeline:
+        def __init__(self):
+            self.requests = []
+
+        def run(self, request, emit, stop_event):
+            self.requests.append(request)
+            emit("quick.ready", {"quick": {"conclusions": []}})
+            emit("job.completed", {"analysis": self.FakeDocument().to_dict()})
+            return self.FakeDocument()
+
+    def test_interests_endpoint_exposes_supported_priorities(self, client):
+        response = client.get("/api/analysis/interests")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert {item["id"] for item in body["interests"]} >= {"cash_flow", "risks"}
+        assert all({"id", "name", "description", "default"} <= set(item) for item in body["interests"])
+
+    def test_analyze_accepts_interests_and_returns_recovery_urls(
+        self, client, monkeypatch
+    ):
+        pipeline = self.FakePipeline()
+        pipeline.FakeDocument = self.FakeDocument
+        monkeypatch.setattr(server, "progressive_pipeline", pipeline, raising=False)
+
+        response = client.post(
+            "/api/reports/600900/2025-12-31/analyze",
+            json={"interests": ["cash_flow", "risks", "cash_flow", "unknown"]},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["interests"] == ["cash_flow", "risks"]
+        assert body["status_url"] == f"/api/tasks/{body['task_id']}"
+        assert body["event_url"] == f"/api/analysis/tasks/{body['task_id']}/events"
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not pipeline.requests:
+            time.sleep(0.01)
+        assert pipeline.requests[0].interests == ("cash_flow", "risks")
+
+    def test_legacy_dimensions_are_mapped_to_interests(self, client, monkeypatch):
+        pipeline = self.FakePipeline()
+        pipeline.FakeDocument = self.FakeDocument
+        monkeypatch.setattr(server, "progressive_pipeline", pipeline, raising=False)
+
+        response = client.post(
+            "/api/reports/600900/2025-12-31/analyze",
+            json={"dimensions": ["cashflow", "risk_warning"]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["interests"] == ["cash_flow", "risks"]
+
+    def test_sse_replays_only_events_after_last_event_id(self, client):
+        store = server.task_manager._store
+        store.create("replay-task")
+        first = store.append_event("replay-task", "quick.ready", {"quick": {}})
+        second = store.append_event(
+            "replay-task", "section.ready", {"section": {"section_id": "cash"}}
+        )
+        store.update("replay-task", status="done")
+
+        response = client.get(
+            "/api/analysis/tasks/replay-task/events?after=0",
+            headers={"Last-Event-ID": str(first.id)},
+        )
+
+        assert response.status_code == 200
+        assert f"id: {second.id}" in response.text
+        assert f"id: {first.id}" not in response.text
+        assert "event: section.ready" in response.text
 
 
 class TestChat:
@@ -734,7 +840,7 @@ class TestAnalysisDimensionsApi:
         assert "custom" not in dims
 
     def test_analyze_default_dimensions_from_config(self, client, env, monkeypatch):
-        """未传 dimensions 时默认维度取自配置 analysis_dimensions"""
+        """旧配置不再决定固定 Tab；空请求使用新的默认关注方向。"""
         fake_cfg = MagicMock()
         fake_cfg.analysis_dimensions = ["financial_summary", "governance"]
         monkeypatch.setattr(server, "RagConfig", type("C", (), {"load": staticmethod(lambda: fake_cfg)}))
@@ -746,24 +852,23 @@ class TestAnalysisDimensionsApi:
             if server.task_manager.get(tid)["status"] == "done":
                 break
             time.sleep(0.01)
-        call = env["fake_analyzer"].analyze.call_args
-        assert call.kwargs["dimensions"] == ["financial_summary", "governance"]
+        assert env["fake_pipeline"].requests[0].interests == (
+            "financial_overview", "cash_flow", "risks"
+        )
 
     def test_analyze_pre_ingests_before_analysis(self, client, env, monkeypatch):
-        """分析任务开始时先确保 RAG 摄取（前置 ingest），分析后再次连带分析报告"""
+        """新管线不让 RAG 前置摄取阻塞 quick，完成后再摄取分析产物。"""
         events = []
         fake_svc = type("Fake", (), {
             "auto_ingest_report": lambda self, p: events.append("ingest"),
         })()
         monkeypatch.setattr(server, "rag_service", fake_svc)
 
-        fake_analyzer = env["fake_analyzer"]
-
-        def _analyze(*a, **k):
+        def _analyze(request, emit, stop_event):
             events.append("analyze")
-            return _FakeReport()
+            return _FakeV3Document()
 
-        fake_analyzer.analyze.side_effect = _analyze
+        env["fake_pipeline"].side_effect = _analyze
         r = client.post("/api/reports/600900/2025-12-31/analyze", json={"dimensions": ["financial_summary"]})
         tid = r.json()["task_id"]
         deadline = time.monotonic() + 2.0
@@ -771,8 +876,7 @@ class TestAnalysisDimensionsApi:
             if server.task_manager.get(tid)["status"] == "done":
                 break
             time.sleep(0.01)
-        assert events[:2] == ["ingest", "analyze"], f"应先摄取再分析：{events}"
-        assert events.count("ingest") >= 2
+        assert events == ["analyze", "ingest"]
 
 
 class TestInitRagInjection:
@@ -1125,25 +1229,19 @@ class TestCancelAnalysisTask:
         assert r.status_code == 404
 
     def test_analyze_task_can_be_cancelled(self, client, env, monkeypatch):
-        """真实 TaskManager：取消后 stop_event 置位，analyze 抛取消异常 → 任务 cancelled"""
+        """真实 TaskManager：取消信号传入渐进管线，已完成内容可正常收尾。"""
         import threading as _threading
-
-        from financial_report_fetcher.exceptions import AnalysisCancelledError
 
         tm = env["make_task_manager"]()
         monkeypatch.setattr(server, "task_manager", tm)
         entered = _threading.Event()
 
-        def _analyze(*a, **k):
-            stop = k.get("stop_event")
+        def _analyze(request, emit, stop):
             entered.set()
-            if stop is not None:
-                stop.wait(timeout=5.0)
-                if stop.is_set():
-                    raise AnalysisCancelledError("已停止")
-            return _FakeReport()
+            stop.wait(timeout=5.0)
+            return _FakeV3Document(stage="cancelled")
 
-        env["fake_analyzer"].analyze.side_effect = _analyze
+        env["fake_pipeline"].side_effect = _analyze
         r = client.post("/api/reports/600900/2025-12-31/analyze",
                         json={"dimensions": ["financial_summary"]})
         tid = r.json()["task_id"]

@@ -375,6 +375,7 @@ class TaskManager:
             with self._condition:
                 self._cleanup_locked(store)
                 self._stop_events.pop(task_id, None)
+                self._condition.notify_all()
 
     def _ensure_store(self) -> TaskStore:
         if self._store is None:
