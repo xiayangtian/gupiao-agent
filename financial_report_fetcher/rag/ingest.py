@@ -120,11 +120,14 @@ class IngestionService:
                 os.fsync(temp_file.fileno())
             os.replace(temp_path, target_path)
             temp_path = None
-            directory_fd = os.open(manifest_dir, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            # POSIX 可对目录 fsync，确保 rename 的目录项落盘；Windows 不允许
+            # os.open() 打开目录，会抛 PermissionError。文件本身已在替换前 fsync。
+            if os.name != "nt":
+                directory_fd = os.open(manifest_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             if temp_path is not None:
                 try:

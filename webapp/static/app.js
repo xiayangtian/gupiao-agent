@@ -2218,6 +2218,12 @@ async function submitQuestion(q, key) {
           thinkingEl = null;
           appendChatMsg('#chat-history', 'assistant', st.answerText);
           appendCitations('#chat-history', parsed.data.citations || []);
+          if (parsed.data.retrieval_degraded) {
+            var retrievalWarning = document.createElement('div');
+            retrievalWarning.className = 'chat-retrieval-warning';
+            retrievalWarning.textContent = '⚠️ 本次未能连接本地财报检索模型，回答未引用 PDF 原文';
+            $('#chat-history').appendChild(retrievalWarning);
+          }
           // MCP 工具徽章
           if (parsed.data.tools_used && parsed.data.tools_used.length) {
             var badge = document.createElement('div');

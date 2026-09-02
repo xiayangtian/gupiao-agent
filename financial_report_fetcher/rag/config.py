@@ -37,6 +37,7 @@ class RagConfig:
     chunk_overlap: int = 100
     top_k: int = 8
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    hf_endpoint: str = ""
     auto_ingest: bool = True
     # 增强分析：分析时用 RAG 检索上下文替代截断全文（需 enabled: true）
     enhanced_analysis: bool = True
@@ -66,6 +67,7 @@ class RagConfig:
             chunk_overlap=int(raw.get("chunk_overlap", 100)),
             top_k=int(raw.get("top_k", 8)),
             embedding_model=str(raw.get("embedding_model", "BAAI/bge-small-zh-v1.5")),
+            hf_endpoint=str(raw.get("hf_endpoint", "") or ""),
             auto_ingest=_to_bool(raw.get("auto_ingest"), True),
             enhanced_analysis=_to_bool(raw.get("enhanced_analysis"), True),
             analysis_dimensions=dims,

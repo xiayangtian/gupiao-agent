@@ -43,6 +43,7 @@ rag:
   chunk_overlap: 100              # 相邻分块重叠字符数
   top_k: 8                        # 每次问答检索片段数
   embedding_model: "BAAI/bge-small-zh-v1.5"   # 本地 embedding 模型
+  hf_endpoint: ""                 # Hugging Face 镜像地址；国内网络可填 https://hf-mirror.com
   auto_ingest: true               # 下载 / 分析完成后自动建入 RAG（需 enabled: true）
   enhanced_analysis: true         # 分析时用 RAG 检索上下文（需 enabled: true）
   analysis_dimensions:            # 分析页默认勾选维度；空/缺省用内置默认 5 个

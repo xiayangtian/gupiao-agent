@@ -18,6 +18,8 @@ import asyncio
 import logging
 import os
 import shlex
+import shutil
+import sys
 import tempfile
 import threading
 from typing import Any, Dict, List, Optional
@@ -30,6 +32,19 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CMD = ["uvx", "china-stock-mcp"]
 
 
+def _find_uvx() -> Optional[str]:
+    """查找 uvx；兼容直接用 venv Python 启动但 Scripts 未加入 PATH 的 Windows。"""
+    found = shutil.which("uvx")
+    if found:
+        return found
+    executable_dir = os.path.dirname(sys.executable)
+    for name in ("uvx.exe", "uvx"):
+        candidate = os.path.join(executable_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _stockmcp_venv_root() -> str:
     """本地持久 venv 根目录（绕开 uvx 缓存问题的首选启动方式）"""
     return os.path.join(os.path.expanduser("~/.local/share"), "stockmcp-venv")
@@ -37,9 +52,14 @@ def _stockmcp_venv_root() -> str:
 
 def _find_local_venv_command() -> Optional[List[str]]:
     """本地已安装 china-stock-mcp 的 venv 存在时返回其启动命令；否则 None"""
-    py = os.path.join(_stockmcp_venv_root(), "bin", "python")
-    if os.path.exists(py):
-        return [py, "-m", "china_stock_mcp"]
+    root = _stockmcp_venv_root()
+    candidates = (
+        os.path.join(root, "Scripts", "python.exe"),  # Windows venv
+        os.path.join(root, "bin", "python"),          # POSIX venv
+    )
+    for py in candidates:
+        if os.path.exists(py):
+            return [py, "-m", "china_stock_mcp"]
     return None
 
 
@@ -57,7 +77,8 @@ def _resolve_server_command() -> List[str]:
     local = _find_local_venv_command()
     if local:
         return local
-    return list(_DEFAULT_CMD)
+    uvx = _find_uvx()
+    return [uvx or _DEFAULT_CMD[0], *_DEFAULT_CMD[1:]]
 
 
 def _tool_to_dict(tool: Any) -> Dict[str, Any]:
@@ -67,7 +88,8 @@ def _tool_to_dict(tool: Any) -> Dict[str, Any]:
         "description": tool.description or "",
     }
     schema = getattr(tool, "inputSchema", None)
-    if schema:
+    # 空 object schema 也有语义：表示工具不接收参数，不能当作“缺失”。
+    if schema is not None:
         out["input_schema"] = schema
     return out
 
@@ -100,10 +122,13 @@ def _build_server_env() -> Dict[str, str]:
     """构造 MCP 子进程环境：继承当前环境；uv 缓存/工具目录不可写时把
     UV_CACHE_DIR / UV_TOOL_DIR 指到可写临时目录（否则 uvx 无法启动服务器进程）。"""
     env = dict(os.environ)
+    # os.getuid 仅存在于 POSIX。PID 在 Windows/POSIX 均可用，也足以隔离
+    # 同机并发服务的临时 uv 目录。
+    process_id = os.getpid()
     if not env.get("UV_CACHE_DIR"):
         alt = _pick_uv_cache_dir(
             os.path.expanduser("~/.cache/uv"),
-            os.path.join(tempfile.gettempdir(), f"uv-cache-{os.getuid()}"),
+            os.path.join(tempfile.gettempdir(), f"uv-cache-{process_id}"),
         )
         if alt:
             env["UV_CACHE_DIR"] = alt
@@ -111,7 +136,7 @@ def _build_server_env() -> Dict[str, str]:
     if not env.get("UV_TOOL_DIR"):
         alt = _pick_uv_cache_dir(
             os.path.expanduser("~/.local/share/uv/tools"),
-            os.path.join(tempfile.gettempdir(), f"uv-tools-{os.getuid()}"),
+            os.path.join(tempfile.gettempdir(), f"uv-tools-{process_id}"),
         )
         if alt:
             env["UV_TOOL_DIR"] = alt
@@ -126,7 +151,10 @@ def _extract_text(result: Any) -> str:
         text = getattr(item, "text", None)
         if text is not None:
             chunks.append(text)
-    return "\n".join(chunks)
+    text = "\n".join(chunks)
+    if getattr(result, "isError", False):
+        raise RuntimeError(text or "MCP 工具返回错误")
+    return text
 
 
 class StockMCPClient:
@@ -196,8 +224,14 @@ class StockMCPClient:
 
     async def _open_session(self) -> ClientSession:
         """启动服务器进程并完成 MCP 握手，返回可用会话。"""
+        command = self._command[0]
+        if not os.path.isabs(command) and shutil.which(command) is None:
+            raise RuntimeError(
+                f"找不到 MCP 启动命令 {command!r}。请安装 uv（提供 uvx），"
+                "或通过 CHINA_STOCK_MCP_CMD 指定 china-stock-mcp 启动命令。"
+            )
         params = StdioServerParameters(
-            command=self._command[0],
+            command=command,
             args=self._command[1:],
             env=_build_server_env(),
         )

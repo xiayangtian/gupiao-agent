@@ -281,7 +281,7 @@ def _build_rag_components():
     cfg = RagConfig.load()
     if not cfg.enabled:
         return None, None, None
-    embedder = LocalEmbedder(cfg.embedding_model)
+    embedder = LocalEmbedder(cfg.embedding_model, hf_endpoint=cfg.hf_endpoint)
     store = RagStore(cfg.store_path, embedder)
     svc = IngestionService(
         store,

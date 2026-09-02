@@ -29,7 +29,7 @@ class FakeSession:
         if self.fail_first > 0:
             self.fail_first -= 1
             raise RuntimeError("boom")
-        return SimpleNamespace(content=[SimpleNamespace(text=self.tool_text)])
+        return SimpleNamespace(content=[SimpleNamespace(text=self.tool_text)], isError=False)
 
     async def list_tools(self):
         self.list_calls += 1
@@ -99,6 +99,19 @@ class TestCallTool:
         session = _install_fake(client, FakeSession(fail_first=99))
         with pytest.raises(RuntimeError):
             client.call_tool("t", {})
+        assert len(session.calls) == 2
+
+    def test_raises_when_mcp_result_is_error(self, client):
+        class ErrorSession(FakeSession):
+            async def call_tool(self, name, arguments):
+                self.calls.append((name, arguments))
+                return SimpleNamespace(
+                    content=[SimpleNamespace(text="参数校验失败")], isError=True
+                )
+
+        session = _install_fake(client, ErrorSession())
+        with pytest.raises(RuntimeError, match="参数校验失败"):
+            client.call_tool("get_time_info", {})
         assert len(session.calls) == 2
 
 

@@ -32,6 +32,13 @@ def test_tool_to_dict_keeps_input_schema():
     assert out["input_schema"]["properties"]["symbol"]["type"] == "string"
 
 
+def test_tool_to_dict_keeps_empty_input_schema():
+    from financial_report_fetcher.market.mcp_client import _tool_to_dict
+
+    out = _tool_to_dict(FakeListedTool("get_time_info", "当前时间", {}))
+    assert out["input_schema"] == {}
+
+
 def test_to_openai_tools():
     """MCP 工具 dict → OpenAI function calling 格式"""
     tools = [
@@ -54,6 +61,17 @@ def test_to_openai_tools():
     assert fn["parameters"]["required"] == ["symbol"]
     # input_schema 缺失时 parameters 用兜底模板
     assert out[1]["function"]["parameters"]["properties"]["symbol"]["type"] == "string"
+
+
+def test_to_openai_tools_preserves_empty_no_argument_schema():
+    out = to_openai_tools([{
+        "name": "get_time_info",
+        "description": "当前时间",
+        "input_schema": {"type": "object", "properties": {}},
+    }])
+    assert out[0]["function"]["parameters"] == {
+        "type": "object", "properties": {},
+    }
 
 
 def test_build_tool_defs_filters_whitelist_and_limits():

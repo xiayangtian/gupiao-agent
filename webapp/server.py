@@ -114,6 +114,7 @@ rag_qa = None
 # MCP 工具定义缓存（进程内只尝试一次；不可用时保持 None，问答不注入假工具）
 _mcp_tool_defs_cache: Optional[List[Dict[str, Any]]] = None
 _mcp_tool_defs_ready: bool = False
+_mcp_tool_input_schemas: Dict[str, Dict[str, Any]] = {}
 # MCP 调用熔断器：连续失败暂停使用，冷却后自动探测恢复
 mcp_breaker = McpCircuitBreaker()
 _mcp_diagnose_cache: Dict[str, Any] = {}
@@ -121,7 +122,7 @@ _mcp_diagnose_cache: Dict[str, Any] = {}
 
 def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
     """返回注入模型的工具定义；MCP 不可用时返回 None（不注入，避免模型调用必失败的工具）"""
-    global _mcp_tool_defs_cache, _mcp_tool_defs_ready
+    global _mcp_tool_defs_cache, _mcp_tool_defs_ready, _mcp_tool_input_schemas
     if not mcp_breaker.allow():
         return None  # 熔断冷却中：不注入 MCP 工具（纯 RAG，避免持续失败）
     if _mcp_tool_defs_ready:
@@ -142,6 +143,11 @@ def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
     if not listed:
         _mcp_tool_defs_cache = None
         return None
+    _mcp_tool_input_schemas = {
+        str(tool.get("name")): tool.get("input_schema")
+        for tool in listed
+        if tool.get("name") and isinstance(tool.get("input_schema"), dict)
+    }
     _mcp_tool_defs_cache = build_tool_defs(
         lambda: listed,
         whitelist=whitelist,
@@ -232,12 +238,24 @@ def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]
         return None
     timeout = getattr(cfg, "mcp_tool_timeout", 30)
 
+    def _tool_result_failed(result: str) -> bool:
+        lowered = str(result).lower()
+        return (
+            "validation error" in lowered
+            or "unexpected keyword argument" in lowered
+            or lowered.startswith("error:")
+        )
+
     def _executor(name: str, arguments: Dict[str, Any]) -> str:
         # 熔断检查：连续失败达阈值且未到冷却期 → 暂停使用
         if not mcp_breaker.allow():
             return (f"MCP 服务暂不可用（连续失败 {mcp_breaker.consecutive_failures} 次，"
                     f"熔断中，约 {int(mcp_breaker.cooldown_seconds)} 秒后自动探测恢复）")
         args = dict(arguments or {})
+        schema = _mcp_tool_input_schemas.get(name)
+        if schema is not None:
+            allowed = set((schema.get("properties") or {}).keys())
+            args = {key: value for key, value in args.items() if key in allowed}
         symbol = args.get("symbol")
         if symbol:
             code = _resolve_symbol_code(str(symbol))
@@ -253,12 +271,18 @@ def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]
             else:
                 mcp_breaker.record_success()
             return result
-        args.setdefault("output_format", "json")
+        # 只有工具 schema 声明了 output_format 才补默认值；get_time_info 等
+        # 无参数工具不能接收通用股票参数。
+        if schema is None or "output_format" in (schema.get("properties") or {}):
+            args.setdefault("output_format", "json")
         try:
             result = stock_mcp.call_tool(name, args, timeout=timeout)
         except Exception as exc:
             mcp_breaker.record_failure(exc)
             return f"工具调用失败：{exc}"
+        if _tool_result_failed(result):
+            mcp_breaker.record_failure(result)
+            return f"工具调用失败：{result}"
         mcp_breaker.record_success()
         return result
 
@@ -293,7 +317,10 @@ def _init_rag() -> None:
         cfg = RagConfig.load()
         if not cfg.enabled:
             return
-        embedder = LocalEmbedder(cfg.embedding_model)
+        embedder = LocalEmbedder(
+            cfg.embedding_model,
+            hf_endpoint=getattr(cfg, "hf_endpoint", ""),
+        )
         rag_store = RagStore(cfg.store_path, embedder)
         rag_service = IngestionService(
             rag_store,
@@ -809,6 +836,7 @@ def _analysis_progress_value(event: Dict[str, Any]) -> float:
         return 0.92
     return 0.18
 
+
 @app.post("/api/reports/{code}/{period}/analyze")
 def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, Any]:
     _require_ai()
@@ -1063,6 +1091,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         "citations": evt.get("citations", []),
                         "session_id": sid,
                         "tools_used": evt.get("tools_used", []),
+                        "retrieval_degraded": evt.get("retrieval_degraded", False),
                     })
                     return
         except Exception as exc:

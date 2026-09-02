@@ -4,9 +4,8 @@
 测试可注入确定性伪实现（见 tests/unit/conftest.py）。
 """
 
-from typing import List, Protocol
-
-from fastembed import TextEmbedding
+import os
+from typing import List, Optional, Protocol
 
 
 class Embedder(Protocol):
@@ -23,12 +22,20 @@ class LocalEmbedder:
     惰性加载：构造时不加载模型，首次 embed 才初始化，避免拖慢 import。
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5") -> None:
+    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5",
+                 hf_endpoint: Optional[str] = None) -> None:
         self.model_name = model_name
+        self.hf_endpoint = (hf_endpoint or "").strip() or None
         self._model = None
 
     def _ensure_model(self) -> None:
         if self._model is None:
+            # huggingface_hub 在 import 时读取 HF_ENDPOINT，因此 fastembed 必须
+            # 在设置镜像后再延迟导入，否则运行期配置不会生效。
+            if self.hf_endpoint and not os.environ.get("HF_ENDPOINT"):
+                os.environ["HF_ENDPOINT"] = self.hf_endpoint
+            from fastembed import TextEmbedding
+
             self._model = TextEmbedding(model_name=self.model_name)
 
     def embed(self, texts: List[str]) -> List[List[float]]:

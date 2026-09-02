@@ -46,6 +46,7 @@ def test_build_server_env_inherits_and_falls_back(monkeypatch, tmp_path):
     env = mc._build_server_env()
     assert env["AI_API_KEY"] == "sk-xxx"
     assert (env.get("UV_CACHE_DIR") or "").startswith(str(tmp_path))
+    assert "uv-cache-" in env["UV_CACHE_DIR"]
 
 
 def test_build_server_env_keeps_explicit_uv_cache_dir(monkeypatch):
@@ -77,6 +78,19 @@ def test_find_local_venv_command_none_when_missing(monkeypatch, tmp_path):
     assert mc._find_local_venv_command() is None
 
 
+def test_find_local_venv_command_supports_windows_layout(monkeypatch, tmp_path):
+    from financial_report_fetcher.market import mcp_client as mc
+
+    root = tmp_path / "stockmcp-venv"
+    (root / "Scripts").mkdir(parents=True)
+    python_exe = root / "Scripts" / "python.exe"
+    python_exe.write_text("")
+    monkeypatch.setattr(mc, "_stockmcp_venv_root", lambda: str(root))
+    assert mc._find_local_venv_command() == [
+        str(python_exe), "-m", "china_stock_mcp",
+    ]
+
+
 def test_resolve_server_command_prefers_env(monkeypatch):
     from financial_report_fetcher.market import mcp_client as mc
 
@@ -98,4 +112,14 @@ def test_resolve_server_command_default_uvx(monkeypatch):
 
     monkeypatch.delenv("CHINA_STOCK_MCP_CMD", raising=False)
     monkeypatch.setattr(mc, "_find_local_venv_command", lambda: None)
+    monkeypatch.setattr(mc, "_find_uvx", lambda: None)
     assert mc._resolve_server_command() == ["uvx", "china-stock-mcp"]
+
+
+def test_resolve_server_command_finds_venv_uvx(monkeypatch):
+    from financial_report_fetcher.market import mcp_client as mc
+
+    monkeypatch.delenv("CHINA_STOCK_MCP_CMD", raising=False)
+    monkeypatch.setattr(mc, "_find_local_venv_command", lambda: None)
+    monkeypatch.setattr(mc, "_find_uvx", lambda: r"C:\venv\Scripts\uvx.exe")
+    assert mc._resolve_server_command() == [r"C:\venv\Scripts\uvx.exe", "china-stock-mcp"]

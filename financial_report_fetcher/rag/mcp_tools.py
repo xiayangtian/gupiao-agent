@@ -89,7 +89,8 @@ def to_openai_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         name = t.get("name")
         if not name:
             continue
-        parameters = t.get("input_schema") or _default_parameters()
+        schema = t.get("input_schema")
+        parameters = schema if isinstance(schema, dict) else _default_parameters()
         out.append({
             "type": "function",
             "function": {

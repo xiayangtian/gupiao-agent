@@ -29,6 +29,14 @@ SYSTEM_PROMPT_TEMPLATE = """你是一位专业的金融分析师，基于检索�
 检索片段：
 {context}"""
 
+RETRIEVAL_FALLBACK_PROMPT = """你是一位专业的金融分析师。当前本地财报检索服务暂时不可用，
+因此没有可核验的财报原文上下文。请根据通用知识和可用工具结果回答；若问题依赖具体财报数据，
+必须明确说明暂时无法从本地财报核验，不得编造数字、出处或引用。回答使用简体中文。"""
+
+EMPTY_RETRIEVAL_TOOL_PROMPT = """你是一位专业的金融分析师。本地知识库没有检索到相关财报片段，
+但你可以调用提供的 MCP 工具查询实时行情、财务指标和公司基本面。优先使用合适的工具回答；
+没有工具数据支撑时明确说明无法核验，不得编造 PDF 引用、具体数字或出处。回答使用简体中文。"""
+
 
 @dataclass
 class Citation:
@@ -79,7 +87,14 @@ class RagQA:
 
         priority_report_id: 指定后提升该报告片段的检索权重（排前补足）。
         """
-        hits = self._query_with_priority(question, filters, priority_report_id)
+        try:
+            hits = self._query_with_priority(question, filters, priority_report_id)
+        except Exception as exc:  # embedding 模型未就绪/网络不可达时降级直答
+            logger.exception("RAG 检索失败，降级为无检索回答：%s", exc)
+            messages = list(history or [])
+            messages.append({"role": "user", "content": question})
+            resp = self.ai_client.chat(messages=messages, system=RETRIEVAL_FALLBACK_PROMPT)
+            return {"answer": resp["content"], "citations": [], "retrieval_degraded": True}
         if not hits:
             return None
 
@@ -194,8 +209,15 @@ class RagQA:
         assistant(tool_calls) + tool(结果) 追加到消息，最多 max_tool_rounds 轮，
         之后强制生成最终答案。未注入 tool_executor 或未传 tools 时走纯 RAG 路径。
         """
-        hits = self._query_with_priority(question, filters, priority_report_id)
-        if not hits:
+        retrieval_degraded = False
+        try:
+            hits = self._query_with_priority(question, filters, priority_report_id)
+        except Exception as exc:  # 首次 embedding 下载失败时不让整条流式问答中断
+            logger.exception("RAG 检索失败，降级为无检索流式回答：%s", exc)
+            hits = []
+            retrieval_degraded = True
+        can_use_tools = bool(tools and self.tool_executor is not None)
+        if not hits and not retrieval_degraded and not can_use_tools:
             yield {"type": "empty"}
             return
 
@@ -205,7 +227,12 @@ class RagQA:
             if h.get("page"):
                 where += f" 第{h['page']}页"
             lines.append(f"[{i}] {where}：{h['text'][:300]}")
-        system = SYSTEM_PROMPT_TEMPLATE.format(context="\n".join(lines))
+        if retrieval_degraded:
+            system = RETRIEVAL_FALLBACK_PROMPT
+        elif not hits:
+            system = EMPTY_RETRIEVAL_TOOL_PROMPT
+        else:
+            system = SYSTEM_PROMPT_TEMPLATE.format(context="\n".join(lines))
 
         messages: List[Dict[str, str]] = []
         if history:
@@ -230,6 +257,7 @@ class RagQA:
                         "model": evt.get("model"),
                         "usage": evt.get("usage") or {},
                         "tools_used": [],
+                        "retrieval_degraded": retrieval_degraded,
                     }
                     return
 
@@ -238,7 +266,9 @@ class RagQA:
         round_no = 0
         while True:
             round_no += 1
-            use_tools = tools if round_no == 1 else None
+            # 每轮都保留工具定义，允许模型在参数校验失败后修正并重试；达到
+            # max_tool_rounds 后才进入下方无工具的最终总结调用。
+            use_tools = tools
             got_tool_calls = False
             for evt in self.ai_client.chat_stream(messages=messages, system=system, tools=use_tools):
                 if evt["type"] == "delta":
@@ -264,7 +294,10 @@ class RagQA:
                         args = self._parse_args(c.get("arguments"))
                         try:
                             result = self.tool_executor(name, args)
-                            ok = True
+                            ok = not result.startswith((
+                                "工具调用失败", "MCP 服务暂不可用",
+                                "无法解析股票", "未获取到",
+                            ))
                         except Exception as exc:
                             result = f"工具调用失败：{exc}"
                             ok = False
@@ -287,6 +320,7 @@ class RagQA:
                         "model": evt.get("model"),
                         "usage": evt.get("usage") or {},
                         "tools_used": tools_used,
+                        "retrieval_degraded": retrieval_degraded,
                     }
                     return
             if got_tool_calls and round_no < self.max_tool_rounds:
@@ -310,6 +344,7 @@ class RagQA:
                     "model": evt.get("model"),
                     "usage": evt.get("usage") or {},
                     "tools_used": tools_used,
+                    "retrieval_degraded": retrieval_degraded,
                 }
                 return
 

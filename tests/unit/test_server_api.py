@@ -1274,8 +1274,46 @@ class TestMcpChat:
         assert r.status_code == 200
         assert "event: done" in r.text
 
+    def test_chat_stream_exposes_retrieval_degraded(self, client, env, monkeypatch, tmp_path):
+        from webapp.chat_store import ChatStore
+
+        monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "sessions.json")))
+
+        class FakeRagQA:
+            def answer_stream(self, question, history=None, filters=None, tools=None,
+                              priority_report_id=None):
+                yield {"type": "done", "answer": "降级回答", "citations": [],
+                       "tools_used": [], "retrieval_degraded": True}
+
+        monkeypatch.setattr(server, "rag_qa", FakeRagQA())
+        response = client.post("/api/chat/stream", json={"question": "测试降级"})
+
+        assert response.status_code == 200
+        assert '"retrieval_degraded": true' in response.text
+
 
 class TestMcpToolExecutor:
+    def test_executor_filters_arguments_by_live_schema(self, monkeypatch):
+        calls = []
+
+        class FakeMCP:
+            def call_tool(self, name, arguments, timeout=None):
+                calls.append((name, arguments))
+                return '{"time":"now"}'
+
+        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+        monkeypatch.setattr(server, "_mcp_tool_input_schemas", {
+            "get_time_info": {"type": "object", "properties": {}},
+        })
+        cfg = type("C", (), {"mcp_tools": True, "mcp_tool_timeout": 15})()
+
+        result = server._build_mcp_tool_executor(cfg)(
+            "get_time_info", {"symbol": "600519", "output_format": "markdown"}
+        )
+
+        assert calls == [("get_time_info", {})]
+        assert result == '{"time":"now"}'
+
     def test_executor_resolves_symbol_name_to_code(self, monkeypatch):
         """执行器把股票名称解析为 6 位代码后再调 MCP"""
         calls = []

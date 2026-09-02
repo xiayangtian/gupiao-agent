@@ -121,6 +121,45 @@ def test_answer_stream_empty_retrieval_yields_empty(tmp_path, fake_embedder):
     assert events == [{"type": "empty"}]
 
 
+def test_answer_stream_empty_retrieval_still_allows_mcp_tools(tmp_path, fake_embedder):
+    store = RagStore(str(tmp_path), fake_embedder)
+    ai = FakeToolAI([
+        [_tool_calls_event([{
+            "id": "call_empty", "name": "get_financial_metrics",
+            "arguments": '{"symbol":"600519"}',
+        }])],
+        [_done_event("根据 MCP 数据回答")],
+    ])
+    executed = []
+    qa = RagQA(store, ai, top_k=4, tool_executor=lambda name, args: (
+        executed.append((name, args)) or '{"revenue": 100}'
+    ))
+
+    events = list(qa.answer_stream("营收多少？", tools=[{"type": "function"}]))
+
+    assert events[-1]["type"] == "done"
+    assert executed == [("get_financial_metrics", {"symbol": "600519"})]
+    assert events[-1]["citations"] == []
+    assert "可以调用提供的 MCP 工具" in ai.calls[0]["system"]
+
+
+def test_answer_stream_embedding_failure_degrades_without_citations():
+    class BrokenStore:
+        def query(self, *args, **kwargs):
+            raise TimeoutError("Hugging Face unavailable")
+
+    ai = FakeAIStream(answer="当前无法核验具体财报数字。")
+    qa = RagQA(BrokenStore(), ai, top_k=4)
+
+    events = list(qa.answer_stream("营收多少？"))
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["retrieval_degraded"] is True
+    assert done["citations"] == []
+    assert "本地财报检索服务暂时不可用" in ai.last_system
+
+
 def test_answer_stream_passthrough_error(tmp_path, fake_embedder):
     """模型流式出错时透传 error 事件"""
     class ErrAI:
@@ -186,8 +225,8 @@ def test_answer_stream_with_tools_executes_and_finishes(tmp_path, fake_embedder)
     assert done["type"] == "done"
     assert done["tools_used"] == ["get_financial_metrics"]
     assert len(done["citations"]) == 1  # RAG 引用仍有效
-    # 第二轮不带 tools
-    assert ai.calls[1]["kwargs"].get("tools") is None
+    # 第二轮仍带 tools，允许模型在参数失败时修正调用
+    assert ai.calls[1]["kwargs"].get("tools") == [{"type": "function"}]
     # assistant tool_calls + tool 消息已追加
     roles = [m["role"] for m in ai.calls[1]["messages"]]
     assert roles == ["user", "assistant", "tool"]
