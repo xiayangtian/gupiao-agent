@@ -40,11 +40,13 @@ def test_analysis_task_registry_survives_reload_and_deduplicates_by_report():
         const first = workflow.createAnalysisTaskRegistry(storage);
         first.track({{
           taskId: 'task-old', code: '600900', period: '2025-12-31',
-          company: '长江电力', dims: ['financial_summary']
+          analysisId: 'a-old', stage: 'fast_ready', lastEventId: 2,
+          updatedAt: '2026-09-02T10:00:00Z'
         }});
         first.track({{
           taskId: 'task-new', code: '600900', period: '2025-12-31',
-          company: '长江电力', dims: ['risk_warning']
+          analysisId: 'a-new', stage: 'deep_processing', lastEventId: 5,
+          updatedAt: '2026-09-02T10:01:00Z'
         }});
         const reloaded = workflow.createAnalysisTaskRegistry(storage);
         console.log(JSON.stringify({{
@@ -59,11 +61,132 @@ def test_analysis_task_registry_survives_reload_and_deduplicates_by_report():
             "taskId": "task-new",
             "code": "600900",
             "period": "2025-12-31",
-            "company": "长江电力",
-            "dims": ["risk_warning"],
+            "analysisId": "a-new",
+            "stage": "deep_processing",
+            "lastEventId": 5,
+            "updatedAt": "2026-09-02T10:01:00Z",
         }
     ]
     assert result["found"]["taskId"] == "task-new"
+
+
+def test_analysis_event_reducer_deduplicates_and_preserves_active_tab():
+    """重复游标必须原样返回；新主题只能提示更新，不能抢占用户当前 Tab。"""
+    result = _run_node(
+        f"""
+        const assert = require('node:assert/strict');
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const initial = {{ lastEventId: 4, activeTab: 'quick', sections: [] }};
+        const duplicate = workflow.applyAnalysisEvent(initial, {{
+          id: 4, type: 'section.ready', payload: {{ section: {{ section_id: 'cash' }} }}
+        }});
+        const updated = workflow.applyAnalysisEvent(initial, {{
+          id: 5, type: 'section.ready',
+          payload: {{ section: {{ section_id: 'cash', title: '现金流' }} }}
+        }});
+        console.log(JSON.stringify({{
+          duplicateSameObject: duplicate === initial,
+          activeTab: updated.activeTab,
+          sections: updated.sections,
+          lastEventId: updated.lastEventId,
+          hasNewFindings: updated.hasNewFindings
+        }}));
+        """
+    )
+
+    assert result == {
+        "duplicateSameObject": True,
+        "activeTab": "quick",
+        "sections": [{"section_id": "cash", "title": "现金流"}],
+        "lastEventId": 5,
+        "hasNewFindings": True,
+    }
+
+
+def test_analysis_event_reducer_merges_quick_corrections_and_terminal_snapshot():
+    """修正应追加而非覆盖快速结论，终态快照要保留当前 Tab。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        let state = {{ lastEventId: 0, activeTab: 'cash', quick: null, sections: [] }};
+        state = workflow.applyAnalysisEvent(state, {{
+          id: 1, type: 'quick.ready', payload: {{ quick: {{ conclusions: [{{ id: 'q1' }}] }} }}
+        }});
+        state = workflow.applyAnalysisEvent(state, {{
+          id: 2, type: 'quick.corrected',
+          payload: {{ correction: {{ conclusion_id: 'q1', before: '100', after: '101' }} }}
+        }});
+        state = workflow.applyAnalysisEvent(state, {{
+          id: 3, type: 'job.completed',
+          payload: {{ analysis: {{ stage: 'completed', sections: [{{ section_id: 'cash' }}] }} }}
+        }});
+        console.log(JSON.stringify(state));
+        """
+    )
+
+    assert result["stage"] == "completed"
+    assert result["activeTab"] == "cash"
+    assert result["quick"]["conclusions"] == [{"id": "q1"}]
+    assert result["quick"]["corrections"] == [
+        {"conclusion_id": "q1", "before": "100", "after": "101"}
+    ]
+    assert result["sections"] == [{"section_id": "cash"}]
+    assert result["lastEventId"] == 3
+
+
+def test_merge_snapshot_restores_refresh_state_without_resetting_active_tab():
+    """刷新轮询到完整快照后，应恢复进度和内容但保持用户当前主题。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const merged = workflow.mergeSnapshot(
+          {{ activeTab: 'cash', lastEventId: 8, sections: [{{ section_id: 'cash' }}] }},
+          {{ status: 'running', result: {{ stage: 'deep_processing', quick: {{ conclusions: [] }},
+             sections: [{{ section_id: 'cash' }}, {{ section_id: 'risk' }}] }} }}
+        );
+        console.log(JSON.stringify(merged));
+        """
+    )
+
+    assert result["activeTab"] == "cash"
+    assert result["lastEventId"] == 8
+    assert result["stage"] == "deep_processing"
+    assert [item["section_id"] for item in result["sections"]] == ["cash", "risk"]
+
+
+def test_registry_storage_event_merges_remote_cursor_without_duplicate_task():
+    """另一标签页推进游标后，本页注册表应原位更新同一报告任务。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const values = {{}};
+        const storage = {{
+          getItem: key => values[key] || null,
+          setItem: (key, value) => {{ values[key] = value; }},
+          removeItem: key => {{ delete values[key]; }}
+        }};
+        const registry = workflow.createAnalysisTaskRegistry(storage, 'tasks');
+        registry.track({{
+          taskId: 't1', code: '600900', period: '2025-12-31', analysisId: 'a1',
+          stage: 'fast_ready', lastEventId: 2, updatedAt: '2026-09-02T10:00:00Z'
+        }});
+        registry.applyStorageEvent({{
+          key: 'tasks',
+          newValue: JSON.stringify({{
+            '600900:2025-12-31': {{
+              taskId: 't1', code: '600900', period: '2025-12-31', analysisId: 'a1',
+              stage: 'deep_processing', lastEventId: 7, updatedAt: '2026-09-02T10:01:00Z'
+            }}
+          }})
+        }});
+        console.log(JSON.stringify({{ active: registry.active(), found: registry.get('600900', '2025-12-31') }}));
+        """
+    )
+
+    assert len(result["active"]) == 1
+    assert result["found"]["taskId"] == "t1"
+    assert result["found"]["stage"] == "deep_processing"
+    assert result["found"]["lastEventId"] == 7
 
 
 def test_analysis_task_registry_removes_terminal_task_from_persistent_storage():
@@ -252,13 +375,21 @@ def test_registry_discards_malformed_saved_tasks_and_repairs_storage():
     )
 
     assert result["active"] == [
-        {"taskId": "task-1", "code": "600900", "period": "2025-12-31"}
+        {
+            "taskId": "task-1", "code": "600900", "period": "2025-12-31",
+            "analysisId": "", "stage": "pending", "lastEventId": 0,
+            "updatedAt": "",
+        }
     ]
     assert result["persisted"] == {
         "600900:2025-12-31": {
             "taskId": "task-1",
             "code": "600900",
             "period": "2025-12-31",
+            "analysisId": "",
+            "stage": "pending",
+            "lastEventId": 0,
+            "updatedAt": "",
         }
     }
 

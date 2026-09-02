@@ -15,34 +15,46 @@
     return task && task.taskId && task.code && task.period;
   }
 
+  function normalizeTask(task) {
+    return {
+      taskId: String(task.taskId),
+      code: String(task.code),
+      period: String(task.period),
+      analysisId: String(task.analysisId || ''),
+      stage: String(task.stage || 'pending'),
+      lastEventId: Math.max(0, Number(task.lastEventId) || 0),
+      updatedAt: String(task.updatedAt || ''),
+    };
+  }
+
+  function parseSavedTasks(raw) {
+    var parsed = JSON.parse(raw || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    var normalized = {};
+    Object.keys(parsed).forEach(function (savedKey) {
+      var task = parsed[savedKey];
+      if (!validTask(task) || Array.isArray(task)) return;
+      var item = normalizeTask(task);
+      normalized[reportKey(item.code, item.period)] = item;
+    });
+    return normalized;
+  }
+
   function createAnalysisTaskRegistry(storage, storageKey) {
     var key = storageKey || DEFAULT_STORAGE_KEY;
     var tasks = {};
     var needsRepair = false;
 
     try {
-      var saved = JSON.parse(storage.getItem(key) || '{}');
-      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
-        Object.keys(saved).forEach(function (savedKey) {
-          var task = saved[savedKey];
-          if (!validTask(task) || Array.isArray(task)) {
-            needsRepair = true;
-            return;
-          }
-          var normalized = {
-            taskId: String(task.taskId),
-            code: String(task.code),
-            period: String(task.period),
-          };
-          if (task.company) normalized.company = String(task.company);
-          if (Array.isArray(task.dims)) normalized.dims = task.dims.slice();
-          var normalizedKey = reportKey(normalized.code, normalized.period);
-          if (savedKey !== normalizedKey) needsRepair = true;
-          tasks[normalizedKey] = normalized;
+      var raw = storage.getItem(key) || '{}';
+      var saved = JSON.parse(raw);
+      tasks = parseSavedTasks(raw);
+      needsRepair = !saved || typeof saved !== 'object' || Array.isArray(saved)
+        || Object.keys(tasks).length !== Object.keys(saved).length
+        || Object.keys(saved).some(function (savedKey) {
+          var item = saved[savedKey];
+          return !validTask(item) || savedKey !== reportKey(item.code, item.period);
         });
-      } else {
-        needsRepair = true;
-      }
     } catch (_) {
       tasks = {};
       needsRepair = true;
@@ -69,13 +81,7 @@
       },
       track: function (task) {
         if (!validTask(task)) throw new Error('分析任务缺少 taskId、code 或 period');
-        var normalized = {
-          taskId: String(task.taskId),
-          code: String(task.code),
-          period: String(task.period),
-        };
-        if (task.company) normalized.company = String(task.company);
-        if (Array.isArray(task.dims)) normalized.dims = task.dims.slice();
+        var normalized = normalizeTask(task);
         tasks[reportKey(normalized.code, normalized.period)] = normalized;
         persist();
         return normalized;
@@ -87,7 +93,92 @@
       active: function () {
         return Object.keys(tasks).map(function (taskKey) { return tasks[taskKey]; });
       },
+      applyStorageEvent: function (event) {
+        if (!event || event.key !== key) return false;
+        try {
+          tasks = parseSavedTasks(event.newValue || '{}');
+        } catch (_) {
+          return false;
+        }
+        return true;
+      },
     };
+  }
+
+  function upsertById(items, incoming, idField) {
+    var id = incoming && incoming[idField];
+    if (!id) return (items || []).slice();
+    var replaced = false;
+    var output = (items || []).map(function (item) {
+      if (String(item[idField]) !== String(id)) return item;
+      replaced = true;
+      return incoming;
+    });
+    if (!replaced) output.push(incoming);
+    return output;
+  }
+
+  function mergeSnapshot(state, snapshot) {
+    var current = state || {};
+    var wrapper = snapshot || {};
+    var result = wrapper.result && typeof wrapper.result === 'object'
+      ? wrapper.result : wrapper;
+    var merged = Object.assign({}, current);
+    Object.keys(result || {}).forEach(function (key) {
+      if (key === 'activeTab' || key === 'lastEventId') return;
+      merged[key] = result[key];
+    });
+    if (!merged.stage && wrapper.status) merged.stage = wrapper.status;
+    merged.activeTab = current.activeTab || 'quick';
+    merged.lastEventId = Math.max(0, Number(current.lastEventId) || 0);
+    return merged;
+  }
+
+  function applyAnalysisEvent(state, event) {
+    var current = state || {};
+    var eventId = Math.max(0, Number(event && event.id) || 0);
+    if (!event || eventId <= (Number(current.lastEventId) || 0)) return current;
+    var payload = event.payload || {};
+    var next = Object.assign({}, current, { lastEventId: eventId });
+    var type = event.type;
+
+    if (type === 'quick.ready' && payload.quick) {
+      next.quick = payload.quick;
+      if (!next.activeTab) next.activeTab = 'quick';
+    } else if (type === 'quick.corrected' && payload.correction) {
+      var quick = Object.assign({}, next.quick || {});
+      quick.corrections = (quick.corrections || []).concat([payload.correction]);
+      next.quick = quick;
+    } else if ((type === 'section.ready' || type === 'section.updated') && payload.section) {
+      next.sections = upsertById(next.sections, payload.section, 'section_id');
+      next.hasNewFindings = next.activeTab !== payload.section.section_id;
+    } else if (type === 'job.stage_changed' && payload.stage) {
+      next.stage = payload.stage;
+    } else if (type === 'extraction.page_started' || type === 'extraction.page_completed') {
+      var pages = Object.assign({}, next.extractionPages || {});
+      pages[String(payload.page)] = Object.assign({}, payload, {
+        status: type === 'extraction.page_started' ? 'running' : (payload.status || 'completed'),
+      });
+      next.extractionPages = pages;
+    } else if (type === 'theme.started' && payload.candidate_id) {
+      next.currentTheme = payload.candidate_id;
+    } else if (type === 'theme.filtered' && payload.candidate_id) {
+      next.filteredTopics = upsertById(
+        next.filteredTopics,
+        { candidate_id: payload.candidate_id, reason: payload.reason || '' },
+        'candidate_id'
+      );
+    } else if (type === 'job.completed' || type === 'job.partial'
+      || type === 'job.failed' || type === 'job.cancelled') {
+      var activeTab = next.activeTab;
+      var cursor = next.lastEventId;
+      next = mergeSnapshot(next, payload.analysis || {});
+      next.activeTab = activeTab || 'quick';
+      next.lastEventId = cursor;
+      next.stage = type.slice(4);
+      if (payload.error) next.error = payload.error;
+    }
+    return next;
   }
 
   function goToReportChat(state, report, startNewSession, navigate) {
@@ -252,6 +343,7 @@
   }
 
   return {
+    applyAnalysisEvent: applyAnalysisEvent,
     analysisTerminalBadge: analysisTerminalBadge,
     analysisProgressModel: analysisProgressModel,
     createAnalysisTaskRegistry: createAnalysisTaskRegistry,
@@ -261,6 +353,7 @@
     goToReportChat: goToReportChat,
     historyDimensionDefaults: historyDimensionDefaults,
     historySelectionIsCurrent: historySelectionIsCurrent,
+    mergeSnapshot: mergeSnapshot,
     openPendingHistoryReport: openPendingHistoryReport,
     pdfDownloadFallbackUrl: pdfDownloadFallbackUrl,
     reconcileAnalysisTerminal: reconcileAnalysisTerminal,
