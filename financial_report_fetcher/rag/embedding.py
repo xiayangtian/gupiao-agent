@@ -5,7 +5,11 @@
 """
 
 import os
-from typing import List, Optional, Protocol
+from typing import Any, List, Optional, Protocol
+
+
+# 保留可注入的模块级工厂，同时避免在模块加载时导入 fastembed。
+TextEmbedding: Any = None
 
 
 class Embedder(Protocol):
@@ -34,9 +38,11 @@ class LocalEmbedder:
             # 在设置镜像后再延迟导入，否则运行期配置不会生效。
             if self.hf_endpoint and not os.environ.get("HF_ENDPOINT"):
                 os.environ["HF_ENDPOINT"] = self.hf_endpoint
-            from fastembed import TextEmbedding
+            factory = TextEmbedding
+            if factory is None:
+                from fastembed import TextEmbedding as factory
 
-            self._model = TextEmbedding(model_name=self.model_name)
+            self._model = factory(model_name=self.model_name)
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         self._ensure_model()
