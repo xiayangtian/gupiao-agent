@@ -172,6 +172,7 @@ class AnalysisDocument:
     company_name: str = ""
     period: str = ""
     source_file: str = ""
+    performance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def legacy(self) -> bool:
@@ -195,6 +196,7 @@ class AnalysisDocument:
             "errors": [item.to_dict() for item in self.errors],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "performance": dict(self.performance),
             "meta": {
                 "company": self.company_name,
                 "company_code": self.company_code,
@@ -231,6 +233,7 @@ class AnalysisDocument:
             company_name=str(meta.get("company", "")),
             period=str(meta.get("period", "")),
             source_file=str(meta.get("source_file", "")),
+            performance=dict(data.get("performance") or {}),
         )
 
 

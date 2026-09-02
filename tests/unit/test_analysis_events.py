@@ -28,7 +28,10 @@ def test_event_and_snapshot_are_updated_in_one_transaction(tmp_path):
     store.create("t1")
 
     store.append_event("t1", "job.stage_changed", {"stage": "fast_ready"})
-    store.append_event("t1", "quick.ready", {"quick": {"conclusions": [{"id": "q1"}]}})
+    store.append_event("t1", "quick.ready", {
+        "quick": {"conclusions": [{"id": "q1"}]},
+        "evidence_catalog": {"e1": {"value": "100"}},
+    })
     store.append_event("t1", "section.ready", {"section": {"section_id": "cash"}})
     store.append_event(
         "t1", "section.updated", {"section": {"section_id": "cash", "title": "已更新"}}
@@ -37,6 +40,7 @@ def test_event_and_snapshot_are_updated_in_one_transaction(tmp_path):
     snapshot = store.get("t1")["result"]
     assert snapshot["stage"] == "fast_ready"
     assert snapshot["quick"]["conclusions"] == [{"id": "q1"}]
+    assert snapshot["evidence_catalog"] == {"e1": {"value": "100"}}
     assert snapshot["sections"] == [{"section_id": "cash", "title": "已更新"}]
     store.close()
 

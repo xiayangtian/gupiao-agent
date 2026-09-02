@@ -1,0 +1,11 @@
+{
+  "id": "conflicting-sources",
+  "facts": [
+    {"name": "revenue", "expected_value": "100", "actual_value": "100", "expected_scope": "consolidated", "actual_scope": "consolidated"},
+    {"name": "parent_revenue", "expected_value": "80", "actual_value": "80", "expected_scope": "parent", "actual_scope": "parent"}
+  ],
+  "claims": [{"text": "结构化来源与 PDF 存在 100/120 冲突", "deterministic": false, "supported": true}],
+  "conflicts": [{"fact": "revenue", "values": ["100", "120"], "resolved": false, "auto_selected": false}],
+  "topics": [{"id": "conflicted-growth", "low_evidence": true, "filtered": true}],
+  "performance": {"quick_latency_seconds": 1.5, "completion_latency_seconds": 4.2}
+}

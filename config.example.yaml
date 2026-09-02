@@ -27,6 +27,7 @@ analysis:
   ocr_enabled: true                # OCR 依赖可用时，按页面质量选择性启用
   ocr_min_chars: 120               # 少于该字符数的页面进入 OCR 候选
   numeric_relative_tolerance: 0.001
+  # 未设置 TUSHARE_TOKEN 时自动跳过 Tushare，直接使用无需 Token 的 AKShare
   structured_providers: [tushare, akshare]
   evidence_cache_dir: data/evidence_cache
   quick_io_workers: 2

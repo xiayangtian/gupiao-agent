@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import Event
+from time import perf_counter
 from typing import Any, Callable, Sequence
 
 from .analysis_config import AnalysisConfig
@@ -53,6 +54,11 @@ class AnalysisPipelineRequest:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _timed_call(call, *args):
+    started = perf_counter()
+    return call(*args), round((perf_counter() - started) * 1000, 3)
 
 
 class ProgressiveAnalysisPipeline:
@@ -244,19 +250,21 @@ class ProgressiveAnalysisPipeline:
         emit: EventEmitter,
         stop_event: Event,
     ) -> AnalysisDocument:
+        started_at = perf_counter()
         emit("job.stage_changed", {"stage": "fast_processing"})
         structured_future = self.quick_executor.submit(
+            _timed_call,
             self.structured_gateway.fetch,
             request.company_code,
             request.period,
             request.report_id,
         )
         document_future = self.quick_executor.submit(
-            self.document_extractor.extract, request.pdf_path, request.report_id
+            _timed_call, self.document_extractor.extract, request.pdf_path, request.report_id
         )
         try:
-            structured = structured_future.result()
-            extracted = document_future.result()
+            structured, structured_fetch_ms = structured_future.result()
+            extracted, pdf_extract_ms = document_future.result()
             resolved = self.resolver.resolve([
                 *structured.records, *self.pdf_records(extracted, request.period)
             ])
@@ -266,6 +274,19 @@ class ProgressiveAnalysisPipeline:
             raise
 
         document = self._new_document(request, quick, resolved.records)
+        document.performance = {
+            "structured_fetch_ms": structured_fetch_ms,
+            "pdf_extract_ms": pdf_extract_ms,
+            "quick_ready_ms": round((perf_counter() - started_at) * 1000, 3),
+            "ocr_ms": 0.0,
+            "section_ready_ms": [],
+            "total_ms": 0.0,
+            "cache_hit": bool(
+                getattr(structured, "cache_hit", False)
+                or getattr(extracted, "cache_hit", False)
+            ),
+            "interest_count": len(request.interests),
+        }
         self._save(document, request)
         emit("job.stage_changed", {"stage": "fast_ready"})
         emit("quick.ready", {
@@ -273,14 +294,18 @@ class ProgressiveAnalysisPipeline:
             "evidence_catalog": document.to_dict()["evidence_catalog"],
         })
         if stop_event.is_set():
+            document.performance["total_ms"] = round((perf_counter() - started_at) * 1000, 3)
             return self._finish_cancelled(document, request, emit)
 
         document.stage = "deep_processing"
         self._save(document, request)
         emit("job.stage_changed", {"stage": "deep_processing"})
-        ocr_pages = [page.page_number for page in extracted.pages if page.needs_ocr]
+        ocr_pages = [
+            page.page_number for page in extracted.pages
+            if self.config.ocr_enabled and page.needs_ocr
+        ]
         ocr_future = self.ocr_executor.submit(
-            self._enrich_ocr, request, ocr_pages, emit, stop_event
+            _timed_call, self._enrich_ocr, request, ocr_pages, emit, stop_event
         )
 
         evidence = {record.stable_id: record for record in resolved.records}
@@ -325,6 +350,9 @@ class ProgressiveAnalysisPipeline:
                 continue
             document.sections.append(section)
             document.sections.sort(key=lambda item: order[item.section_id])
+            document.performance["section_ready_ms"].append(
+                round((perf_counter() - started_at) * 1000, 3)
+            )
             self._save(document, request)
             section_payload = next(
                 item for item in document.to_dict()["sections"]
@@ -332,8 +360,10 @@ class ProgressiveAnalysisPipeline:
             )
             emit("section.ready", {"section": section_payload})
 
-        ocr_records = ocr_future.result()
+        ocr_records, ocr_ms = ocr_future.result()
+        document.performance["ocr_ms"] = ocr_ms
         if stop_event.is_set():
+            document.performance["total_ms"] = round((perf_counter() - started_at) * 1000, 3)
             return self._finish_cancelled(document, request, emit)
         if ocr_records:
             merged = self.resolver.resolve([*resolved.records, *ocr_records])
@@ -348,6 +378,7 @@ class ProgressiveAnalysisPipeline:
                     emit("quick.corrected", {"correction": correction.to_dict()})
 
         document.stage = "partial" if document.errors else "completed"
+        document.performance["total_ms"] = round((perf_counter() - started_at) * 1000, 3)
         self._save(document, request)
         emit(f"job.{document.stage}", {"analysis": document.to_dict()})
         return document

@@ -1,7 +1,7 @@
 # gp-agent — 中国上市公司财报获取与 AI 分析工具
 
 输入股票代码或名称，自动从巨潮资讯网（CNINFO）抓取年报 / 半年报 / 季报 PDF，
-再用 AI 生成财务摘要、风险识别、盈利质量、现金流等多维度分析，并支持针对财报内容自由追问。
+融合结构化财务数据、PDF 文本和按需 OCR 生成证据化分析，并支持针对财报内容自由追问。
 
 ## 功能列表
 
@@ -25,13 +25,12 @@
 - 股票名称 / 代码**自动补全**（输入 ≥1 字符即触发）
 - **财报列表**：按报告期展示，本地已下载的财报带 ✓ 标记
 - **PDF 预览**：浏览器内嵌 iframe 直接查看；首次预览自动下载（下载期间 iframe 暂时空白）
-- **AI 多维分析**：12 个分析维度可勾选（含「全选 / 清空」快捷按钮），默认勾选
-  财务摘要 / 风险识别 / 经营亮点 / 盈利质量 / 现金流五个；启用 RAG 后分析上下文由
-  「截断全文」升级为「按维度定向检索片段」（覆盖年报任意章节），检索为空时自动回退截断全文；
-  后台任务并发执行（默认 3 个并行，可用环境变量 `TASK_MAX_WORKERS` 调整），可同时
-  分析多组财报；分析中可随时点击「⏹ 停止分析」（当前维度完成后生效）；结果分维度
-  卡片展示；分析结果自动双份落盘服务器 `reports/analysis/`（.md + .json），页面展示保存路径
-- **自由问答**：针对所选财报提问，保留最近 4 轮会话上下文
+- **渐进式证据分析**：首次分析和重新分析都可多选“关注方向”。快速结论优先返回，详细主题
+  根据证据质量动态生成、过滤和排序，不再固定返回空 Tab；页面通过 SSE 自动追加内容，切换页面
+  或刷新后仍可恢复状态。数值结论带可展开证据，冲突来源不会自动选一个确定值。
+- **后台任务**：默认 3 个并行，可用环境变量 `TASK_MAX_WORKERS` 调整；可停止分析，结果自动
+  双份落盘到 `reports/analysis/`（.md + .json）。SSE 断开时前端自动改用 1–10 秒指数退避轮询。
+- **报告问答入口**：从财报或历史报告跳转到智能问答并开启聚焦该报告的新会话，不在报告页内续聊
 - **智能问答**（RAG 通用问答）：答案流式输出（SSE），模型响应前显示「思考中」状态，
   可随时点击「⏹ 停止」中断生成（已生成部分自动保存）；多个会话可同时发起请求
   （各自独立流式、互不阻塞）；历史会话自动落盘保存，支持开启新会话与跳转历史会话继续追问
@@ -97,6 +96,23 @@ python3 -m financial_report_fetcher analyze --all --dir reports --output reports
 ```
 
 分析报告默认落在 `reports/analysis/`，每个分析结果同时输出 Markdown 与 JSON 两份文件。
+
+### 2.1 证据数据、OCR 与降级路径
+
+- 结构化数据默认可使用无需 Token 的 AKShare。设置环境变量 `TUSHARE_TOKEN` 后会同时启用
+  Tushare；Token 不写入 `config.yaml`。任一提供方失败不会中止分析。
+- PDF 原生文本始终是基础来源。结构化数据不可用时自动只用 PDF；PDF 某页文本过少、疑似表格
+  或图表时才进入 OCR 队列，OCR 不阻塞快速结论。
+- 本地 OCR 为可选依赖：`pip install -r requirements-ocr.txt`。PaddleOCR 模型由其运行时下载并缓存；
+  没有安装 OCR 时对应页面会记录失败，已完成的快速结论和其他主题仍会保留。也可设置
+  `analysis.ocr_enabled: false` 完全关闭 OCR。
+- 证据缓存目录配置为 `analysis.evidence_cache_dir`（默认 `data/evidence_cache`）。启用缓存的流程
+  若在该目录生成文件，需要清理时先停止服务，确认目录后删除其中的 `.json` / `.corrupt` 文件。
+
+分析 API 为 `POST /api/reports/{code}/{period}/analyze`，请求体使用
+`{"interests":["cash_flow","risks"]}`。响应中的 `event_url` 用于 SSE，`status_url` 用于刷新恢复
+和断线轮询。快速阶段会先发 `quick.ready`，详细主题逐个发 `section.ready`，终态发送
+`job.completed` / `job.partial` / `job.failed` / `job.cancelled`。
 
 ### 3. 与财报交互问答
 
@@ -215,6 +231,18 @@ Windows PowerShell：
 ```bash
 python3 -m pytest -q
 ```
+
+离线黄金集会覆盖一致数据、来源冲突和扫描页。计算质量指标：
+
+```bash
+python3 scripts/evaluate_analysis_quality.py \
+  --manifest tests/quality/golden_manifest.json \
+  --output /tmp/analysis-quality.json
+```
+
+如需核对本地真实年报，设置 `GOLDEN_REPORT_DIR` 指向 PDF 目录；未设置时真实报告测试会明确跳过，
+不影响确定性的离线集成测试。指标包含数值准确率、主体口径准确率、无证据确定性结论数、
+未解决冲突自动选择数、低证据主题过滤数，以及快速/完整阶段时延。
 
 ## 目录结构
 

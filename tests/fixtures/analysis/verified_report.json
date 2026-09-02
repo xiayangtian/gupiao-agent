@@ -1,0 +1,11 @@
+{
+  "id": "verified-industrial",
+  "facts": [
+    {"name": "revenue", "expected_value": "100", "actual_value": "100", "expected_scope": "consolidated", "actual_scope": "consolidated"},
+    {"name": "cash_flow", "expected_value": "28", "actual_value": "28", "expected_scope": "consolidated", "actual_scope": "consolidated"}
+  ],
+  "claims": [{"text": "营业收入为 100 亿元", "deterministic": true, "supported": true}],
+  "conflicts": [],
+  "topics": [{"id": "minor-note", "low_evidence": true, "filtered": true}],
+  "performance": {"quick_latency_seconds": 1.2, "completion_latency_seconds": 3.8}
+}

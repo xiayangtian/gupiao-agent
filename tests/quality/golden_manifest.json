@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"id": "industrial", "category": "industrial", "fixture": "tests/fixtures/analysis/verified_report.json", "pdf": "industrial.pdf"},
+    {"id": "financial", "category": "financial", "fixture": "tests/fixtures/analysis/verified_report.json", "pdf": "financial.pdf"},
+    {"id": "scanned", "category": "scanned", "fixture": "tests/fixtures/analysis/scanned_pages.json", "pdf": "scanned.pdf"},
+    {"id": "cross-page-table", "category": "cross_page_table", "fixture": "tests/fixtures/analysis/scanned_pages.json", "pdf": "cross-page-table.pdf"},
+    {"id": "chart", "category": "chart", "fixture": "tests/fixtures/analysis/scanned_pages.json", "pdf": "chart.pdf"},
+    {"id": "multi-entity", "category": "multi_entity", "fixture": "tests/fixtures/analysis/conflicting_sources.json", "pdf": "multi-entity.pdf"},
+    {"id": "missing-source", "category": "missing_source", "fixture": "tests/fixtures/analysis/conflicting_sources.json", "pdf": "missing-source.pdf"},
+    {"id": "source-conflict", "category": "source_conflict", "fixture": "tests/fixtures/analysis/conflicting_sources.json", "pdf": "source-conflict.pdf"},
+    {"id": "legacy", "category": "legacy", "fixture": "tests/fixtures/analysis/verified_report.json", "pdf": "legacy.pdf"}
+  ]
+}

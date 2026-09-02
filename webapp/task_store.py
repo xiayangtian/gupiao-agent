@@ -46,6 +46,8 @@ def _apply_event(snapshot: Any, event_type: str, payload: Dict[str, Any]) -> Dic
         result["stage"] = payload["stage"]
     elif event_type == "quick.ready" and isinstance(payload.get("quick"), dict):
         result["quick"] = payload["quick"]
+        if isinstance(payload.get("evidence_catalog"), dict):
+            result["evidence_catalog"] = payload["evidence_catalog"]
     elif event_type in {"section.ready", "section.updated"}:
         section = payload.get("section")
         if isinstance(section, dict) and section.get("section_id"):

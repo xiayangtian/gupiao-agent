@@ -1,0 +1,13 @@
+{
+  "id": "scanned-pages",
+  "pages": [
+    {"page": 3, "needs_ocr": true, "content": "chart"},
+    {"page": 4, "needs_ocr": false, "content": "native_text"},
+    {"page": 8, "needs_ocr": true, "content": "table"}
+  ],
+  "facts": [],
+  "claims": [],
+  "conflicts": [],
+  "topics": [],
+  "performance": {"quick_latency_seconds": 0.9, "completion_latency_seconds": 5.1}
+}

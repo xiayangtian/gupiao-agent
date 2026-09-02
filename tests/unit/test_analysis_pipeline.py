@@ -67,7 +67,11 @@ class FakeExtractor:
 
 
 class FakeOcr:
+    def __init__(self):
+        self.calls = []
+
     def enrich(self, pdf_path, report_id, pages):
+        self.calls.append(tuple(pages))
         return [_record("ocr-1", source_type=SourceType.OCR_TEXT, page=pages[0])]
 
 
@@ -163,6 +167,10 @@ def test_quick_result_is_persisted_and_emitted_before_ocr_and_deep_sections(tmp_
     saved = load_analysis_document(tmp_path / "analysis-1.json")
     assert saved.stage == "completed"
     assert json.loads((tmp_path / "analysis-1.json").read_text())["schema_version"] == 3
+    assert result.performance["interest_count"] == 1
+    assert result.performance["quick_ready_ms"] >= 0
+    assert result.performance["total_ms"] >= result.performance["quick_ready_ms"]
+    assert len(result.performance["section_ready_ms"]) == 2
 
 
 def test_one_theme_failure_yields_partial_and_keeps_ready_section(tmp_path):
@@ -193,6 +201,18 @@ def test_cancel_preserves_quick_result_and_emits_cancelled(tmp_path):
     assert result.stage == "cancelled"
     assert result.quick is not None
     assert events[-1][0] == "job.cancelled"
+
+
+def test_ocr_can_be_disabled_without_delaying_quick_or_deep_results(tmp_path):
+    pipeline, _ = _pipeline(tmp_path)
+    pipeline.config = AnalysisConfig(detail_score_threshold=70, ocr_enabled=False)
+    events = []
+
+    result = pipeline.run(_request(), lambda kind, data: events.append((kind, data)), Event())
+
+    assert pipeline.ocr_engine.calls == []
+    assert not any(kind == "extraction.page_started" for kind, _ in events)
+    assert result.stage == "completed"
 
 
 def test_legacy_analysis_document_loads_without_rewriting(tmp_path):
