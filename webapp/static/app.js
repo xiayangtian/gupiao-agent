@@ -2477,6 +2477,7 @@ async function submitQuestion(q, key) {
           if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
           thinkingEl = null;
           appendChatMsg('#chat-history', 'assistant', st.answerText);
+          appendChatElapsed('#chat-history', parsed.data.elapsed_seconds);
           appendCitations('#chat-history', parsed.data.citations || []);
           appendWebSources('#chat-history', parsed.data.web_sources || []);
           if (parsed.data.retrieval_degraded) {
@@ -2585,6 +2586,16 @@ function appendChatMsg(sel, role, content) {
   div.innerHTML = role === 'user' ? escapeHtml(content) : renderMarkdown(content);
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
+}
+
+function appendChatElapsed(sel, elapsedSeconds) {
+  var seconds = Number(elapsedSeconds);
+  var box = $(sel);
+  if (!box || !Number.isFinite(seconds) || seconds < 0) return;
+  var div = document.createElement('div');
+  div.className = 'chat-elapsed';
+  div.textContent = '处理耗时：' + seconds.toFixed(2) + ' 秒';
+  box.appendChild(div);
 }
 
 // ── 引用卡片：智能问答页 / 分析页 / 历史页复用 ──

@@ -1026,6 +1026,7 @@ def get_task(task_id: str) -> Dict[str, Any]:
 
 @app.post("/api/reports/{code}/{period}/chat")
 def chat(code: str, period: str, body: ChatRequest) -> Dict[str, Any]:
+    started_at = time.perf_counter()
     _require_ai()
     if not body.question.strip():
         raise HTTPException(400, "问题不能为空")
@@ -1060,7 +1061,10 @@ def chat(code: str, period: str, body: ChatRequest) -> Dict[str, Any]:
     ]
     with _chat_lock:
         chat_sessions[session_key] = history[-8:]  # 保留最近 4 轮
-    resp: Dict[str, Any] = {"answer": answer}
+    resp: Dict[str, Any] = {
+        "answer": answer,
+        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+    }
     if citations:
         resp["citations"] = citations
     return resp
@@ -1070,6 +1074,7 @@ def chat(code: str, period: str, body: ChatRequest) -> Dict[str, Any]:
 
 @app.post("/api/chat")
 def global_chat(body: GlobalChatRequest) -> Dict[str, Any]:
+    started_at = time.perf_counter()
     _require_ai()
     if not body.question.strip():
         raise HTTPException(400, "问题不能为空")
@@ -1077,7 +1082,12 @@ def global_chat(body: GlobalChatRequest) -> Dict[str, Any]:
         raise HTTPException(503, "RAG 知识库未初始化：请配置 rag.enabled 并执行索引")
     result = rag_qa.answer(body.question, filters=body.filters)
     if result is None:
-        return {"answer": "知识库中未检索到相关内容，请补充更多报告或更换问法。", "citations": []}
+        return {
+            "answer": "知识库中未检索到相关内容，请补充更多报告或更换问法。",
+            "citations": [],
+            "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+        }
+    result["elapsed_seconds"] = round(time.perf_counter() - started_at, 3)
     return result
 
 
@@ -1099,6 +1109,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     回答后自动把 {user, assistant} 写入会话历史（多轮上下文用最近 4 轮）。
     用户主动停止（前端断开连接）时，已生成的部分内容也会保存进历史。
     """
+    started_at = time.perf_counter()
     _require_ai()
     if not body.question.strip():
         raise HTTPException(400, "问题不能为空")
@@ -1195,10 +1206,18 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         {"role": "assistant", "content": default},
                     ])
                     saved = True
-                    yield _sse("done", {"answer": default, "citations": [], "session_id": sid})
+                    yield _sse("done", {
+                        "answer": default,
+                        "citations": [],
+                        "session_id": sid,
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                    })
                     return
                 elif evt["type"] == "error":
-                    yield _sse("error", {"error": evt.get("error", "未知错误")})
+                    yield _sse("error", {
+                        "error": evt.get("error", "未知错误"),
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                    })
                 elif evt["type"] == "done":
                     answer = evt.get("answer") or ""
                     chat_store.append_messages(sid, [
@@ -1213,11 +1232,15 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         "tools_used": evt.get("tools_used", []),
                         "web_sources": evt.get("web_sources", []),
                         "retrieval_degraded": evt.get("retrieval_degraded", False),
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
                     return
         except Exception as exc:
             logger.exception("流式问答失败")
-            yield _sse("error", {"error": f"流式问答失败：{exc}"})
+            yield _sse("error", {
+                "error": f"流式问答失败：{exc}",
+                "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+            })
         finally:
             stop_producer.set()
             # 未正常完成（停止/断开/异常）：把已生成的部分内容保存进历史

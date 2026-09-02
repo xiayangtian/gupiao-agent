@@ -450,6 +450,7 @@ class TestChat:
         )
         assert r1.status_code == 200
         assert r1.json()["answer"] == "测试 AI 回答"
+        assert r1.json()["elapsed_seconds"] >= 0
         # 第二次提问时 qa() 收到的 history 应含第一轮两条消息
         client.post(
             "/api/reports/600900/2025-12-31/chat",
@@ -632,6 +633,7 @@ class TestRagApi:
         r = client.post("/api/chat", json={"question": "长江电力营收？"})
         assert r.status_code == 200
         assert r.json()["answer"] == "RAG 回答"
+        assert r.json()["elapsed_seconds"] >= 0
 
     def test_global_chat_requires_ai_key(self, client, env):
         env["fake_ai"].api_key = ""
@@ -1120,6 +1122,8 @@ class TestChatSessionsApi:
         assert "event: delta" in body
         assert "营收" in body
         assert "event: done" in body
+        done_data = json.loads(body.split("event: done\ndata: ", 1)[1].split("\n\n", 1)[0])
+        assert done_data["elapsed_seconds"] >= 0
         # 会话已持久化（user + assistant）
         sessions = store.list_sessions()
         assert len(sessions) == 1
