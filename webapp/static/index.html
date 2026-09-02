@@ -42,8 +42,8 @@
       <a href="#/analysis" class="home-card">
         <span class="home-card-icon">🔍</span>
         <h3>财报分析</h3>
-        <p>12 个分析维度可勾选（财务摘要 / 风险识别 / 盈利质量 / 现金流等），RAG 按维度定向检索全文，
-          支持多组并发分析、一键停止、结果分维度卡片展示</p>
+        <p>按财务概览、现金流、风险等关注方向灵活分析，快速结论优先展示，
+          详细主题会依据证据质量动态生成并自动补充</p>
         <span class="home-card-btn">进入分析 →</span>
       </a>
       <a href="#/history" class="home-card">
@@ -55,7 +55,7 @@
       <a href="#/rag" class="home-card">
         <span class="home-card-icon">🧠</span>
         <h3>RAG 知识库</h3>
-        <p>管理年报 PDF 与分析报告索引（摄取 / 删除 / 状态），为多维度分析与智能问答提供全文检索能力</p>
+        <p>管理年报 PDF 与分析报告索引（摄取 / 删除 / 状态），为动态报告分析与智能问答提供全文检索能力</p>
         <span class="home-card-btn">进入知识库 →</span>
       </a>
       <a href="#/chat" class="home-card">
@@ -146,16 +146,17 @@
           <h2>AI 分析</h2>
         </div>
         <div class="panel-body scroll">
-          <div class="dim-checkboxes" id="dims">
-            <!-- 维度清单由 GET /api/analysis/dimensions 动态渲染（initAnalysisPage） -->
-          </div>
-          <div class="dim-toolbar">
-            <button id="dims-select-all" class="btn dim-tool-btn">全选</button>
-            <button id="dims-clear" class="btn dim-tool-btn">清空</button>
-            <span id="dims-count" class="dim-count"></span>
-          </div>
+          <button id="analysis-interest-open" class="btn full-btn" type="button">选择关注方向</button>
+          <p id="analysis-interest-summary" class="hint analysis-interest-summary">默认关注财务概览、现金流和风险</p>
           <button id="view-local-btn" class="btn full-btn local-btn hidden">📄 查看本地分析</button>
           <button id="analyze-btn" class="btn primary full-btn" disabled>开始分析</button>
+          <section id="analysis-background-status" class="analysis-background-status hidden"
+                   role="status" aria-live="polite" aria-atomic="true"></section>
+          <div id="analysis-result-tabs" class="analysis-result-tabs hidden" role="tablist" aria-label="分析结果">
+            <button type="button" class="analysis-result-tab active" data-analysis-tab="quick"
+                    role="tab" aria-selected="true">快速结论</button>
+            <span id="analysis-dynamic-tabs"></span>
+          </div>
           <div id="analyze-result"></div>
 
           <div class="qa-box">
@@ -228,7 +229,7 @@
           aria-describedby="history-dim-report">
     <div class="analysis-dialog-head">
       <div>
-        <h2 id="history-dim-title">选择分析维度</h2>
+        <h2 id="history-dim-title">选择关注方向</h2>
         <p id="history-dim-report" class="hint"></p>
       </div>
       <button id="history-dim-cancel" type="button" class="dialog-close" aria-label="关闭">×</button>

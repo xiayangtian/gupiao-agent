@@ -39,7 +39,7 @@ const STATE = {
   analysisCache: {},        // 两个页面共享："code:period" -> { status, taskId?, data?, error?, dims? }
   analysisPolls: {},        // taskId -> true，防止恢复/切页时重复轮询
   analysisRestoreStarted: false,
-  analysisDimensions: [],   // GET /api/analysis/dimensions 返回的可勾选维度
+  analysisDimensions: [],   // GET /api/analysis/interests 返回的可选关注方向
   currentReports: [],
   downloading: {},          // "code:period" -> true（财报下载中，按钮转圈）
 
@@ -48,7 +48,7 @@ const STATE = {
   historyCollapsed: {},      // code -> true（历史记录公司分组收起）
   historySelected: null,
   pendingHistoryReport: null, // 财报页跳转历史页后待自动选中的 {code, period}
-  historyAnalysisByReport: {}, // "code:period" -> 上次请求维度，用于重新分析默认勾选
+  historyAnalysisByReport: {}, // "code:period" -> 上次关注方向，用于重新分析默认勾选
   historyView: 'analysis',       // 历史详情当前 Tab
   chatFocusReport: null,        // {code, period, company} 历史记录跳转：聚焦该报告（提升 RAG 权重）
 
@@ -60,6 +60,22 @@ const STATE = {
 };
 
 var analysisTaskRegistry = window.AnalysisWorkflow.createAnalysisTaskRegistry(window.localStorage);
+
+window.addEventListener('storage', function (event) {
+  if (!analysisTaskRegistry.applyStorageEvent(event)) return;
+  analysisTaskRegistry.active().forEach(function (task) {
+    var key = analysisKey(task.code, task.period);
+    if (!STATE.analysisCache[key]) {
+      STATE.analysisCache[key] = {
+        status: 'running', taskId: task.taskId,
+        data: { stage: task.stage, activeTab: 'quick', sections: [],
+          lastEventId: task.lastEventId },
+      };
+    }
+    analysisStreamController.connect(analysisTaskUrls(task));
+    refreshAnalysisViews(task.code, task.period);
+  });
+});
 
 const TYPE_LABEL = { annual: '年报', semi_annual: '半年报', quarterly: '季报' };
 
@@ -402,7 +418,7 @@ function finishDownload(code, period, key, pf) {
   }
   // 下载期间若用户已切换报告，不用旧任务覆盖当前预览。
   var previewUrl = effect.sameReport
-    ? window.AnalysisWorkflow.downloadedPdfPreviewUrl(selected, code, period) : null;
+    ? window.AnalysisWorkflow.downloadedPdfPreviewUrl(selected, code, period, Date.now()) : null;
   if (pf && previewUrl && pf.getAttribute('src') !== previewUrl) pf.src = previewUrl;
   if (effect.sameReport) hidePdfLoading();
 }
@@ -432,7 +448,7 @@ async function downloadAndPreview(code, period, key, pf) {
   } : null;
   // 仅兼容明确缺少 POST 端点的旧服务；并再次确认原报告仍在选中。
   var fallbackUrl = window.AnalysisWorkflow.pdfDownloadFallbackUrl(
-    selected, code, period, res.status
+    selected, code, period, res.status, Date.now()
   );
   if (fallbackUrl && pf) {
     pf.onload = function () {
@@ -516,12 +532,16 @@ var analyzeBtn = $('#analyze-btn');
 if (analyzeBtn) {
   analyzeBtn.addEventListener('click', function () { startAnalysis(); });
 }
+var analysisInterestOpen = $('#analysis-interest-open');
+if (analysisInterestOpen) {
+  analysisInterestOpen.addEventListener('click', function () { startAnalysis(); });
+}
 
-async function submitAnalysis(code, period, dims) {
+async function submitAnalysis(code, period, interests) {
   var res = await fetch(
     '/api/reports/' + code + '/' + period + '/analyze',
     { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dimensions: dims }) });
+      body: JSON.stringify({ interests: interests }) });
   var data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
   return data;
@@ -539,6 +559,83 @@ function showRetryBtn(container, btnId, label, onClick) {
 
 function analysisKey(code, period) { return code + ':' + period; }
 
+function analysisTaskUrls(task) {
+  task.statusUrl = task.statusUrl || '/api/tasks/' + task.taskId;
+  task.eventUrl = task.eventUrl || '/api/analysis/tasks/' + task.taskId + '/events';
+  return task;
+}
+
+function terminalEventStatus(type) {
+  if (type === 'job.failed') return 'failed';
+  if (type === 'job.cancelled') return 'cancelled';
+  if (type === 'job.completed' || type === 'job.partial') return 'done';
+  return null;
+}
+
+async function finishAnalysisTask(task, status) {
+  var key = analysisKey(task.code, task.period);
+  var cached = STATE.analysisCache[key];
+  if (!cached || cached.finalized) return;
+  cached.finalized = true;
+  analysisTaskRegistry.remove(task.code, task.period);
+  await loadHistoryItemsSilent();
+  var currentReports = STATE.selected && STATE.selected.code === task.code
+    ? STATE.currentReports : [];
+  var reconciled = window.AnalysisWorkflow.reconcileAnalysisTerminal({
+    code: task.code, period: task.period, status: status,
+    reports: currentReports, historyItems: STATE.historyItems,
+    historySelected: STATE.historySelected,
+  });
+  if (STATE.selected && STATE.selected.code === task.code) STATE.currentReports = reconciled.reports;
+  STATE.historySelected = reconciled.historySelected;
+  refreshAnalysisViews(task.code, task.period);
+  renderHistoryList(STATE.historyFiltered || STATE.historyItems);
+}
+
+function receiveAnalysisEvent(task, event) {
+  var key = analysisKey(task.code, task.period);
+  var cached = STATE.analysisCache[key] || { status: 'running', taskId: task.taskId };
+  cached.data = window.AnalysisWorkflow.applyAnalysisEvent(cached.data || {}, event);
+  cached.taskId = task.taskId;
+  cached.status = terminalEventStatus(event.type) || 'running';
+  if (event.payload && event.payload.error) cached.error = event.payload.error;
+  STATE.analysisCache[key] = cached;
+  analysisTaskRegistry.track({
+    taskId: task.taskId, code: task.code, period: task.period,
+    analysisId: task.analysisId || '', stage: cached.data.stage || cached.status,
+    lastEventId: cached.data.lastEventId || 0, updatedAt: new Date().toISOString(),
+  });
+  refreshAnalysisViews(task.code, task.period);
+  if (cached.status !== 'running') finishAnalysisTask(task, cached.status);
+}
+
+function receiveAnalysisSnapshot(task, snapshot) {
+  var key = analysisKey(task.code, task.period);
+  var cached = STATE.analysisCache[key] || { taskId: task.taskId, data: {} };
+  cached.data = window.AnalysisWorkflow.mergeSnapshot(cached.data || {}, snapshot || {});
+  cached.status = snapshot.status === 'done' || snapshot.status === 'partial'
+    ? 'done' : (snapshot.status || 'running');
+  cached.error = snapshot.error || cached.error;
+  STATE.analysisCache[key] = cached;
+  refreshAnalysisViews(task.code, task.period);
+  if (cached.status !== 'running' && cached.status !== 'pending') {
+    finishAnalysisTask(task, cached.status);
+  }
+}
+
+var analysisStreamController = window.AnalysisWorkflow.createAnalysisStreamController({
+  EventSourceClass: window.EventSource,
+  fetchSnapshot: async function (task) {
+    var response = await fetch(analysisTaskUrls(task).statusUrl);
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  },
+  onEvent: receiveAnalysisEvent,
+  onSnapshot: receiveAnalysisSnapshot,
+});
+
+window.addEventListener('beforeunload', function () { analysisStreamController.closeAll(); });
+
 function isCurrentAnalysis(code, period) {
   return STATE.selected && STATE.selected.code === code
     && STATE.selectedReport && STATE.selectedReport.period === period;
@@ -548,8 +645,18 @@ function renderAnalysisPanel(key) {
   var ar = $('#analyze-result');
   if (!ar) return;
   var st = STATE.analysisCache[key];
-  if (!st) { ar.innerHTML = ''; return; }
-  if (st.status === 'pending' || st.status === 'running') {
+  if (!st) { ar.innerHTML = ''; updateBackgroundAnalysisStatus(null); return; }
+  var progressive = st.data && (st.data.schema_version === 3 || st.data.quick
+    || Array.isArray(st.data.sections) || st.data.stage);
+  updateBackgroundAnalysisStatus(st);
+  if ((st.status === 'pending' || st.status === 'running') && progressive) {
+    ar.innerHTML = window.AnalysisWorkflow.renderProgressiveAnalysis(st.data)
+      + '<p class="hint analysis-deep-hint">快速结论会先展示；详细主题仍在后台分析，完成后会自动补充。</p>'
+      + '<button id="stop-analyze-btn" class="btn danger full-btn">⏹ 停止分析</button>';
+    bindProgressiveTabs(ar, key);
+    var stopBtn = $('#stop-analyze-btn');
+    if (stopBtn) stopBtn.addEventListener('click', function () { stopAnalysis(key, st.taskId); });
+  } else if (st.status === 'pending' || st.status === 'running') {
     ar.innerHTML = renderAnalysisProgress(st)
       + '<button id="stop-analyze-btn" class="btn danger full-btn">⏹ 停止分析</button>';
     var stopBtn = $('#stop-analyze-btn');
@@ -562,8 +669,13 @@ function renderAnalysisPanel(key) {
     ar.innerHTML = '<div class="error-card">分析失败：' + escapeHtml(st.error || '未知错误') + '</div>';
     showRetryBtn(ar, 'retry-analyze-btn', '重新分析', function () { startAnalysis(); });
   } else if (st.status === 'done') {
-    ar.innerHTML = renderReport(st.data || {});
-    bindDimTabs(ar);
+    if (progressive) {
+      ar.innerHTML = window.AnalysisWorkflow.renderProgressiveAnalysis(st.data || {});
+      bindProgressiveTabs(ar, key);
+    } else {
+      ar.innerHTML = renderReport(st.data || {});
+      bindDimTabs(ar);
+    }
     if (st.data && st.data.markdown_path) {
       ar.insertAdjacentHTML('afterbegin',
         '<div class="hint" style="text-align:left">✅ 已保存：' + escapeHtml(st.data.markdown_path) + '</div>');
@@ -571,34 +683,90 @@ function renderAnalysisPanel(key) {
   }
 }
 
-// ── 分析维度勾选面板：从 /api/analysis/dimensions 动态渲染 ──
+function analysisStageText(stage) {
+  return {
+    pending: '等待开始分析', fast_processing: '正在提取数据并生成快速结论',
+    fast_ready: '快速结论已就绪，详细分析在后台继续',
+    deep_processing: '正在校验证据并生成详细主题',
+    completed: '详细分析已完成', partial: '分析已完成，部分内容因证据不足未展示',
+    failed: '分析失败', cancelled: '分析已停止'
+  }[stage] || '正在分析报告';
+}
 
-// 服务端不可用时的兜底默认维度（与后端内置默认一致）
+function updateBackgroundAnalysisStatus(task) {
+  var box = $('#analysis-background-status');
+  if (!box) return;
+  if (!task) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  var stage = task.data && task.data.stage || task.status;
+  var active = task.status === 'pending' || task.status === 'running';
+  box.classList.toggle('hidden', !active && task.status === 'done');
+  box.setAttribute('aria-busy', active ? 'true' : 'false');
+  box.innerHTML = '<span class="analysis-background-dot" aria-hidden="true"></span>'
+    + '<span><strong>' + escapeHtml(analysisStageText(stage)) + '</strong>'
+    + (active ? '<small>可以切换页面，任务会继续运行并自动同步结果。</small>' : '')
+    + '</span>';
+}
+
+function bindProgressiveTabs(container, key) {
+  if (!container || container.dataset.progressiveTabsBound) return;
+  container.dataset.progressiveTabsBound = '1';
+  container.addEventListener('click', function (event) {
+    var tab = event.target && event.target.closest
+      ? event.target.closest('[data-analysis-tab]') : null;
+    if (!tab || !STATE.analysisCache[key] || !STATE.analysisCache[key].data) return;
+    STATE.analysisCache[key].data.activeTab = tab.dataset.analysisTab;
+    STATE.analysisCache[key].data.hasNewFindings = false;
+    renderAnalysisPanel(key);
+    if (STATE.historySelected && analysisKey(
+      STATE.historySelected.code, STATE.historySelected.period
+    ) === key) renderHistoryAnalysisState(STATE.historySelected);
+  });
+}
+
+// ── 关注方向：首次分析和重新分析共用同一个多选弹窗 ──
+
+// 服务端不可用时的兜底关注方向（与后端内置默认一致）
 var FALLBACK_DIMENSIONS = [
-  { id: 'financial_summary', name: '财务摘要', default: true },
-  { id: 'risk_warning', name: '风险识别', default: true },
-  { id: 'business_highlights', name: '经营亮点', default: true },
-  { id: 'profit_quality', name: '盈利质量', default: true },
-  { id: 'cashflow', name: '现金流分析', default: true }
+  { id: 'financial_overview', name: '财务概览', default: true },
+  { id: 'cash_flow', name: '现金流', default: true },
+  { id: 'risks', name: '风险', default: true },
+  { id: 'earnings_quality', name: '盈利质量', default: false },
+  { id: 'business', name: '经营变化', default: false },
+  { id: 'governance', name: '治理', default: false },
+  { id: 'industry_position', name: '行业位置', default: false }
 ];
 
 async function loadAnalysisDimensions() {
   var dimsBox = $('#dims');
   if (STATE.analysisDimensions && STATE.analysisDimensions.length) {
     if (dimsBox) renderDimensionCheckboxes();
+    updateAnalysisInterestSummary();
     return STATE.analysisDimensions;
   }
   var items = [];
   try {
-    var res = await fetch('/api/analysis/dimensions');
+    var res = await fetch('/api/analysis/interests');
     if (res.ok) {
       var data = await res.json();
-      items = data.dimensions || [];
+      items = data.interests || [];
     }
   } catch (_) { /* 网络异常走兜底清单 */ }
   STATE.analysisDimensions = items.length ? items : FALLBACK_DIMENSIONS;
   if (dimsBox) renderDimensionCheckboxes();
+  updateAnalysisInterestSummary();
   return STATE.analysisDimensions;
+}
+
+function updateAnalysisInterestSummary(selectedIds) {
+  var ids = selectedIds || window.AnalysisWorkflow.historyDimensionDefaults(
+    STATE.analysisDimensions || FALLBACK_DIMENSIONS, []
+  );
+  var names = (STATE.analysisDimensions || FALLBACK_DIMENSIONS).filter(function (item) {
+    return ids.indexOf(String(item.id)) >= 0;
+  }).map(function (item) { return item.name; });
+  var summary = $('#analysis-interest-summary');
+  if (summary) summary.textContent = names.length
+    ? '将重点关注：' + names.join('、') : '请至少选择一个关注方向';
 }
 
 function dimensionCheckboxesHtml(items, selectedIds) {
@@ -650,7 +818,7 @@ if (dimsClearBtn) {
   });
 }
 
-// 停止分析：请求后端取消任务（当前维度 LLM 调用完成后生效）
+// 停止分析：请求后端取消任务（当前步骤完成后生效）
 async function stopAnalysis(key, taskId) {
   if (!taskId) return;
   try {
@@ -658,7 +826,7 @@ async function stopAnalysis(key, taskId) {
   } catch (_) { /* 忽略网络错误，轮询会揭示终态 */ }
   var ar = $('#analyze-result');
   if (ar) {
-    ar.innerHTML = '<div class="hint">正在停止分析…（当前维度完成后生效）</div>';
+    ar.innerHTML = '<div class="hint">正在停止分析…（当前步骤完成后生效）</div>';
   }
 }
 
@@ -666,39 +834,42 @@ async function startAnalysis() {
   var code = STATE.selected && STATE.selected.code;
   var period = STATE.selectedReport && STATE.selectedReport.period;
   if (!code || !period) return;
-  var key = analysisKey(code, period);
-  var dims = $$('#dims input:checked').map(function (i) { return i.value; });
-  await startReportAnalysis({
+  await openAnalysisInterestPicker({
     code: code,
     period: period,
     company: STATE.selected.name || code,
-  }, dims);
+  });
 }
 
-async function startReportAnalysis(report, dims) {
+async function startReportAnalysis(report, interests) {
   var code = report.code, period = report.period;
   var key = analysisKey(code, period);
   var existing = STATE.analysisCache[key];
   if (existing && (existing.status === 'pending' || existing.status === 'running')) return;
-  STATE.analysisCache[key] = { status: 'pending', dims: dims, progress: 0 };
+  if (existing && existing.taskId) analysisStreamController.close(existing.taskId);
+  STATE.analysisCache[key] = { status: 'pending', interests: interests, data: { stage: 'pending' } };
   refreshAnalysisViews(code, period);
   try {
-    var submitted = await submitAnalysis(code, period, dims);
+    var submitted = await submitAnalysis(code, period, interests);
     var taskId = submitted.task_id;
-    var acceptedDims = submitted.dimensions || dims;
+    var acceptedInterests = submitted.interests || interests;
     var tracked = analysisTaskRegistry.track({
       taskId: taskId,
       code: code,
       period: period,
-      company: report.company || code,
-      dims: acceptedDims,
+      analysisId: submitted.analysis_id,
+      stage: 'pending',
+      lastEventId: 0,
+      updatedAt: new Date().toISOString(),
     });
+    tracked.eventUrl = submitted.event_url;
+    tracked.statusUrl = submitted.status_url;
     STATE.analysisCache[key] = {
-      status: 'running', taskId: taskId, dims: acceptedDims,
-      company: tracked.company, progress: 0,
+      status: 'running', taskId: taskId, interests: acceptedInterests,
+      data: { stage: 'pending', activeTab: 'quick', sections: [], lastEventId: 0 },
     };
     refreshAnalysisViews(code, period);
-    pollTask(tracked);
+    analysisStreamController.connect(tracked);
   } catch (err) {
     STATE.analysisCache[key] = { status: 'failed', error: err.message };
     refreshAnalysisViews(code, period);
@@ -770,10 +941,11 @@ async function pollTask(task) {
 function restoreAnalysisTasks() {
   analysisTaskRegistry.active().forEach(function (task) {
     STATE.analysisCache[analysisKey(task.code, task.period)] = {
-      status: 'running', taskId: task.taskId, dims: task.dims || [],
-      company: task.company || task.code, progress: 0,
+      status: 'running', taskId: task.taskId,
+      data: { stage: task.stage || 'pending', activeTab: 'quick', sections: [],
+        lastEventId: task.lastEventId || 0 },
     };
-    pollTask(task);
+    analysisStreamController.connect(analysisTaskUrls(task));
   });
 }
 
@@ -1170,7 +1342,17 @@ function renderHistoryAnalysisState(item) {
     badge.className = badgeModel.className;
   }
   if (cached && (cached.status === 'pending' || cached.status === 'running')) {
-    detail.innerHTML = renderAnalysisProgress(cached);
+    if (cached.data && (cached.data.schema_version === 3 || cached.data.quick
+        || Array.isArray(cached.data.sections) || cached.data.stage)) {
+      detail.innerHTML = '<div class="analysis-background-status inline" role="status" aria-live="polite">'
+        + '<span class="analysis-background-dot" aria-hidden="true"></span><span><strong>'
+        + escapeHtml(analysisStageText(cached.data.stage || cached.status))
+        + '</strong><small>快速结论先展示，详细内容完成后会自动补充。</small></span></div>'
+        + window.AnalysisWorkflow.renderProgressiveAnalysis(cached.data);
+      bindProgressiveTabs(detail, analysisKey(item.code, item.period));
+    } else {
+      detail.innerHTML = renderAnalysisProgress(cached);
+    }
     return true;
   }
   if (cached && cached.status === 'failed') {
@@ -1185,10 +1367,15 @@ function renderHistoryAnalysisState(item) {
     return true;
   }
   if (cached && cached.status === 'done' && cached.data) {
-    renderAnalysisInDetail(
-      item.company, item.code, item.period, item.year,
-      cached.data, '来源：reports/analysis/' + (item.analysis_filename || '')
-    );
+    if (cached.data.schema_version === 3) {
+      renderAnalysisInDetail(item.company, item.code, item.period, item.year,
+        cached.data, '来源：reports/analysis/' + (item.analysis_filename || ''));
+    } else {
+      renderAnalysisInDetail(
+        item.company, item.code, item.period, item.year,
+        cached.data, '来源：reports/analysis/' + (item.analysis_filename || '')
+      );
+    }
     return true;
   }
   return false;
@@ -1279,9 +1466,15 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   var detail = $('#history-detail');
   if (!detail) return;
 
+  var isProgressive = Number(content.schema_version) === 3;
+  if (isProgressive && !STATE.analysisCache[analysisKey(code, period)]) {
+    STATE.analysisCache[analysisKey(code, period)] = { status: 'done', data: content };
+  }
   var contentDims = Array.isArray(content.dimensions) ? content.dimensions : [];
   var requestedDims = Array.isArray(content.requested_dimensions)
-    ? content.requested_dimensions : contentDims.map(function (dim) { return dim.id; });
+    ? content.requested_dimensions
+    : (Array.isArray(content.interests) ? content.interests
+      : contentDims.map(function (dim) { return dim.id; }));
   STATE.historyAnalysisByReport[analysisKey(code, period)] = {
     code: code,
     period: period,
@@ -1294,8 +1487,10 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
     html += '<p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;text-align:right">'
       + escapeHtml(source) + '</p>';
   }
-  // Dimensions（Tab 切换，一次展示一个维度）
-  html += renderDimensionTabs(contentDims);
+  // v3 结果先显示快速结论，再按有效证据动态生成主题；旧报告保持兼容渲染。
+  html += isProgressive
+    ? window.AnalysisWorkflow.renderProgressiveAnalysis(content)
+    : renderDimensionTabs(contentDims);
 
   // Meta info
   var meta = content.meta || {};
@@ -1316,7 +1511,8 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   detail.innerHTML = html;
 
   // 维度 Tab 切换（事件委托，容器常驻只绑定一次）
-  bindDimTabs(detail);
+  if (isProgressive) bindProgressiveTabs(detail, analysisKey(code, period));
+  else bindDimTabs(detail);
 
   // 跳转到智能问答（聚焦本报告，提升 RAG 检索权重）
   var hQaGoto = $('#h-qa-goto-btn');
@@ -1350,10 +1546,19 @@ async function startHistoryAnalysis(item) {
 }
 
 async function openHistoryDimensionPicker(item) {
+  return openInterestPicker(item, 'history');
+}
+
+async function openAnalysisInterestPicker(item) {
+  return openInterestPicker(item, 'analysis');
+}
+
+async function openInterestPicker(item, mode) {
   if (!item) return;
   historyDimTrigger = document.activeElement;
   var dimensions = await loadAnalysisDimensions();
-  if (!window.AnalysisWorkflow.historySelectionIsCurrent(STATE, item)) return;
+  if (mode === 'history' && !window.AnalysisWorkflow.historySelectionIsCurrent(STATE, item)) return;
+  if (mode === 'analysis' && !isCurrentAnalysis(item.code, item.period)) return;
   var dialog = $('#history-dim-dialog');
   var box = $('#history-dims');
   if (!dialog || !box) return;
@@ -1367,10 +1572,12 @@ async function openHistoryDimensionPicker(item) {
   box.innerHTML = dimensionCheckboxesHtml(dimensions, selected);
   dialog.dataset.code = item.code;
   dialog.dataset.period = item.period;
+  dialog.dataset.mode = mode;
   var reportLabel = $('#history-dim-report');
   if (reportLabel) {
     reportLabel.textContent = (item.company || item.code) + ' · '
-      + (item.year || item.period || '') + (item.type || '');
+      + (item.year || item.period || '') + (item.type || '')
+      + ' · 可多选，选择较少时会更快生成结果';
   }
   updateHistoryDimCount();
   if (typeof dialog.showModal === 'function') dialog.showModal();
@@ -1383,7 +1590,7 @@ function updateHistoryDimCount() {
   var count = $$('#history-dims input:checked').length;
   var countEl = $('#history-dims-count');
   var confirm = $('#history-dim-confirm');
-  if (countEl) countEl.textContent = count ? '已选 ' + count + ' 个维度' : '请至少选择 1 个维度';
+  if (countEl) countEl.textContent = count ? '已选 ' + count + ' 个关注方向' : '请至少选择 1 个关注方向';
   if (confirm) confirm.disabled = count === 0;
 }
 
@@ -1429,7 +1636,12 @@ var historyDimConfirm = $('#history-dim-confirm');
 if (historyDimConfirm) {
   historyDimConfirm.addEventListener('click', async function () {
     var dialog = $('#history-dim-dialog');
-    var item = STATE.historySelected;
+    var item = dialog && dialog.dataset.mode === 'analysis'
+      ? (STATE.selected && STATE.selectedReport ? {
+        code: STATE.selected.code, period: STATE.selectedReport.period,
+        company: STATE.selected.name || STATE.selected.code,
+      } : null)
+      : STATE.historySelected;
     if (!dialog || !item || item.code !== dialog.dataset.code
         || item.period !== dialog.dataset.period) return;
     var dimensions = $$('#history-dims input:checked').map(function (input) {
@@ -1437,6 +1649,7 @@ if (historyDimConfirm) {
     });
     if (!dimensions.length) return;
     closeHistoryDimensionPicker();
+    if (dialog.dataset.mode === 'analysis') updateAnalysisInterestSummary(dimensions);
     await startReportAnalysis(item, dimensions);
   });
 }

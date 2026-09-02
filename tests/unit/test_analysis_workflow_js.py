@@ -281,7 +281,7 @@ def test_downloaded_pdf_only_previews_when_report_is_still_selected():
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
         console.log(JSON.stringify({{
           current: workflow.downloadedPdfPreviewUrl(
-            {{ code: '600900', period: '2025-12-31' }}, '600900', '2025-12-31'
+            {{ code: '600900', period: '2025-12-31' }}, '600900', '2025-12-31', 12345
           ),
           stale: workflow.downloadedPdfPreviewUrl(
             {{ code: '600900', period: '2024-12-31' }}, '600900', '2025-12-31'
@@ -291,7 +291,7 @@ def test_downloaded_pdf_only_previews_when_report_is_still_selected():
     )
 
     assert result == {
-        "current": "/api/reports/600900/2025-12-31.pdf",
+        "current": "/api/reports/600900/2025-12-31.pdf?v=12345",
         "stale": None,
     }
 
@@ -329,8 +329,8 @@ def test_pdf_download_fallback_requires_missing_endpoint_and_same_report():
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
         const selected = {{ code: '600900', period: '2025-12-31' }};
         console.log(JSON.stringify({{
-          missing: workflow.pdfDownloadFallbackUrl(selected, '600900', '2025-12-31', 404),
-          methodMissing: workflow.pdfDownloadFallbackUrl(selected, '600900', '2025-12-31', 405),
+          missing: workflow.pdfDownloadFallbackUrl(selected, '600900', '2025-12-31', 404, 12345),
+          methodMissing: workflow.pdfDownloadFallbackUrl(selected, '600900', '2025-12-31', 405, 12345),
           serverError: workflow.pdfDownloadFallbackUrl(selected, '600900', '2025-12-31', 500),
           stale: workflow.pdfDownloadFallbackUrl(
             {{ code: '000001', period: '2025-12-31' }}, '600900', '2025-12-31', 404
@@ -340,8 +340,8 @@ def test_pdf_download_fallback_requires_missing_endpoint_and_same_report():
     )
 
     assert result == {
-        "missing": "/api/reports/600900/2025-12-31.pdf",
-        "methodMissing": "/api/reports/600900/2025-12-31.pdf",
+        "missing": "/api/reports/600900/2025-12-31.pdf?v=12345",
+        "methodMissing": "/api/reports/600900/2025-12-31.pdf?v=12345",
         "serverError": None,
         "stale": None,
     }

@@ -158,6 +158,7 @@ def test_quick_result_is_persisted_and_emitted_before_ocr_and_deep_sections(tmp_
     section_index = next(i for i, event in enumerate(events) if event[0] == "section.ready")
     assert quick_index < ocr_index
     assert quick_index < section_index
+    assert events[quick_index][1]["evidence_catalog"]
     assert result.quick.conclusions
     saved = load_analysis_document(tmp_path / "analysis-1.json")
     assert saved.stage == "completed"

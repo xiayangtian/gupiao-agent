@@ -2,6 +2,7 @@
 
 import json
 import re
+import signal
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,6 +30,11 @@ pytestmark = pytest.mark.skipif(CHROME is None, reason="弹窗布局回归测试
 
 def test_analysis_dialog_is_centered_in_the_viewport(tmp_path):
     """打开维度选择弹窗后，其中心应与视口中心重合，不能停在左上角。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    dialog_rule = css.split(".analysis-dialog {", 1)[1].split("}", 1)[0]
+    assert "position: fixed" in dialog_rule
+    assert "inset: 0" in dialog_rule
+    assert "margin: auto" in dialog_rule
     html_path = tmp_path / "dialog-layout.html"
     html_path.write_text(
         f"""<!doctype html>
@@ -40,7 +46,7 @@ def test_analysis_dialog_is_centered_in_the_viewport(tmp_path):
 </head>
 <body>
   <dialog id="dialog" class="analysis-dialog">
-    <div class="analysis-dialog-head"><h2>选择分析维度</h2></div>
+        <div class="analysis-dialog-head"><h2>选择关注方向</h2></div>
     <div class="analysis-dialog-actions"><button>开始分析</button></div>
   </dialog>
   <script>
@@ -59,22 +65,30 @@ def test_analysis_dialog_is_centered_in_the_viewport(tmp_path):
         encoding="utf-8",
     )
 
-    completed = subprocess.run(
-        [
+    try:
+        completed = subprocess.run(
+            [
             CHROME,
             "--headless=new",
             "--no-sandbox",
             "--disable-gpu",
+            "--disable-breakpad",
+            "--disable-crash-reporter",
             "--allow-file-access-from-files",
+            f"--user-data-dir={tmp_path / 'chrome-profile'}",
             "--window-size=800,600",
             "--virtual-time-budget=1000",
             "--dump-dom",
             html_path.as_uri(),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == -signal.SIGABRT:
+            pytest.skip("当前宿主的 Chrome headless 进程不可用")
+        raise
     match = re.search(r"<body>(\{.*?\})\s*</body>", completed.stdout, re.DOTALL)
     assert match, completed.stdout
     layout = json.loads(match.group(1))

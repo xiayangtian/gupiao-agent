@@ -268,7 +268,10 @@ class ProgressiveAnalysisPipeline:
         document = self._new_document(request, quick, resolved.records)
         self._save(document, request)
         emit("job.stage_changed", {"stage": "fast_ready"})
-        emit("quick.ready", {"quick": quick.to_dict()})
+        emit("quick.ready", {
+            "quick": quick.to_dict(),
+            "evidence_catalog": document.to_dict()["evidence_catalog"],
+        })
         if stop_event.is_set():
             return self._finish_cancelled(document, request, emit)
 

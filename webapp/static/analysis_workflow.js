@@ -144,6 +144,7 @@
 
     if (type === 'quick.ready' && payload.quick) {
       next.quick = payload.quick;
+      if (payload.evidence_catalog) next.evidence_catalog = payload.evidence_catalog;
       if (!next.activeTab) next.activeTab = 'quick';
     } else if (type === 'quick.corrected' && payload.correction) {
       var quick = Object.assign({}, next.quick || {});
@@ -209,10 +210,11 @@
     return true;
   }
 
-  function downloadedPdfPreviewUrl(selected, code, period) {
+  function downloadedPdfPreviewUrl(selected, code, period, version) {
     if (!downloadCompletionEffect(selected, code, period).sameReport) return null;
-    return '/api/reports/' + encodeURIComponent(code) + '/'
+    var url = '/api/reports/' + encodeURIComponent(code) + '/'
       + encodeURIComponent(period) + '.pdf';
+    return version === undefined ? url : url + '?v=' + encodeURIComponent(version);
   }
 
   function downloadCompletionEffect(selected, code, period) {
@@ -223,9 +225,191 @@
     };
   }
 
-  function pdfDownloadFallbackUrl(selected, code, period, status) {
+  function pdfDownloadFallbackUrl(selected, code, period, status, version) {
     if (Number(status) !== 404 && Number(status) !== 405) return null;
-    return downloadedPdfPreviewUrl(selected, code, period);
+    return downloadedPdfPreviewUrl(selected, code, period, version);
+  }
+
+  var ANALYSIS_EVENT_TYPES = [
+    'job.stage_changed', 'extraction.page_started', 'extraction.page_completed',
+    'quick.ready', 'quick.corrected', 'theme.started', 'theme.filtered',
+    'section.ready', 'section.updated', 'job.completed', 'job.partial',
+    'job.failed', 'job.cancelled'
+  ];
+
+  function isTerminalStatus(status) {
+    return ['done', 'completed', 'partial', 'failed', 'cancelled'].indexOf(status) >= 0;
+  }
+
+  function createAnalysisStreamController(options) {
+    var opts = options || {};
+    var EventSourceClass = opts.EventSourceClass;
+    var setTimeoutFn = opts.setTimeoutFn || setTimeout;
+    var clearTimeoutFn = opts.clearTimeoutFn || clearTimeout;
+    var sources = {};
+    var timers = {};
+    var backoffs = {};
+
+    function close(taskId) {
+      if (sources[taskId]) sources[taskId].close();
+      if (timers[taskId]) clearTimeoutFn(timers[taskId]);
+      delete sources[taskId];
+      delete timers[taskId];
+      delete backoffs[taskId];
+    }
+
+    function poll(task) {
+      Promise.resolve(opts.fetchSnapshot(task)).then(function (snapshot) {
+        if (opts.onSnapshot) opts.onSnapshot(task, snapshot);
+        if (isTerminalStatus(snapshot && snapshot.status)) {
+          close(task.taskId);
+          return;
+        }
+        schedulePoll(task);
+      }).catch(function () { schedulePoll(task); });
+    }
+
+    function schedulePoll(task) {
+      var delay = backoffs[task.taskId] || 1000;
+      backoffs[task.taskId] = Math.min(delay * 2, 10000);
+      timers[task.taskId] = setTimeoutFn(function () { poll(task); }, delay);
+    }
+
+    function connect(task) {
+      if (!task || !task.taskId || sources[task.taskId] || timers[task.taskId]) return;
+      if (!EventSourceClass) {
+        schedulePoll(task);
+        return;
+      }
+      var separator = String(task.eventUrl || '').indexOf('?') >= 0 ? '&' : '?';
+      var source = new EventSourceClass(
+        String(task.eventUrl || '') + separator + 'after=' + (Number(task.lastEventId) || 0)
+      );
+      sources[task.taskId] = source;
+      ANALYSIS_EVENT_TYPES.forEach(function (type) {
+        source.addEventListener(type, function (message) {
+          var payload = {};
+          try { payload = JSON.parse(message.data || '{}'); } catch (_) { return; }
+          var event = { id: Number(message.lastEventId) || 0, type: type, payload: payload };
+          task.lastEventId = Math.max(task.lastEventId || 0, event.id);
+          if (opts.onEvent) opts.onEvent(task, event);
+          if (type.indexOf('job.') === 0 && isTerminalStatus(type.slice(4))) close(task.taskId);
+        });
+      });
+      source.onopen = function () { backoffs[task.taskId] = 1000; };
+      source.onerror = function () {
+        if (sources[task.taskId] !== source) return;
+        if (sources[task.taskId]) sources[task.taskId].close();
+        delete sources[task.taskId];
+        schedulePoll(task);
+      };
+      return source;
+    }
+
+    return { connect: connect, close: close, closeAll: function () {
+      Object.keys(sources).concat(Object.keys(timers)).forEach(close);
+    } };
+  }
+
+  function escapeMarkup(value) {
+    return String(value == null ? '' : value).replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function emphasizedText(value, spans) {
+    var source = String(value || '');
+    var selected = (spans || []).map(String).filter(Boolean).slice(0, 2);
+    var ranges = [];
+    selected.forEach(function (span) {
+      var start = source.indexOf(span);
+      if (start >= 0 && !ranges.some(function (range) {
+        return start < range.end && start + span.length > range.start;
+      })) ranges.push({ start: start, end: start + span.length });
+    });
+    ranges.sort(function (a, b) { return a.start - b.start; });
+    var cursor = 0;
+    return ranges.map(function (range) {
+      var html = escapeMarkup(source.slice(cursor, range.start))
+        + '<mark>' + escapeMarkup(source.slice(range.start, range.end)) + '</mark>';
+      cursor = range.end;
+      return html;
+    }).join('') + escapeMarkup(source.slice(cursor));
+  }
+
+  function renderEvidence(evidenceIds, catalog) {
+    var items = (evidenceIds || []).map(function (id) {
+      var evidence = (catalog || {})[id];
+      if (!evidence) return '';
+      var locator = evidence.source_locator || {};
+      var label = evidence.label || [evidence.source_type, locator.page ? '第 ' + locator.page + ' 页' : '']
+        .filter(Boolean).join(' · ') || id;
+      var excerpt = evidence.excerpt || [evidence.value, evidence.unit].filter(Boolean).join(' ');
+      return '<li><strong>' + escapeMarkup(label) + '</strong>'
+        + (excerpt ? '<span>' + escapeMarkup(excerpt) + '</span>' : '') + '</li>';
+    }).filter(Boolean).join('');
+    return items ? '<details class="analysis-evidence"><summary>查看证据（'
+      + (evidenceIds || []).length + '）</summary><ul>' + items + '</ul></details>' : '';
+  }
+
+  function missingValue(value) {
+    return /^(?:|[-—/]|未披露|未提供|暂无数据|无数据|不适用|n\/?a)$/i.test(String(value == null ? '' : value).trim());
+  }
+
+  function cleanTableRows(rows) {
+    return (rows || []).filter(function (row) {
+      var cells = Array.isArray(row) ? row : Object.values(row || {});
+      return cells.slice(1).some(function (cell) { return !missingValue(cell); });
+    });
+  }
+
+  function renderFinding(item, catalog) {
+    var claim = item.claim || item.text || '';
+    if (!claim) return '';
+    var risk = item.risk_state === 'verified_risk' || item.style === 'verified_risk';
+    return '<article class="analysis-finding' + (risk ? ' analysis-emphasis-risk' : '') + '">'
+      + '<p>' + emphasizedText(claim, item.highlight_spans) + '</p>'
+      + (item.key_data ? '<p class="analysis-key-data">' + escapeMarkup(item.key_data) + '</p>' : '')
+      + (item.significance ? '<p class="analysis-significance">' + escapeMarkup(item.significance) + '</p>' : '')
+      + renderEvidence(item.evidence_ids, catalog) + '</article>';
+  }
+
+  function renderProgressiveAnalysis(state) {
+    var current = state || {};
+    var catalog = current.evidence_catalog || {};
+    var quick = current.quick || {};
+    var quickHtml = (quick.conclusions || []).map(function (item) {
+      return renderFinding(item, catalog);
+    }).join('');
+    var correctionHtml = (quick.corrections || []).map(function (item) {
+      return '<div class="analysis-correction"><strong>快速结论已校正</strong><p>'
+        + escapeMarkup(item.before) + ' → ' + escapeMarkup(item.after) + '</p></div>';
+    }).join('');
+    var sections = (current.sections || []).filter(function (section) {
+      return Array.isArray(section.findings) && section.findings.length > 0;
+    });
+    var tabs = sections.map(function (section) {
+      var selected = (current.activeTab || 'quick') === section.section_id;
+      return '<button type="button" class="analysis-result-tab' + (selected ? ' active' : '')
+        + '" data-analysis-tab="' + escapeMarkup(section.section_id) + '" role="tab" aria-selected="'
+        + (selected ? 'true' : 'false') + '">' + escapeMarkup(section.title) + '</button>';
+    }).join('');
+    var active = current.activeTab || 'quick';
+    var body = active === 'quick'
+      ? (quickHtml + correctionHtml || '<p class="hint">快速结论生成中…</p>')
+      : sections.filter(function (section) { return section.section_id === active; })
+        .map(function (section) {
+          return '<section class="analysis-section"><h3>' + escapeMarkup(section.title) + '</h3>'
+            + (section.summary ? '<p>' + escapeMarkup(section.summary) + '</p>' : '')
+            + section.findings.map(function (item) { return renderFinding(item, catalog); }).join('')
+            + '</section>';
+        }).join('');
+    return '<div class="analysis-result-tabs" role="tablist">'
+      + '<button type="button" class="analysis-result-tab' + (active === 'quick' ? ' active' : '')
+      + '" data-analysis-tab="quick" role="tab" aria-selected="'
+      + (active === 'quick' ? 'true' : 'false') + '">快速结论</button>'
+      + '<span class="analysis-dynamic-tabs">' + tabs + '</span></div>'
+      + '<div class="analysis-progressive-body">' + body + '</div>';
   }
 
   function analysisTerminalBadge(status, hasAnalysis) {
@@ -344,9 +528,11 @@
 
   return {
     applyAnalysisEvent: applyAnalysisEvent,
+    cleanTableRows: cleanTableRows,
     analysisTerminalBadge: analysisTerminalBadge,
     analysisProgressModel: analysisProgressModel,
     createAnalysisTaskRegistry: createAnalysisTaskRegistry,
+    createAnalysisStreamController: createAnalysisStreamController,
     downloadCompletionEffect: downloadCompletionEffect,
     downloadedPdfPreviewUrl: downloadedPdfPreviewUrl,
     goToHistoryReport: goToHistoryReport,
@@ -357,6 +543,7 @@
     openPendingHistoryReport: openPendingHistoryReport,
     pdfDownloadFallbackUrl: pdfDownloadFallbackUrl,
     reconcileAnalysisTerminal: reconcileAnalysisTerminal,
+    renderProgressiveAnalysis: renderProgressiveAnalysis,
     reportKey: reportKey,
   };
 }));
