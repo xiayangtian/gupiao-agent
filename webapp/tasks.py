@@ -4,13 +4,14 @@ import logging
 import math
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional
 
 from financial_report_fetcher.exceptions import AnalysisCancelledError
 
-from .task_store import TaskStorageError, TaskStore
+from .task_store import TaskEvent, TaskStorageError, TaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +75,16 @@ class TaskManager:
         fn: Callable[..., Any],
         stop_event: Optional[threading.Event] = None,
         progressive: bool = False,
+        eventful: bool = False,
     ) -> Optional[str]:
         """提交任务并排队执行，返回 task_id。
 
         stop_event: 可选取消信号；cancel(task_id) 会 set 该事件。
         progressive: 为 True 时 fn 接收 report_progress(float) 回调，进度会持久化。
+        eventful: 为 True 时 fn 接收 emit(event_type, payload) 回调。
         """
+        if progressive and eventful:
+            raise ValueError("progressive 与 eventful 不能同时启用")
         with self._condition:
             if self._state != _STATE_ACCEPTING:
                 return None
@@ -97,6 +102,10 @@ class TaskManager:
                 if progressive:
                     submitted_fn = lambda accepted_fn=fn: accepted_fn(
                         self._progress_reporter(task_id)
+                    )
+                elif eventful:
+                    submitted_fn = lambda accepted_fn=fn: self._run_eventful(
+                        accepted_fn, task_id
                     )
                 future = self._executor.submit(self._run_task, task_id, submitted_fn)
             except RuntimeError:
@@ -163,6 +172,58 @@ class TaskManager:
                 self._set_storage_error_locked(exc)
                 return self._storage_failure_snapshot(str(exc))
 
+    def emit(self, task_id: str, event_type: str, payload: Dict[str, Any]) -> TaskEvent:
+        """持久化分析事件、同步更新快照，并唤醒等待中的事件流。"""
+        with self._condition:
+            if self._state != _STATE_ACCEPTING:
+                raise RuntimeError("TaskManager 已关闭")
+            store = self._ensure_store()
+            try:
+                event = store.append_event(task_id, event_type, payload)
+            except TaskStorageError as exc:
+                self._record_storage_failure_locked(task_id, exc)
+                raise
+            self._condition.notify_all()
+            return event
+
+    def list_events(
+        self, task_id: str, after_id: int = 0, limit: int = 100
+    ) -> list[TaskEvent]:
+        with self._condition:
+            if self._state != _STATE_ACCEPTING:
+                return []
+            try:
+                return self._ensure_store().list_events(task_id, after_id, limit)
+            except TaskStorageError as exc:
+                self._set_storage_error_locked(exc)
+                return []
+
+    def wait_for_events(
+        self,
+        task_id: str,
+        after_id: int,
+        timeout: float = 15.0,
+        limit: int = 100,
+    ) -> list[TaskEvent]:
+        """先补发游标后的事件；没有新事件时阻塞到通知或超时。"""
+        if timeout < 0:
+            raise ValueError("timeout 不能为负数")
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while self._state == _STATE_ACCEPTING:
+                try:
+                    events = self._ensure_store().list_events(task_id, after_id, limit)
+                except TaskStorageError as exc:
+                    self._set_storage_error_locked(exc)
+                    return []
+                if events:
+                    return events
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return []
+                self._condition.wait(timeout=remaining)
+            return []
+
     @property
     def storage_error(self) -> Optional[str]:
         """Return the latest bounded storage failure, if one is still active."""
@@ -210,6 +271,17 @@ class TaskManager:
                     self._record_storage_failure_locked(task_id, exc)
 
         return report
+
+    def _event_emitter(self, task_id: str) -> Callable[[str, Dict[str, Any]], None]:
+        def emit(event_type: str, payload: Dict[str, Any]) -> None:
+            self.emit(task_id, event_type, payload)
+
+        return emit
+
+    def _run_eventful(self, fn: Callable[..., Any], task_id: str) -> Any:
+        result = fn(self._event_emitter(task_id))
+        to_dict = getattr(result, "to_dict", None)
+        return to_dict() if callable(to_dict) else result
 
     def _run_task(self, task_id: str, fn: Callable[[], Any]) -> None:
         with self._condition:

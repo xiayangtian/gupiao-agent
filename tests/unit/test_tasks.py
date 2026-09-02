@@ -198,6 +198,30 @@ def test_running_task_becomes_retryable_failure_after_restart(tmp_path):
     manager.shutdown()
 
 
+def test_running_task_with_quick_snapshot_becomes_partial_after_restart(tmp_path):
+    from webapp.task_store import TaskStore
+
+    db = _db_path(tmp_path)
+    store = TaskStore(db)
+    store.create("interrupted-with-result")
+    store.update("interrupted-with-result", status="running")
+    store.append_event(
+        "interrupted-with-result",
+        "quick.ready",
+        {"quick": {"conclusions": [{"claim": "已生成"}]}},
+    )
+    store.close()
+
+    manager = TaskManager(db_path=db)
+    task = manager.get("interrupted-with-result")
+
+    assert task["status"] == "partial"
+    assert task["result"]["stage"] == "partial"
+    assert task["result"]["quick"]["conclusions"] == [{"claim": "已生成"}]
+    assert task["retryable"] is True
+    manager.shutdown()
+
+
 def test_cancel_requested_running_task_restarts_as_retryable_failure_only(tmp_path):
     """重启恢复应清除未完成取消请求，避免 failed 与 cancelled 同时为真。"""
     from webapp.task_store import TaskStore
