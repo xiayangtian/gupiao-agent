@@ -16,6 +16,7 @@ import re
 from datetime import date
 from typing import Any, Dict, List, Optional
 
+from financial_report_fetcher.analysis_result import load_analysis_document
 from financial_report_fetcher.report_identity import (
     derive_analysis_report_id,
     parse_report_filename,
@@ -105,10 +106,9 @@ def parse_pdf_filename(filename: str) -> Optional[Dict[str, Any]]:
 def _read_analysis(path: str) -> Optional[Dict[str, Any]]:
     """读取分析 JSON；损坏返回 None（不影响其他条目）"""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = load_analysis_document(path).to_dict()
         return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
         logger.warning("跳过无法解析的分析文件：%s", path)
         return None
 

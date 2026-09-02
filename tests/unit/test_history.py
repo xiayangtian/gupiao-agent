@@ -2,7 +2,12 @@
 
 import json
 
-from webapp.history import analyzed_periods_for_code, build_flat_history, parse_pdf_filename
+from webapp.history import (
+    analyzed_periods_for_code,
+    build_flat_history,
+    get_analysis_detail,
+    parse_pdf_filename,
+)
 
 
 def _write_analysis(
@@ -91,4 +96,41 @@ def test_history_rejects_ambiguous_legacy_quarter_analysis_without_hiding_annual
 
     assert [(item["period"], item["analysis_filename"]) for item in items] == [
         ("2025-12-31", annual),
+    ]
+
+
+def test_history_reads_v3_analysis_and_uses_report_identity(tmp_path):
+    filename = "长江电力_600900_2025_分析报告.json"
+    payload = {
+        "schema_version": 3,
+        "analysis_id": "a1",
+        "report_id": "600900:2025-12-31:annual",
+        "interests": ["现金流"],
+        "stage": "completed",
+        "quick": None,
+        "sections": [],
+        "observations": [],
+        "filtered_topics": [],
+        "evidence_catalog": {},
+        "evidence_summary": {
+            "total": 0, "verified": 0, "single_source": 0,
+            "conflicts": 0, "unknown_scope": 0,
+        },
+        "errors": [],
+        "created_at": "2026-09-02T00:00:00+00:00",
+        "updated_at": "2026-09-02T00:00:00+00:00",
+        "meta": {
+            "company": "长江电力",
+            "company_code": "600900",
+            "period": "2025-12-31",
+        },
+    }
+    (tmp_path / filename).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    detail = get_analysis_detail(str(tmp_path), filename)
+    items = build_flat_history(str(tmp_path), str(tmp_path / "reports"))
+
+    assert detail["schema_version"] == 3
+    assert [(item["code"], item["period"], item["company"]) for item in items] == [
+        ("600900", "2025-12-31", "长江电力")
     ]
