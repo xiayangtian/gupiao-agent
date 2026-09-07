@@ -1479,8 +1479,8 @@ class TestMcpToolExecutor:
 
 
 class TestMcpToolDefs:
-    def test_mcp_tool_defs_fallback_when_list_fails(self, monkeypatch):
-        """MCP 清单获取失败时仍注入内置工具定义。"""
+    def test_mcp_tool_defs_does_not_inject_stale_tools_when_list_fails(self, monkeypatch):
+        """问答 MCP 清单不可用时不注入旧客户端的兜底工具。"""
         class FakeMCP:
             def list_tools(self, timeout=None):
                 raise RuntimeError("MCP 不可用")
@@ -1489,7 +1489,7 @@ class TestMcpToolDefs:
         monkeypatch.setattr(server, "_mcp_tool_defs_cache", None)
         monkeypatch.setattr(server, "_mcp_tool_defs_ready", False)
         defs = server._mcp_tool_defs()
-        assert defs and any(item["function"]["name"] == "get_financial_metrics" for item in defs)
+        assert defs is None
 
     def test_chat_tool_defs_adds_web_search_when_key_configured(self, monkeypatch):
         class FakeSearch:
@@ -1715,16 +1715,50 @@ class TestMcpCircuit:
         assert "total_calls" in body
 
     def test_mcp_diagnose_endpoint(self, client, env, monkeypatch):
-        """诊断端点启动服务检测并返回结果"""
-        class FakeMCP:
+        """诊断检查问答实际使用的 MCP，并返回数据源检查结果。"""
+        class MarketMCP:
             def list_tools(self, timeout=None):
-                return [{"name": "get_realtime_data"}, {"name": "get_financial_metrics"}]
+                return [
+                    {"name": "index_prices"},
+                    {"name": "stock_sector_fund_flow_rank"},
+                    {"name": "data_source_status"},
+                ]
 
-        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+            def call_tool(self, name, arguments, timeout=None):
+                assert name == "data_source_status"
+                assert arguments == {}
+                return '{"tushare":"ok","eastmoney":"degraded"}'
+
+        class LegacyMCP:
+            def list_tools(self, timeout=None):
+                raise AssertionError("诊断不应再访问旧 MCP")
+
+        monkeypatch.setattr(server, "market_data_mcp", MarketMCP())
+        monkeypatch.setattr(server, "stock_mcp", LegacyMCP())
         r = client.post("/api/mcp/diagnose")
         assert r.status_code == 200
-        assert r.json()["ok"] is True
-        assert "2" in r.json()["message"]
+        body = r.json()
+        assert body["ok"] is True
+        assert body["provider"] == "stock-data-mcp"
+        assert body["tools"] == ["index_prices", "stock_sector_fund_flow_rank", "data_source_status"]
+        assert body["data_source_status"]["ok"] is True
+
+    def test_mcp_diagnose_reports_data_source_failure(self, client, env, monkeypatch):
+        """数据源状态调用失败时，不能把 MCP 显示为正常。"""
+        class MarketMCP:
+            def list_tools(self, timeout=None):
+                return [{"name": "data_source_status"}]
+
+            def call_tool(self, name, arguments, timeout=None):
+                raise RuntimeError("Eastmoney 连接超时")
+
+        monkeypatch.setattr(server, "market_data_mcp", MarketMCP())
+        r = client.post("/api/mcp/diagnose")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert body["data_source_status"]["ok"] is False
+        assert "Eastmoney" in body["data_source_status"]["message"]
 
 
 class TestDownloadReport:

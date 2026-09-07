@@ -1671,6 +1671,8 @@ input, select, button { font-family: inherit; font-size: inherit; }
   white-space: nowrap;
 }
 
+.mcp-status-error { color: var(--danger, #c53b3b); }
+
 .rag-status-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .rag-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; flex-wrap: wrap; }
 .tab-group { display: flex; gap: 6px; flex-wrap: wrap; }

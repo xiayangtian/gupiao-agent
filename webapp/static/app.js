@@ -1727,13 +1727,32 @@ function renderMcpStatus(box, st) {
   var diag = st.diagnose || {};
   var diagText = diag.message || '尚未执行检测';
   var injected = st.tools_injected ? '已注入' : '未注入';
+  var provider = st.provider || diag.provider || 'MCP';
+  var health = st.tool_health || {};
+  var failedTools = Object.keys(health).filter(function (name) { return health[name] && health[name].ok === false; });
+  var detail = '';
+  if (diag.tools) {
+    var watched = ['index_prices', 'stock_sector_fund_flow_rank'];
+    var availability = watched.map(function (name) {
+      return name + (diag.tools.indexOf(name) >= 0 ? ' 已加载' : ' 未提供');
+    }).join(' · ');
+    detail += '<div class="mcp-status-diagnose">工具 ' + escapeHtml(availability)
+      + ' · 共 ' + diag.tools.length + ' 个</div>';
+  }
+  if (failedTools.length) {
+    detail += '<div class="mcp-status-diagnose mcp-status-error">最近失败：'
+      + failedTools.map(function (name) {
+        return escapeHtml(name + '（' + (health[name].message || '未知错误') + '）');
+      }).join(' · ') + '</div>';
+  }
   box.innerHTML = '<div class="mcp-status-card ' + cls + '">'
     + '<div class="mcp-status-row">'
-    + '<span>' + circuitLabel(st.circuit) + ' MCP 工具 · ' + injected + '</span>'
+    + '<span>' + circuitLabel(st.circuit) + ' ' + escapeHtml(provider) + ' · ' + injected + '</span>'
     + '<span class="mcp-status-meta">连续失败 ' + st.consecutive_failures + '/' + st.failure_threshold
     + ' · 成功 ' + st.success_calls + '/' + st.total_calls + '</span>'
     + '</div>'
     + '<div class="mcp-status-diagnose" title="' + escapeHtml(diagText) + '">🔎 ' + escapeHtml(diagText) + '</div>'
+    + detail
     + '<button id="mcp-diagnose-btn" class="btn dim-tool-btn">运行检测</button>'
     + '</div>';
   var btn = $('#mcp-diagnose-btn');

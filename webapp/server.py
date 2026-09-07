@@ -128,10 +128,22 @@ _mcp_tool_input_schemas: Dict[str, Dict[str, Any]] = {}
 # MCP 调用熔断器：连续失败暂停使用，冷却后自动探测恢复
 mcp_breaker = McpCircuitBreaker()
 _mcp_diagnose_cache: Dict[str, Any] = {}
+_mcp_tool_health: Dict[str, Dict[str, Any]] = {}
+_mcp_tool_health_lock = threading.Lock()
+
+
+def _record_mcp_tool_health(name: str, ok: bool, message: str) -> None:
+    """保存每个问答 MCP 工具最近一次执行结果，供状态页排障。"""
+    with _mcp_tool_health_lock:
+        _mcp_tool_health[name] = {
+            "ok": ok,
+            "message": str(message)[:200],
+            "checked_at": int(time.time()),
+        }
 
 
 def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
-    """返回 MCP 工具定义；清单失败时使用内置定义，避免功能整体静默降级。"""
+    """返回问答 MCP 的实时工具定义；清单不可用时不注入旧工具。"""
     global _mcp_tool_defs_cache, _mcp_tool_defs_ready, _mcp_tool_input_schemas
     if not mcp_breaker.allow():
         return None  # 熔断冷却中：不注入 MCP 工具（纯 RAG，避免持续失败）
@@ -147,18 +159,17 @@ def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
     try:
         listed = market_data_mcp.list_tools(timeout=timeout)
     except Exception:
-        logger.warning("MCP 工具清单获取失败，将使用内置工具定义")
+        logger.warning("问答 MCP 工具清单获取失败，不注入工具")
         listed = []
     _mcp_tool_input_schemas = {
         str(tool.get("name")): tool.get("input_schema")
         for tool in listed
         if tool.get("name") and isinstance(tool.get("input_schema"), dict)
     }
-    _mcp_tool_defs_cache = build_tool_defs(
-        lambda: listed,
-        whitelist=whitelist,
-        max_tools=12,
-    ) or None
+    _mcp_tool_defs_cache = (
+        build_tool_defs(lambda: listed, whitelist=whitelist, max_tools=12)
+        if listed else None
+    )
     return _mcp_tool_defs_cache
 
 
@@ -288,8 +299,10 @@ def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]
             result = _realtime_via_tencent(args["symbol"])
             if result.startswith("工具调用失败") or result.startswith("未获取到"):
                 mcp_breaker.record_failure(result)
+                _record_mcp_tool_health(name, False, result)
             else:
                 mcp_breaker.record_success()
+                _record_mcp_tool_health(name, True, result)
             return result
         # 只有工具 schema 声明了 output_format 才补默认值；get_time_info 等
         # 无参数工具不能接收通用股票参数。
@@ -299,11 +312,14 @@ def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]
             result = market_data_mcp.call_tool(name, args, timeout=timeout)
         except Exception as exc:
             mcp_breaker.record_failure(exc)
+            _record_mcp_tool_health(name, False, str(exc))
             return f"工具调用失败：{exc}"
         if _tool_result_failed(result):
             mcp_breaker.record_failure(result)
+            _record_mcp_tool_health(name, False, result)
             return f"工具调用失败：{result}"
         mcp_breaker.record_success()
+        _record_mcp_tool_health(name, True, result)
         return result
 
     return _executor
@@ -817,12 +833,43 @@ def download_report(code: str, period: str) -> Dict[str, Any]:
 
 
 def _run_mcp_diagnose() -> Dict[str, Any]:
-    """启动 MCP 服务检测：尝试连接服务器并列出工具清单"""
+    """检查问答实际使用的 MCP、工具清单与数据源可用性。"""
     try:
-        tools = stock_mcp.list_tools(timeout=25)
-        return {"ok": True, "message": f"MCP 服务正常，共 {len(tools)} 个工具"}
+        listed = market_data_mcp.list_tools(timeout=25)
     except Exception as exc:
-        return {"ok": False, "message": f"MCP 服务异常：{exc}"}
+        return {
+            "ok": False,
+            "provider": "stock-data-mcp",
+            "tools": [],
+            "data_source_status": {"ok": False, "message": "未执行：工具清单获取失败"},
+            "message": f"问答 MCP 连接异常：{exc}",
+        }
+
+    names = [str(tool.get("name")) for tool in listed if tool.get("name")]
+    if "data_source_status" not in names:
+        return {
+            "ok": False,
+            "provider": "stock-data-mcp",
+            "tools": names,
+            "data_source_status": {"ok": False, "message": "当前 MCP 版本未提供 data_source_status"},
+            "message": f"问答 MCP 已连接，共 {len(names)} 个工具；但无法检查数据源",
+        }
+    try:
+        result = market_data_mcp.call_tool("data_source_status", {}, timeout=25)
+        failed = str(result).lower().startswith("error:")
+        check = {"ok": not failed, "message": str(result)[:500]}
+    except Exception as exc:
+        check = {"ok": False, "message": str(exc)}
+    return {
+        "ok": check["ok"],
+        "provider": "stock-data-mcp",
+        "tools": names,
+        "data_source_status": check,
+        "message": (
+            f"问答 MCP 与数据源正常，共 {len(names)} 个工具"
+            if check["ok"] else f"问答 MCP 已连接，但数据源异常：{check['message']}"
+        ),
+    }
 
 
 @app.get("/api/mcp/status")
@@ -832,6 +879,9 @@ def mcp_status() -> Dict[str, Any]:
     st["tools_injected"] = bool(
         mcp_breaker.allow() and _mcp_tool_defs_ready and _mcp_tool_defs_cache
     )
+    st["provider"] = "stock-data-mcp"
+    with _mcp_tool_health_lock:
+        st["tool_health"] = dict(_mcp_tool_health)
     st["diagnose"] = _mcp_diagnose_cache or {"ok": None, "message": "尚未执行检测"}
     return st
 
