@@ -42,7 +42,7 @@ from financial_report_fetcher.datasource import CNINFODatasource
 from financial_report_fetcher.downloader import ReportDownloader
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
 from financial_report_fetcher.report_identity import build_report_id
-from financial_report_fetcher.market import stock_mcp, tencent_quote
+from financial_report_fetcher.market import market_data_mcp, stock_mcp, tencent_quote
 from financial_report_fetcher.rag.analysis import RagAnalysis
 from financial_report_fetcher.rag.mcp_tools import (
     DISABLED_MCP_TOOL_NAMES,
@@ -145,7 +145,7 @@ def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
     except Exception:
         whitelist, timeout = [], 30
     try:
-        listed = stock_mcp.list_tools(timeout=timeout)
+        listed = market_data_mcp.list_tools(timeout=timeout)
     except Exception:
         logger.warning("MCP 工具清单获取失败，将使用内置工具定义")
         listed = []
@@ -296,7 +296,7 @@ def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]
         if schema is None or "output_format" in (schema.get("properties") or {}):
             args.setdefault("output_format", "json")
         try:
-            result = stock_mcp.call_tool(name, args, timeout=timeout)
+            result = market_data_mcp.call_tool(name, args, timeout=timeout)
         except Exception as exc:
             mcp_breaker.record_failure(exc)
             return f"工具调用失败：{exc}"

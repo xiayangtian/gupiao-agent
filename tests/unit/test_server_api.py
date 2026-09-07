@@ -1419,7 +1419,7 @@ class TestMcpToolExecutor:
                 calls.append((name, arguments))
                 return '{"time":"now"}'
 
-        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+        monkeypatch.setattr(server, "market_data_mcp", FakeMCP())
         monkeypatch.setattr(server, "_mcp_tool_input_schemas", {
             "get_time_info": {"type": "object", "properties": {}},
         })
@@ -1449,7 +1449,7 @@ class TestMcpToolExecutor:
                 return "{}"
 
         monkeypatch.setattr(server, "stock_index", FakeIndex())
-        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+        monkeypatch.setattr(server, "market_data_mcp", FakeMCP())
         cfg = type("C", (), {"mcp_tools": True, "mcp_tool_timeout": 15, "mcp_max_tool_rounds": 3})()
         executor = server._build_mcp_tool_executor(cfg)
         assert executor is not None
@@ -1485,7 +1485,7 @@ class TestMcpToolDefs:
             def list_tools(self, timeout=None):
                 raise RuntimeError("MCP 不可用")
 
-        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+        monkeypatch.setattr(server, "market_data_mcp", FakeMCP())
         monkeypatch.setattr(server, "_mcp_tool_defs_cache", None)
         monkeypatch.setattr(server, "_mcp_tool_defs_ready", False)
         defs = server._mcp_tool_defs()
@@ -1532,7 +1532,7 @@ class TestMcpToolDefs:
                      "input_schema": {"type": "object", "properties": {}}},
                 ]
 
-        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+        monkeypatch.setattr(server, "market_data_mcp", FakeMCP())
         monkeypatch.setattr(server, "_mcp_tool_defs_cache", None)
         monkeypatch.setattr(server, "_mcp_tool_defs_ready", False)
         defs = server._mcp_tool_defs()
@@ -1569,7 +1569,7 @@ class TestRealtimeRouting:
 
         monkeypatch.setattr(server, "stock_index", FakeIndex())
         monkeypatch.setattr(server, "tencent_quote", FakeTencent())
-        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+        monkeypatch.setattr(server, "market_data_mcp", FakeMCP())
         cfg = type("C", (), {"mcp_tools": True, "mcp_tool_timeout": 15, "mcp_max_tool_rounds": 3})()
         executor = server._build_mcp_tool_executor(cfg)
         result = executor("get_realtime_data", {"symbol": "600900"})
@@ -1581,7 +1581,7 @@ class TestRealtimeRouting:
         assert calls["mcp"] == []
 
     def test_executor_other_tools_still_use_mcp(self, monkeypatch):
-        """非实时行情工具仍走 stock_mcp"""
+        """非实时行情工具走问答专用市场 MCP。"""
         calls = []
 
         class FakeIndex:
@@ -1597,7 +1597,7 @@ class TestRealtimeRouting:
                 return "{}"
 
         monkeypatch.setattr(server, "stock_index", FakeIndex())
-        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+        monkeypatch.setattr(server, "market_data_mcp", FakeMCP())
         cfg = type("C", (), {"mcp_tools": True, "mcp_tool_timeout": 15, "mcp_max_tool_rounds": 3})()
         executor = server._build_mcp_tool_executor(cfg)
         executor("get_financial_metrics", {"symbol": "600900"})
@@ -1696,7 +1696,7 @@ class TestMcpCircuit:
         breaker.record_failure("e")
         monkeypatch.setattr(server, "mcp_breaker", breaker)
         monkeypatch.setattr(server, "stock_index", self._fake_index())
-        monkeypatch.setattr(server, "stock_mcp", type("M", (), {"call_tool": lambda *a, **k: "{}"})())
+        monkeypatch.setattr(server, "market_data_mcp", type("M", (), {"call_tool": lambda *a, **k: "{}"})())
         executor = server._build_mcp_tool_executor(self._cfg())
         executor("get_financial_metrics", {"symbol": "600900"})
         st = breaker.status()

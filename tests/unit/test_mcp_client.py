@@ -8,6 +8,21 @@ from financial_report_fetcher.market.mcp_client import (
 )
 
 
+def test_resolve_stock_data_command_prefers_dedicated_override(monkeypatch):
+    from financial_report_fetcher.market import mcp_client as mc
+
+    monkeypatch.setenv("STOCK_DATA_MCP_CMD", "/opt/bin/stock-data-mcp")
+    assert mc._resolve_stock_data_server_command() == ["/opt/bin/stock-data-mcp"]
+
+
+def test_resolve_stock_data_command_defaults_to_uvx(monkeypatch):
+    from financial_report_fetcher.market import mcp_client as mc
+
+    monkeypatch.delenv("STOCK_DATA_MCP_CMD", raising=False)
+    monkeypatch.setattr(mc, "_find_uvx", lambda: None)
+    assert mc._resolve_stock_data_server_command() == ["uvx", "stock-data-mcp"]
+
+
 def test_is_writable_dir_true_for_writable(tmp_path):
     assert _is_writable_dir(str(tmp_path)) is True
 

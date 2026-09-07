@@ -81,6 +81,17 @@ def _resolve_server_command() -> List[str]:
     return [uvx or _DEFAULT_CMD[0], *_DEFAULT_CMD[1:]]
 
 
+def _resolve_stock_data_server_command() -> List[str]:
+    """解析问答专用 stock-data-mcp 命令，不影响旧 MCP 客户端。"""
+    raw = os.environ.get("STOCK_DATA_MCP_CMD", "").strip()
+    if raw:
+        parts = shlex.split(raw)
+        if parts:
+            return parts
+    uvx = _find_uvx()
+    return [uvx or "uvx", "stock-data-mcp"]
+
+
 def _tool_to_dict(tool: Any) -> Dict[str, Any]:
     """把 mcp.types.Tool 转 dict：名称/描述 + 原生 inputSchema（供 function calling 用）"""
     out: Dict[str, Any] = {

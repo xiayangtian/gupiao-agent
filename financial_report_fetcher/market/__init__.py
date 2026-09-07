@@ -13,12 +13,13 @@
 import logging
 
 from .tencent import TencentQuote
-from .mcp_client import StockMCPClient
+from .mcp_client import StockMCPClient, _resolve_stock_data_server_command
 
 logger = logging.getLogger(__name__)
 
 # 模块级单例：Web / CLI 共享同一连接池与会话
 tencent_quote = TencentQuote()
 stock_mcp = StockMCPClient()
+market_data_mcp = StockMCPClient(command=_resolve_stock_data_server_command())
 
-__all__ = ["TencentQuote", "StockMCPClient", "tencent_quote", "stock_mcp"]
+__all__ = ["TencentQuote", "StockMCPClient", "tencent_quote", "stock_mcp", "market_data_mcp"]
