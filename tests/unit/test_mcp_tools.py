@@ -110,6 +110,20 @@ def test_build_tool_defs_fallback_when_list_tools_fails():
         assert t["name"] in names
 
 
+def test_build_tool_defs_excludes_removed_news_tool_from_live_and_fallback():
+    """已下线的新闻 MCP 不应再被模型获得，避免触发已知兼容性错误。"""
+    live = build_tool_defs(lambda: [
+        {"name": "get_news_data", "description": "新闻",
+         "input_schema": {"type": "object", "properties": {}}},
+        {"name": "get_financial_metrics", "description": "财务指标",
+         "input_schema": {"type": "object", "properties": {}}},
+    ])
+    fallback = build_tool_defs(lambda: (_ for _ in ()).throw(RuntimeError("MCP 不可用")))
+
+    assert [item["function"]["name"] for item in live] == ["get_financial_metrics"]
+    assert "get_news_data" not in [item["function"]["name"] for item in fallback]
+
+
 def test_fallback_tools_have_parameters():
     """内置白名单转 OpenAI 格式后每个工具都有可用的 parameters 定义"""
     assert FALLBACK_MCP_TOOLS

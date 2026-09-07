@@ -142,14 +142,13 @@ python3 -m financial_report_fetcher mcp info --symbol 600519
 # 关键财务指标（归母净利润、ROE、周转率等，历史 20+ 年）
 python3 -m financial_report_fetcher mcp financials --symbol 600519
 
-# 三大报表 / 资金流 / 股东 / 业绩预测 / 新闻
+# 三大报表 / 资金流 / 股东 / 业绩预测
 python3 -m financial_report_fetcher mcp balance-sheet --symbol 600519
 python3 -m financial_report_fetcher mcp income --symbol 600519
 python3 -m financial_report_fetcher mcp cashflow --symbol 600519
 python3 -m financial_report_fetcher mcp fund-flow --symbol 600519
 python3 -m financial_report_fetcher mcp shareholders --symbol 600519
 python3 -m financial_report_fetcher mcp forecast --symbol 600519
-python3 -m financial_report_fetcher mcp news --symbol 600519
 
 # 列出全部 30 个工具 / 通用调用任意工具
 python3 -m financial_report_fetcher mcp tools

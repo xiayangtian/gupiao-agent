@@ -1504,6 +1504,25 @@ class TestMcpToolDefs:
         defs = server._build_chat_tool_defs(cfg)
         assert [item["function"]["name"] for item in defs] == ["web_search"]
 
+    def test_chat_tool_defs_does_not_expose_removed_news_tool(self, monkeypatch):
+        """新闻 MCP 被下线后，问答模型仍可获得网页搜索作为时效性信息来源。"""
+        class FakeSearch:
+            available = True
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(server, "TavilyWebSearch", FakeSearch)
+        monkeypatch.setattr(server, "_mcp_tool_defs", lambda: [
+            {"type": "function", "function": {"name": "get_news_data", "parameters": {}}},
+            {"type": "function", "function": {"name": "get_realtime_quote", "parameters": {}}},
+        ])
+        cfg = type("C", (), {"mcp_tools": True, "web_search": True, "web_search_timeout": 15})()
+
+        defs = server._build_chat_tool_defs(cfg)
+
+        assert [item["function"]["name"] for item in defs] == ["get_realtime_quote", "web_search"]
+
     def test_mcp_tool_defs_built_when_available(self, monkeypatch):
         """MCP 可用时构建工具定义并缓存"""
         class FakeMCP:

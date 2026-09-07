@@ -8,6 +8,10 @@
 
 from typing import Any, Callable, Dict, List, Optional
 
+# 已验证在当前依赖组合下稳定失败的 MCP 工具。保留名称清单便于将来替换为
+# 可靠的数据源后集中恢复，不能把它们注入模型或作为 CLI 快捷入口调用。
+DISABLED_MCP_TOOL_NAMES = frozenset({"get_news_data"})
+
 # 内置兜底白名单：MCP 启动失败/未安装时仍可用统一参数模板
 # （symbol=6 位代码 + output_format=json/markdown）
 FALLBACK_MCP_TOOLS: List[Dict[str, Any]] = [
@@ -48,10 +52,6 @@ FALLBACK_MCP_TOOLS: List[Dict[str, Any]] = [
         "description": "业绩预测：机构盈利预测与目标价",
     },
     {
-        "name": "get_news_data",
-        "description": "个股新闻：近期公告与媒体报道",
-    },
-    {
         "name": "get_stock_indicator",
         "description": "估值指标：PE/PB/PS/股息率等",
     },
@@ -65,8 +65,8 @@ FALLBACK_MCP_TOOLS: List[Dict[str, Any]] = [
 WEB_SEARCH_TOOL: Dict[str, Any] = {
     "name": "web_search",
     "description": (
-        "搜索公开网页并返回标题、URL、摘要与发布日期。仅用于补充外部或实时信息；"
-        "财报数字必须优先采用本地财报证据。"
+        "搜索公开网页并返回标题、URL、摘要与发布日期。涉及今日、近期、最新、"
+        "公告、新闻、舆情或股价涨跌原因时优先使用；财报数字必须优先采用本地财报证据。"
     ),
     "input_schema": {
         "type": "object",
@@ -140,6 +140,7 @@ def build_tool_defs(
     if not listed:
         return to_openai_tools(list(FALLBACK_MCP_TOOLS)[:max_tools])
 
+    listed = [t for t in listed if t.get("name") not in DISABLED_MCP_TOOL_NAMES]
     if whitelist:
         wanted = {w for w in whitelist if w}
         listed = [t for t in listed if t.get("name") in wanted]

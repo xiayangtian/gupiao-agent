@@ -43,6 +43,7 @@ from .rag.analysis import RagAnalysis
 from .rag.config import RagConfig
 from .rag.embedding import LocalEmbedder
 from .rag.ingest import IngestionService
+from .rag.mcp_tools import DISABLED_MCP_TOOL_NAMES
 from .rag.qa import RagQA
 from .rag.store import RagStore
 
@@ -411,7 +412,6 @@ _MCP_SYMBOL_TOOLS = {
     "fund-flow": ("get_fund_flow", "资金流向(近100交易日)"),
     "shareholders": ("get_shareholder_info", "股东情况"),
     "forecast": ("get_profit_forecast", "业绩预测"),
-    "news": ("get_news_data", "个股新闻"),
 }
 
 
@@ -427,6 +427,9 @@ def cmd_mcp(args: argparse.Namespace) -> None:
                 print(f"  - {t['name']}: {t['description']}")
 
         elif args.mcp_action == "call":
+            if args.tool in DISABLED_MCP_TOOL_NAMES:
+                print("❌ 该新闻工具已下线，请使用网页搜索获取近期新闻与公告")
+                sys.exit(1)
             call_args = json.loads(args.args or "{}") if args.args else {}
             result = stock_mcp.call_tool(args.tool, call_args, timeout=args.timeout)
             print(result)

@@ -44,7 +44,12 @@ from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportTy
 from financial_report_fetcher.report_identity import build_report_id
 from financial_report_fetcher.market import stock_mcp, tencent_quote
 from financial_report_fetcher.rag.analysis import RagAnalysis
-from financial_report_fetcher.rag.mcp_tools import WEB_SEARCH_TOOL, build_tool_defs, to_openai_tools
+from financial_report_fetcher.rag.mcp_tools import (
+    DISABLED_MCP_TOOL_NAMES,
+    WEB_SEARCH_TOOL,
+    build_tool_defs,
+    to_openai_tools,
+)
 from financial_report_fetcher.rag.config import RagConfig
 from financial_report_fetcher.rag.embedding import LocalEmbedder
 from financial_report_fetcher.rag.ingest import IngestionService
@@ -160,6 +165,11 @@ def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
 def _build_chat_tool_defs(cfg: Any) -> Optional[List[Dict[str, Any]]]:
     """组合 MCP 与内部网页搜索工具，网页搜索不受 MCP 熔断影响。"""
     definitions = list(_mcp_tool_defs() or []) if getattr(cfg, "mcp_tools", False) else []
+    # 防御性过滤：即使 MCP 定义来自旧进程缓存，也不能再暴露已下线工具。
+    definitions = [
+        item for item in definitions
+        if item.get("function", {}).get("name") not in DISABLED_MCP_TOOL_NAMES
+    ]
     web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
     if getattr(cfg, "web_search", True) and web.available:
         definitions.extend(to_openai_tools([WEB_SEARCH_TOOL]))
@@ -312,6 +322,8 @@ def _build_chat_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any
             if not web_enabled:
                 return "工具调用失败：网页搜索未配置 TAVILY_API_KEY"
             return web.search(**dict(arguments or {}))
+        if name in DISABLED_MCP_TOOL_NAMES:
+            return "工具已下线：请使用 web_search 查询近期新闻、公告与事件。"
         if mcp_executor is None:
             return "工具调用失败：MCP 工具未启用"
         return mcp_executor(name, arguments)

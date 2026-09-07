@@ -155,7 +155,7 @@
 3. **多市场**（港股/美股/加密）：stock-data-mcp 或海外 MCP（Yahoo/Alpha Vantage）。
 4. **技术分析/选股**：china-stock-mcp 的 30+ 技术指标、
    `get_stock_technical_rank`（创新高/突破均线/量价齐升等）、涨停/强势股池（stock-data-mcp）。
-5. **舆情/新闻**：china-stock-mcp `get_news_data`、stock-data-mcp `stock_news_global`。
+5. **舆情/新闻**：使用网页搜索获取近期公告与媒体报道；后续可接入经验证可靠的 MCP 新闻工具。
 
 > 接入方式（MCP）：fastmcp/mcp Python 客户端连接 stdio 或 streamable HTTP，
 > 与本项目 FastAPI 后端天然可集成；也可直接按 3.x 的 HTTP API 或 4.x 的库方式
