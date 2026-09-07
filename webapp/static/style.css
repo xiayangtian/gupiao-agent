@@ -1631,8 +1631,12 @@ input, select, button { font-family: inherit; font-size: inherit; }
 }
 /* ── RAG 知识库页 ── */
 #page-rag { padding: var(--space-lg) var(--space-xl); overflow-y: auto; }
-.rag-header { margin-bottom: 12px; }
-.rag-header h2 { font-size: 22px; font-weight: 700; color: var(--text-primary); margin-bottom: var(--space-sm); }
+.rag-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.rag-header h2 { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0; flex: none; }
+.rag-header .hint { margin: 0; min-width: 0; }
+@media (max-width: 640px) {
+  .rag-header { align-items: flex-start; flex-direction: column; gap: 2px; }
+}
 .mcp-status-bar { margin-bottom: var(--space-md); }
 
 .mcp-status-card {
