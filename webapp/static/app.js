@@ -2195,14 +2195,14 @@ function setThinkingText(thinkingEl, text) {
 function appendWebSources(sel, sources) {
   var box = $(sel);
   if (!box || !sources || !sources.length) return;
-  var rows = sources.filter(function (source) {
-    return source && /^https?:\/\//i.test(String(source.url || ''));
-  }).map(function (source) {
+  var references = window.ChatRendering
+    ? window.ChatRendering.webSourceReferences(sources)
+    : [];
+  var rows = references.map(function (source) {
     var title = escapeHtml(source.title || source.url);
     var url = escapeHtml(source.url);
     var meta = source.published_date ? '<span class="web-source-date">' + escapeHtml(source.published_date) + '</span>' : '';
-    var preview = source.content ? '<div class="web-source-preview">' + escapeHtml(source.content) + '</div>' : '';
-    return '<li><a href="' + url + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' + meta + preview + '</li>';
+    return '<li><a href="' + url + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' + meta + '</li>';
   });
   if (!rows.length) return;
   var div = document.createElement('section');
@@ -2395,7 +2395,9 @@ async function submitQuestion(q, key) {
             assistantEl.textContent = '';
             $('#chat-history').appendChild(assistantEl);
           }
-          assistantEl.textContent = st.answerText;
+          assistantEl.textContent = window.ChatRendering
+            ? window.ChatRendering.normalizeAssistantMarkdown(st.answerText)
+            : st.answerText;
           scrollChatToBottom();
         }
       } else if (parsed.event === 'reasoning_stage') {
@@ -2583,7 +2585,10 @@ function appendChatMsg(sel, role, content) {
   if (!box) return;
   var div = document.createElement('div');
   div.className = 'chat-msg ' + role;
-  div.innerHTML = role === 'user' ? escapeHtml(content) : renderMarkdown(content);
+  var displayed = window.ChatRendering
+    ? window.ChatRendering.normalizeAssistantMarkdown(content)
+    : content;
+  div.innerHTML = role === 'user' ? escapeHtml(content) : renderMarkdown(displayed);
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
 }

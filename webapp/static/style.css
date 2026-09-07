@@ -1955,7 +1955,6 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .chat-web-sources li + li { margin-top: 5px; }
 .chat-web-sources a { overflow-wrap: anywhere; }
 .web-source-date { color: var(--text-muted); margin-left: 6px; }
-.web-source-preview { color: var(--text-muted); margin-top: 1px; overflow-wrap: anywhere; }
 
 @keyframes chatBlink {
   0%, 80%, 100% { opacity: 0.2; }

@@ -1740,11 +1740,14 @@ class TestIndexCache:
         assert r.headers.get("cache-control") == "no-cache"
         body = r.text
         workflow_src = "/static/analysis_workflow.js?v="
+        chat_rendering_src = "/static/chat_rendering.js?v="
         app_src = "/static/app.js?v="
         assert workflow_src in body
+        assert chat_rendering_src in body
         assert "/static/app.js?v=" in body
         assert "/static/style.css?v=" in body
         assert body.index(workflow_src) < body.index(app_src)
+        assert body.index(chat_rendering_src) < body.index(app_src)
 
 
 class TestHealthStartedAt:
