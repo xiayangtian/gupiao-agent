@@ -1,6 +1,8 @@
 import json
 from decimal import Decimal
 
+import pytest
+
 from financial_report_fetcher.analysis_ai import (
     AiInsightAnalyzer,
     AiQuickAnalyzer,
@@ -19,9 +21,22 @@ from financial_report_fetcher.insights import InsightCandidate, InsightScorer
 class FakeAi:
     def __init__(self, payload):
         self.payload = payload
+        self.last_kwargs = None
 
     def ask(self, *args, **kwargs):
+        self.last_prompt = args[0]
+        self.last_kwargs = kwargs
         return json.dumps(self.payload, ensure_ascii=False)
+
+
+class SequenceAi:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.calls = 0
+
+    def ask(self, *args, **kwargs):
+        self.calls += 1
+        return next(self.responses)
 
 
 def _record(record_id, state=VerificationState.VERIFIED):
@@ -58,6 +73,26 @@ def test_quick_analyzer_drops_unknown_and_conflicting_evidence_claims():
 
     assert [item.conclusion_id for item in result.conclusions] == ["ok"]
     assert result.conclusions[0].verification_state is VerificationState.VERIFIED
+    assert ai.last_kwargs["thinking"] == {"type": "disabled"}
+    assert "json_object" in ai.last_prompt
+
+
+def test_quick_analyzer_retries_empty_json_response_once():
+    ai = SequenceAi(["", '{"conclusions": []}'])
+
+    result = AiQuickAnalyzer(ai).analyze([], interests=())
+
+    assert result.conclusions == []
+    assert ai.calls == 2
+
+
+def test_quick_analyzer_reports_clear_error_after_two_invalid_responses():
+    ai = SequenceAi(["", "not json"])
+
+    with pytest.raises(ValueError, match="连续两次未返回有效 JSON"):
+        AiQuickAnalyzer(ai).analyze([], interests=())
+
+    assert ai.calls == 2
 
 
 def test_topic_generator_returns_only_candidates_with_known_evidence():

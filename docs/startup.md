@@ -110,7 +110,27 @@ PowerShell 中以上变量只在当前终端会话有效。通常直接维护本
 
 ### Windows PowerShell
 
-仓库当前提供的是 Bash 启停脚本；原生 PowerShell 环境请使用以下命令。
+推荐使用仓库自带的批处理控制台。双击 `service.bat` 可打开中文菜单，也可在
+CMD 或 PowerShell 中直接传入命令：
+
+```bat
+service.bat start
+service.bat stop
+service.bat restart
+service.bat status
+service.bat logs
+```
+
+服务以隐藏窗口在后台运行，PID 保存到 `logs/app.pid`，标准输出和错误日志分别
+保存到 `logs/uvicorn.log`、`logs/uvicorn-error.log`。脚本会执行健康检查，停止前
+也会校验 PID 对应的命令行，避免 PID 被复用后误杀其他程序。
+
+默认使用 `.venv\Scripts\python.exe` 和 `127.0.0.1:8000`。如需覆盖，可先设置
+`APP_PYTHON`、`APP_HOST` 或 `APP_PORT` 环境变量。并行运行多个实例时，还应为
+每个实例设置不同的 `APP_PID_FILE`。
+测试或并行实例还可用 `APP_LOG_FILE`、`APP_ERROR_LOG` 分离日志文件。
+
+以下 PowerShell 命令可用于手工排查。
 
 #### 前台启动
 

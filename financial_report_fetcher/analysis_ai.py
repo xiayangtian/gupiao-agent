@@ -52,14 +52,34 @@ def _evidence_payload(records: Sequence[EvidenceRecord]) -> list[dict[str, Any]]
 
 
 def _ask_json(ai_client, *, system: str, prompt: dict[str, Any], max_tokens: int) -> dict[str, Any]:
-    text = ai_client.ask(
-        json.dumps(prompt, ensure_ascii=False),
-        system=system,
-        temperature=0.1,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-    )
-    return _parse_json(text)
+    # DeepSeek 的 JSON Output 校验要求实际 prompt 中出现 "json"；不能仅依赖
+    # 某个调用方的 system prompt，以免主题规划等阶段遗漏后被 API 以 400 拒绝。
+    request_prompt = {
+        "output_format": "json_object",
+        "output_instruction": "Return valid JSON only.",
+        **prompt,
+    }
+    last_error: Exception | None = None
+    for _attempt in range(2):
+        text = ai_client.ask(
+            json.dumps(request_prompt, ensure_ascii=False),
+            system=system,
+            temperature=0.1,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+            thinking={"type": "disabled"},
+        )
+        if not text.strip():
+            last_error = ValueError("AI 返回了空内容")
+            continue
+        try:
+            return _parse_json(text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+
+    raise ValueError(
+        "AI 连续两次未返回有效 JSON，请稍后重试或更换模型"
+    ) from last_error
 
 
 class AiQuickAnalyzer:

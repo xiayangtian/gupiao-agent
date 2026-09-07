@@ -29,9 +29,15 @@ class FakeJsonResp:
 def _client_with(payload, status_code=200):
     """构造注入 fake session 的 AIClient"""
     client = AIClient(api_key="sk-test", base_url="https://fake.example/v1")
-    fake_session = type("FakeSession", (), {
-        "post": lambda self, *a, **kw: FakeJsonResp(payload, status_code),
-    })()
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return FakeJsonResp(payload, status_code)
+
+    fake_session = FakeSession()
     client._session = fake_session
     return client
 
@@ -78,3 +84,14 @@ def test_chat_reasoning_defaults_empty():
     })
     result = client.chat([{"role": "user", "content": "分析"}])
     assert result["reasoning"] == ""
+
+
+def test_chat_passes_thinking_mode_to_api():
+    client = _client_with({"choices": [_choice({"content": "{}"})]})
+
+    client.chat(
+        [{"role": "user", "content": "分析"}],
+        thinking={"type": "disabled"},
+    )
+
+    assert client._session.calls[0][1]["json"]["thinking"] == {"type": "disabled"}

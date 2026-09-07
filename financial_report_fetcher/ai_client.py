@@ -188,6 +188,7 @@ class AIClient:
         temperature: float = 0.3,
         max_tokens: Optional[int] = 4096,
         response_format: Optional[Dict[str, Any]] = None,
+        thinking: Optional[Dict[str, str]] = None,
         stream: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -200,6 +201,7 @@ class AIClient:
             temperature: 生成温度 (0~2)，财务分析建议 0.3 以下
             max_tokens:  最大输出 Tokens 数
             response_format: 结构化输出格式，如 {"type": "json_object"}
+            thinking:   模型思考模式，如 {"type": "disabled"}
             stream:     是否流式输出（暂未实现了）
 
         Returns:
@@ -238,6 +240,8 @@ class AIClient:
         # 如果支持结构化输出，按 OpenAI API 标准设置 response_format
         if response_format is not None:
             request_body["response_format"] = response_format
+        if thinking is not None:
+            request_body["thinking"] = thinking
 
         # 发起请求
         url = f"{self.base_url}/chat/completions"
@@ -317,6 +321,7 @@ class AIClient:
         temperature: float = 0.3,
         max_tokens: Optional[int] = 4096,
         response_format: Optional[Dict[str, Any]] = None,
+        thinking: Optional[Dict[str, str]] = None,
     ) -> str:
         """
         最简单的单轮对话方法，直接传文字量产，返回文本。
@@ -331,6 +336,7 @@ class AIClient:
             temperature:         生成温度
             max_tokens:          最大输出长度
             response_format:     结构化输出格式
+            thinking:            模型思考模式
 
         Returns:
             模型回复文本
@@ -342,6 +348,7 @@ class AIClient:
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,
+            thinking=thinking,
         )
         return result["content"]
 
