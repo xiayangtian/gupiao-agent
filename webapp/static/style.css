@@ -1422,10 +1422,10 @@ input, select, button { font-family: inherit; font-size: inherit; }
 @media (max-width: 560px) {
   .analysis-result-tabs { gap: 6px; margin-right: -4px; }
   .analysis-result-tab { min-height: 36px; white-space: nowrap; }
-  .analysis-evidence-item { grid-template-columns: auto minmax(0, 1fr); }
+  .analysis-evidence-item { grid-template-columns: minmax(0, 1fr); }
   .analysis-evidence-page,
-  .analysis-evidence-source { grid-column: 2; justify-self: start; }
-  .analysis-evidence-excerpt { grid-column: 2; }
+  .analysis-evidence-source { grid-column: 1; justify-self: start; }
+  .analysis-evidence-excerpt { grid-column: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

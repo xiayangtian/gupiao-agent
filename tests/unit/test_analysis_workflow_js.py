@@ -42,6 +42,18 @@ def test_analysis_report_styles_define_semantic_tones_and_visible_focus():
     assert ".analysis-finding {" not in css
 
 
+def test_analysis_report_mobile_evidence_items_use_one_column():
+    """窄屏证据项必须单列，所有子项均回到首列，避免证据内容被挤压。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    mobile = css.split("@media (max-width: 560px) {", 1)[1].split(
+        "@media (prefers-reduced-motion: reduce)", 1
+    )[0]
+
+    assert ".analysis-evidence-item { grid-template-columns: minmax(0, 1fr); }" in mobile
+    assert ".analysis-evidence-page,\n  .analysis-evidence-source { grid-column: 1; justify-self: start; }" in mobile
+    assert ".analysis-evidence-excerpt { grid-column: 1; }" in mobile
+
+
 def test_analysis_task_registry_survives_reload_and_deduplicates_by_report():
     """刷新后仍应找到同一报告唯一的活跃任务，而不是丢失或重复轮询。"""
     result = _run_node(
