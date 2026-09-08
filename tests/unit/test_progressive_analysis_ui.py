@@ -117,6 +117,26 @@ def test_progressive_renderer_keeps_evidence_folded_and_limits_emphasis():
     }
 
 
+def test_progressive_renderer_shows_observations_after_completed_empty_quick_result():
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed', quick: {{ conclusions: [] }},
+          observations: [{{ title: '现金流观察', summary: '经营现金流下降', evidence_ids: ['e1'] }}],
+          evidence_catalog: {{ e1: {{ label: 'PDF 第 12 页' }} }}
+        }});
+        console.log(JSON.stringify({{
+          observation: html.includes('现金流观察'),
+          pending: html.includes('快速结论生成中'),
+          disclaimer: html.includes('证据尚待结构化核验')
+        }}));
+        """
+    )
+
+    assert result == {"observation": True, "pending": False, "disclaimer": True}
+
+
 def test_table_cleanup_drops_missing_rows_and_the_whole_empty_table():
     result = _run_node(
         f"""

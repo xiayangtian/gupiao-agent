@@ -381,6 +381,13 @@
     var quickHtml = (quick.conclusions || []).map(function (item) {
       return renderFinding(item, catalog);
     }).join('');
+    var observationHtml = (current.observations || []).map(function (item) {
+      if (!item || !item.title || !item.summary) return '';
+      return '<article class="analysis-finding analysis-observation">'
+        + '<h3>' + escapeMarkup(item.title) + '</h3>'
+        + '<p>' + escapeMarkup(item.summary) + '</p>'
+        + renderEvidence(item.evidence_ids, catalog) + '</article>';
+    }).join('');
     var correctionHtml = (quick.corrections || []).map(function (item) {
       return '<div class="analysis-correction"><strong>快速结论已校正</strong><p>'
         + escapeMarkup(item.before) + ' → ' + escapeMarkup(item.after) + '</p></div>';
@@ -395,8 +402,16 @@
         + (selected ? 'true' : 'false') + '">' + escapeMarkup(section.title) + '</button>';
     }).join('');
     var active = current.activeTab || 'quick';
+    var completedWithoutQuick = current.stage === 'completed' || current.stage === 'partial';
+    var quickBody = quickHtml + correctionHtml;
+    if (!quickBody && completedWithoutQuick) {
+      quickBody = observationHtml
+        ? '<p class="hint">以下为基于 PDF 文本的参考观察，证据尚待结构化核验。</p>'
+          + observationHtml
+        : '<p class="hint">本次未生成可验证的快速结论。</p>';
+    }
     var body = active === 'quick'
-      ? (quickHtml + correctionHtml || '<p class="hint">快速结论生成中…</p>')
+      ? (quickBody || '<p class="hint">快速结论生成中…</p>')
       : sections.filter(function (section) { return section.section_id === active; })
         .map(function (section) {
           return '<section class="analysis-section"><h3>' + escapeMarkup(section.title) + '</h3>'
