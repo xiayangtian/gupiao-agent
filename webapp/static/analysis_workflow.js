@@ -645,6 +645,7 @@
     createAnalysisStreamController: createAnalysisStreamController,
     downloadCompletionEffect: downloadCompletionEffect,
     downloadedPdfPreviewUrl: downloadedPdfPreviewUrl,
+    evidencePdfPreviewUrl: evidencePdfPreviewUrl,
     goToHistoryReport: goToHistoryReport,
     goToReportChat: goToReportChat,
     historyDimensionDefaults: historyDimensionDefaults,

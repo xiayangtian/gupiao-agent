@@ -716,6 +716,15 @@ function bindProgressiveTabs(container, key) {
   if (!container || container.dataset.progressiveTabsBound) return;
   container.dataset.progressiveTabsBound = '1';
   container.addEventListener('click', function (event) {
+    var evidenceButton = event.target && event.target.closest
+      ? event.target.closest('[data-evidence-page]') : null;
+    if (evidenceButton) {
+      var page = Number(evidenceButton.dataset.evidencePage);
+      container.dispatchEvent(new CustomEvent('analysis:evidence-page', {
+        bubbles: true, detail: { page: page }
+      }));
+      return;
+    }
     var tab = event.target && event.target.closest
       ? event.target.closest('[data-analysis-tab]') : null;
     if (!tab || !STATE.analysisCache[key] || !STATE.analysisCache[key].data) return;
@@ -727,6 +736,25 @@ function bindProgressiveTabs(container, key) {
     ) === key) renderHistoryAnalysisState(STATE.historySelected);
   });
 }
+
+function openEvidencePdfPage(event) {
+  var selected = STATE.selected && STATE.selectedReport ? {
+    code: STATE.selected.code, period: STATE.selectedReport.period
+  } : null;
+  var url = window.AnalysisWorkflow.evidencePdfPreviewUrl(
+    selected, event.detail && event.detail.page
+  );
+  var frame = $('#pdf-frame');
+  if (!url || !frame) return;
+  frame.src = url;
+  var preview = document.querySelector('.preview-panel');
+  if (preview && preview.scrollIntoView) {
+    preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+  if (frame.focus) frame.focus();
+}
+
+document.addEventListener('analysis:evidence-page', openEvidencePdfPage);
 
 // ── 关注方向：首次分析和重新分析共用同一个多选弹窗 ──
 

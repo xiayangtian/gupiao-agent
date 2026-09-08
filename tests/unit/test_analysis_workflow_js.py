@@ -322,6 +322,28 @@ def test_download_completion_only_mutates_the_report_that_is_still_visible():
     }
 
 
+def test_evidence_pdf_preview_url_only_accepts_current_report_and_positive_page():
+    """证据页码预览只定位当前已选报告，且拒绝非正整数页码。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        console.log(JSON.stringify({{
+          valid: workflow.evidencePdfPreviewUrl({{code:'601288', period:'2025-12-31'}}, 12),
+          decimal: workflow.evidencePdfPreviewUrl({{code:'601288', period:'2025-12-31'}}, 1.5),
+          zero: workflow.evidencePdfPreviewUrl({{code:'601288', period:'2025-12-31'}}, 0),
+          noReport: workflow.evidencePdfPreviewUrl(null, 12)
+        }}));
+        """
+    )
+
+    assert result == {
+        "valid": "/api/reports/601288/2025-12-31.pdf#page=12",
+        "decimal": None,
+        "zero": None,
+        "noReport": None,
+    }
+
+
 def test_pdf_download_fallback_requires_missing_endpoint_and_same_report():
     """兼容回退仅允许 404/405，且不能让旧请求覆盖用户新选中的报告。"""
     result = _run_node(
