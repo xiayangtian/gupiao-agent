@@ -337,19 +337,98 @@
     }).join('') + escapeMarkup(source.slice(cursor));
   }
 
-  function renderEvidence(evidenceIds, catalog) {
-    var items = (evidenceIds || []).map(function (id) {
-      var evidence = (catalog || {})[id];
-      if (!evidence) return '';
-      var locator = evidence.source_locator || {};
-      var label = evidence.label || [evidence.source_type, locator.page ? '第 ' + locator.page + ' 页' : '']
-        .filter(Boolean).join(' · ') || id;
-      var excerpt = evidence.excerpt || [evidence.value, evidence.unit].filter(Boolean).join(' ');
-      return '<li><strong>' + escapeMarkup(label) + '</strong>'
-        + (excerpt ? '<span>' + escapeMarkup(excerpt) + '</span>' : '') + '</li>';
+  function evidenceKind(evidence) {
+    var type = String((evidence || {}).source_type || '');
+    if (type === 'pdf_text' || type === 'ocr') return 'pdf';
+    if (type === 'structured') return 'structured';
+    return 'other';
+  }
+
+  function uniqueEvidenceIds(items) {
+    var seen = {};
+    return (items || []).reduce(function (ids, item) {
+      (item && item.evidence_ids || []).forEach(function (id) {
+        id = String(id);
+        if (!seen[id]) {
+          seen[id] = true;
+          ids.push(id);
+        }
+      });
+      return ids;
+    }, []);
+  }
+
+  function evidencePdfPreviewUrl(selected, page) {
+    var number = Number(page);
+    if (!selected || !selected.code || !selected.period
+      || !Number.isInteger(number) || number < 1) return null;
+    return '/api/reports/' + encodeURIComponent(selected.code) + '/'
+      + encodeURIComponent(selected.period) + '.pdf#page=' + number;
+  }
+
+  function findingTone(item) {
+    if (item && (item.risk_state === 'verified_risk' || item.style === 'verified_risk')) {
+      return { key: 'risk', label: '风险' };
+    }
+    if (item && item.style === 'observation') return { key: 'observation', label: '观察' };
+    return { key: 'highlight', label: '重点' };
+  }
+
+  function renderReportFinding(item, index) {
+    var finding = item || {};
+    var claim = finding.claim || finding.text || finding.summary || '';
+    if (!claim) return '';
+    var tone = findingTone(finding);
+    var evidenceCount = (finding.evidence_ids || []).length;
+    return '<article class="analysis-report-finding analysis-tone-' + tone.key + '">'
+      + '<span class="analysis-finding-label">' + tone.label + '</span>'
+      + (finding.title ? '<h3>' + escapeMarkup(finding.title) + '</h3>' : '')
+      + '<p>' + emphasizedText(claim, finding.highlight_spans) + '</p>'
+      + (finding.key_data ? '<p class="analysis-key-data">' + escapeMarkup(finding.key_data) + '</p>' : '')
+      + (finding.significance ? '<p class="analysis-significance">' + escapeMarkup(finding.significance) + '</p>' : '')
+      + (evidenceCount ? '<a class="analysis-evidence-link" href="#analysis-evidence">引用证据 '
+        + evidenceCount + '</a>' : '')
+      + '</article>';
+  }
+
+  function renderSummary(items) {
+    var cards = (items || []).slice(0, 3).map(function (item) {
+      var finding = item || {};
+      var claim = finding.claim || finding.text || finding.summary || '';
+      if (!claim) return '';
+      var tone = findingTone(finding);
+      return '<article class="summary-item summary-tone-' + tone.key + '">'
+        + '<span class="analysis-finding-label">' + tone.label + '</span>'
+        + '<p>' + escapeMarkup(claim) + '</p>'
+        + (finding.key_data ? '<strong>' + escapeMarkup(finding.key_data) + '</strong>' : '')
+        + '</article>';
     }).filter(Boolean).join('');
-    return items ? '<details class="analysis-evidence"><summary>查看证据（'
-      + (evidenceIds || []).length + '）</summary><ul>' + items + '</ul></details>' : '';
+    return cards ? '<section class="analysis-report-summary"><h3>本期要点</h3>' + cards + '</section>' : '';
+  }
+
+  function renderEvidenceSection(items, catalog) {
+    var evidence = catalog || {};
+    var entries = uniqueEvidenceIds(items).map(function (id, index) {
+      var record = evidence[id];
+      if (!record) return '';
+      var locator = record.source_locator || {};
+      var kind = evidenceKind(record);
+      var page = Number(locator.page);
+      var hasPage = kind === 'pdf' && Number.isInteger(page) && page > 0;
+      var label = record.label || record.fact_name || id;
+      var excerpt = record.excerpt || [record.value, record.unit].filter(Boolean).join(' ');
+      var meta = [record.period, excerpt].filter(Boolean).join(' · ');
+      return '<li class="analysis-evidence-item"><span class="analysis-evidence-index">'
+        + (index + 1) + '</span><strong>' + escapeMarkup(label) + '</strong>'
+        + (hasPage ? '<button type="button" class="analysis-evidence-page" data-evidence-page="'
+          + page + '">PDF · 第 ' + page + ' 页</button>'
+          : '<span class="analysis-evidence-source">'
+            + escapeMarkup(kind === 'structured' ? '结构化数据' : (record.source_type || '来源记录')) + '</span>')
+        + (meta ? '<span class="analysis-evidence-excerpt">' + escapeMarkup(meta) + '</span>' : '')
+        + '</li>';
+    }).filter(Boolean).join('');
+    return entries ? '<section id="analysis-evidence" class="analysis-evidence-section"><h3>证据与出处（'
+      + (entries.match(/<li /g) || []).length + '）</h3><ol>' + entries + '</ol></section>' : '';
   }
 
   function missingValue(value) {
@@ -363,67 +442,62 @@
     });
   }
 
-  function renderFinding(item, catalog) {
-    var claim = item.claim || item.text || '';
-    if (!claim) return '';
-    var risk = item.risk_state === 'verified_risk' || item.style === 'verified_risk';
-    return '<article class="analysis-finding' + (risk ? ' analysis-emphasis-risk' : '') + '">'
-      + '<p>' + emphasizedText(claim, item.highlight_spans) + '</p>'
-      + (item.key_data ? '<p class="analysis-key-data">' + escapeMarkup(item.key_data) + '</p>' : '')
-      + (item.significance ? '<p class="analysis-significance">' + escapeMarkup(item.significance) + '</p>' : '')
-      + renderEvidence(item.evidence_ids, catalog) + '</article>';
-  }
-
   function renderProgressiveAnalysis(state) {
     var current = state || {};
     var catalog = current.evidence_catalog || {};
     var quick = current.quick || {};
-    var quickHtml = (quick.conclusions || []).map(function (item) {
-      return renderFinding(item, catalog);
-    }).join('');
-    var observationHtml = (current.observations || []).map(function (item) {
-      if (!item || !item.title || !item.summary) return '';
-      return '<article class="analysis-finding analysis-observation">'
-        + '<h3>' + escapeMarkup(item.title) + '</h3>'
-        + '<p>' + escapeMarkup(item.summary) + '</p>'
-        + renderEvidence(item.evidence_ids, catalog) + '</article>';
+    var conclusions = (quick.conclusions || []).filter(Boolean);
+    var observations = (current.observations || []).filter(function (item) {
+      return item && item.title && item.summary;
+    }).map(function (item) {
+      return Object.assign({}, item, { style: item.style || 'observation' });
+    });
+    var sections = (current.sections || []).filter(function (section) {
+      return Array.isArray(section.findings) && section.findings.length > 0;
+    });
+    var active = current.activeTab || 'quick';
+    var quickItems = conclusions.length ? conclusions : observations;
+    var completedWithoutQuick = current.stage === 'completed' || current.stage === 'partial';
+    var tabs = sections.map(function (section, index) {
+      var selected = active === section.section_id;
+      return '<button type="button" class="analysis-result-tab' + (selected ? ' active' : '')
+        + '" data-analysis-tab="' + escapeMarkup(section.section_id) + '" role="tab" aria-selected="'
+        + (selected ? 'true' : 'false') + '">0' + (index + 2) + ' '
+        + escapeMarkup(section.title) + '（' + section.findings.length + '）</button>';
     }).join('');
     var correctionHtml = (quick.corrections || []).map(function (item) {
       return '<div class="analysis-correction"><strong>快速结论已校正</strong><p>'
         + escapeMarkup(item.before) + ' → ' + escapeMarkup(item.after) + '</p></div>';
     }).join('');
-    var sections = (current.sections || []).filter(function (section) {
-      return Array.isArray(section.findings) && section.findings.length > 0;
-    });
-    var tabs = sections.map(function (section) {
-      var selected = (current.activeTab || 'quick') === section.section_id;
-      return '<button type="button" class="analysis-result-tab' + (selected ? ' active' : '')
-        + '" data-analysis-tab="' + escapeMarkup(section.section_id) + '" role="tab" aria-selected="'
-        + (selected ? 'true' : 'false') + '">' + escapeMarkup(section.title) + '</button>';
-    }).join('');
-    var active = current.activeTab || 'quick';
-    var completedWithoutQuick = current.stage === 'completed' || current.stage === 'partial';
-    var quickBody = quickHtml + correctionHtml;
-    if (!quickBody && completedWithoutQuick) {
-      quickBody = observationHtml
-        ? '<h3 class="analysis-observation-title">参考观察</h3>'
-          + '<p class="hint">以下候选观察证据不足，未达到详细分析标准，仅供参考。</p>'
-          + observationHtml
-        : '<p class="hint">本次未生成可核验的快速结论。</p>';
-    }
-    var body = active === 'quick'
-      ? (quickBody || '<p class="hint">快速结论生成中…</p>')
-      : sections.filter(function (section) { return section.section_id === active; })
+    var observationIntro = !conclusions.length && observations.length
+      ? '<h3 class="analysis-observation-title">参考观察</h3>'
+        + '<p class="hint">以下候选观察证据不足，未达到详细分析标准，仅供参考。</p>'
+      : '';
+    var body = '';
+    if (active === 'quick') {
+      if (quickItems.length) {
+        body = observationIntro + renderSummary(quickItems)
+          + '<section class="analysis-report-body">'
+          + quickItems.map(renderReportFinding).join('') + '</section>'
+          + renderEvidenceSection(quickItems, catalog) + correctionHtml;
+      } else if (completedWithoutQuick) {
+        body = '<section class="analysis-report-body"><p class="hint">本次未生成可核验的快速结论。</p></section>';
+      } else {
+        body = '<section class="analysis-report-body"><p class="hint">快速结论生成中…</p></section>';
+      }
+    } else {
+      body = sections.filter(function (section) { return section.section_id === active; })
         .map(function (section) {
-          return '<section class="analysis-section"><h3>' + escapeMarkup(section.title) + '</h3>'
-            + (section.summary ? '<p>' + escapeMarkup(section.summary) + '</p>' : '')
-            + section.findings.map(function (item) { return renderFinding(item, catalog); }).join('')
-            + '</section>';
+          return '<section class="analysis-report-body"><h3>' + escapeMarkup(section.title) + '</h3>'
+            + (section.summary ? '<p class="analysis-section-summary">' + escapeMarkup(section.summary) + '</p>' : '')
+            + section.findings.map(renderReportFinding).join('') + '</section>'
+            + renderEvidenceSection(section.findings, catalog);
         }).join('');
+    }
     return '<div class="analysis-result-tabs" role="tablist">'
       + '<button type="button" class="analysis-result-tab' + (active === 'quick' ? ' active' : '')
       + '" data-analysis-tab="quick" role="tab" aria-selected="'
-      + (active === 'quick' ? 'true' : 'false') + '">快速结论</button>'
+      + (active === 'quick' ? 'true' : 'false') + '">01 快速结论（' + quickItems.length + '）</button>'
       + '<span class="analysis-dynamic-tabs">' + tabs + '</span></div>'
       + '<div class="analysis-progressive-body">' + body + '</div>';
   }

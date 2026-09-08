@@ -87,7 +87,7 @@ def test_stream_controller_deduplicates_connection_and_falls_back_with_backoff()
     assert result == {"count": 1, "url": "/events?after=7", "delays": [1000]}
 
 
-def test_progressive_renderer_keeps_evidence_folded_and_limits_emphasis():
+def test_progressive_renderer_uses_inline_citations_not_folded_evidence():
     result = _run_node(
         f"""
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
@@ -97,12 +97,16 @@ def test_progressive_renderer_keeps_evidence_folded_and_limits_emphasis():
             id: 'q1', text: '营收增长但现金流承压', style: 'verified_risk',
             highlight_spans: ['现金流承压', '营收增长', '第三处'], evidence_ids: ['e1']
           }}] }},
-          evidence_catalog: {{ e1: {{ label: '年报第 12 页', excerpt: '经营现金流下降' }} }},
+          evidence_catalog: {{ e1: {{
+            label: '年报第 12 页', excerpt: '经营现金流下降',
+            source_type: 'pdf_text', source_locator: {{ page: 12 }}
+          }} }},
           sections: [{{ section_id: 'empty', title: '空主题', findings: [] }}]
         }});
         console.log(JSON.stringify({{
           hasDetails: html.includes('<details'),
-          hasRisk: html.includes('analysis-emphasis-risk'),
+          hasRisk: html.includes('analysis-tone-risk'),
+          citation: html.includes('引用证据'),
           highlights: (html.match(/<mark/g) || []).length,
           emptyTopic: html.includes('空主题')
         }}));
@@ -110,10 +114,66 @@ def test_progressive_renderer_keeps_evidence_folded_and_limits_emphasis():
     )
 
     assert result == {
-        "hasDetails": True,
+        "hasDetails": False,
         "hasRisk": True,
+        "citation": True,
         "highlights": 2,
         "emptyTopic": False,
+    }
+
+
+def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [
+            {{ id: 'q1', text: '现金流承压', style: 'verified_risk',
+               evidence_ids: ['pdf-12', 'structured-1'] }},
+            {{ id: 'q2', text: '资本保持充足', evidence_ids: ['pdf-12'] }}
+          ] }},
+          sections: [{{
+            section_id: 'cash', title: '现金流', findings: [
+              {{ claim: '经营现金流下降', evidence_ids: ['pdf-12'] }},
+              {{ claim: '融资成本上升', evidence_ids: ['pdf-12', 'structured-1'] }}
+            ]
+          }}],
+          evidence_catalog: {{
+            'pdf-12': {{ label: '合并现金流量表', excerpt: '经营现金流下降',
+                         source_type: 'pdf_text', source_locator: {{ page: 12 }} }},
+            'structured-1': {{ label: '营业收入', value: '100', unit: '亿元', period: '2025-12-31',
+                               source_type: 'structured' }}
+          }}
+        }});
+        console.log(JSON.stringify({{
+          summary: html.includes('analysis-report-summary'),
+          reportBody: html.includes('analysis-report-body'),
+          legacyCards: html.includes('class="analysis-finding"'),
+          riskLabel: html.includes('>风险<'),
+          quickTabCount: html.includes('01 快速结论（2）'),
+          sectionTabCount: html.includes('02 现金流（2）'),
+          evidenceHeading: html.includes('证据与出处（2）'),
+          pdfButtonOnce: (html.match(/data-evidence-page="12"/g) || []).length === 1,
+          pdfPage: html.includes('PDF · 第 12 页'),
+          structuredHasButton: html.includes('data-evidence-page="undefined"'),
+          bodyHasDetails: html.includes('<details')
+        }}));
+        """
+    )
+
+    assert result == {
+        "summary": True,
+        "reportBody": True,
+        "legacyCards": False,
+        "riskLabel": True,
+        "quickTabCount": True,
+        "sectionTabCount": True,
+        "evidenceHeading": True,
+        "pdfButtonOnce": True,
+        "pdfPage": True,
+        "structuredHasButton": False,
+        "bodyHasDetails": False,
     }
 
 
