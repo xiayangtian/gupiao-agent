@@ -410,8 +410,9 @@
       + cards + '</section>' : '';
   }
 
-  function renderEvidenceSection(items, catalog) {
+  function renderEvidenceSection(items, catalog, options) {
     var evidence = catalog || {};
+    var allowPdfLinks = !options || options.pdfEvidenceLinks !== false;
     var entries = uniqueEvidenceIds(items).map(function (id, index) {
       var record = evidence[id];
       if (!record) return '';
@@ -422,12 +423,14 @@
       var label = record.label || record.fact_name || id;
       var excerpt = record.excerpt || [record.value, record.unit].filter(Boolean).join(' ');
       var meta = [record.period, excerpt].filter(Boolean).join(' · ');
+      var sourceLabel = kind === 'structured' ? '结构化数据'
+        : (hasPage ? 'PDF · 第 ' + page + ' 页' : (record.source_type || '来源记录'));
       return '<li class="analysis-evidence-item"><span class="analysis-evidence-index">'
         + (index + 1) + '</span><strong>' + escapeMarkup(label) + '</strong>'
-        + (hasPage ? '<button type="button" class="analysis-evidence-page" data-evidence-page="'
+        + (hasPage && allowPdfLinks ? '<button type="button" class="analysis-evidence-page" data-evidence-page="'
           + page + '">PDF · 第 ' + page + ' 页</button>'
           : '<span class="analysis-evidence-source">'
-            + escapeMarkup(kind === 'structured' ? '结构化数据' : (record.source_type || '来源记录')) + '</span>')
+            + escapeMarkup(sourceLabel) + '</span>')
         + (meta ? '<span class="analysis-evidence-excerpt">' + escapeMarkup(meta) + '</span>' : '')
         + '</li>';
     }).filter(Boolean).join('');
@@ -446,7 +449,7 @@
     });
   }
 
-  function renderProgressiveAnalysis(state) {
+  function renderProgressiveAnalysis(state, options) {
     var current = state || {};
     var catalog = current.evidence_catalog || {};
     var quick = current.quick || {};
@@ -483,7 +486,7 @@
         body = observationIntro + renderSummary(quickItems)
           + '<section class="analysis-report-body">'
           + quickItems.map(renderReportFinding).join('') + '</section>'
-          + renderEvidenceSection(quickItems, catalog) + correctionHtml;
+          + renderEvidenceSection(quickItems, catalog, options) + correctionHtml;
       } else if (completedWithoutQuick) {
         body = '<section class="analysis-report-body"><p class="hint">本次未生成可核验的快速结论。</p></section>';
       } else {
@@ -495,7 +498,7 @@
           return '<section class="analysis-report-body"><h3>' + escapeMarkup(section.title) + '</h3>'
             + (section.summary ? '<p class="analysis-section-summary">' + escapeMarkup(section.summary) + '</p>' : '')
             + section.findings.map(renderReportFinding).join('') + '</section>'
-            + renderEvidenceSection(section.findings, catalog);
+            + renderEvidenceSection(section.findings, catalog, options);
         }).join('');
     }
     return '<div class="analysis-result-tabs" role="tablist">'

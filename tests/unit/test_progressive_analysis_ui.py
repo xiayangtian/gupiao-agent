@@ -184,6 +184,36 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
     }
 
 
+def test_progressive_renderer_can_disable_pdf_evidence_links_for_history_detail():
+    """历史详情不支持主预览跳页时，应保留页码文字但不能渲染无效按钮。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const state = {{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{ text: '现金流承压', evidence_ids: ['pdf-12'] }}] }},
+          evidence_catalog: {{
+            'pdf-12': {{ label: '合并现金流量表', source_type: 'pdf_text',
+                         source_locator: {{ page: 12 }} }}
+          }}
+        }};
+        const primary = workflow.renderProgressiveAnalysis(state);
+        const history = workflow.renderProgressiveAnalysis(state, {{ pdfEvidenceLinks: false }});
+        console.log(JSON.stringify({{
+          primaryButton: primary.includes('data-evidence-page="12"'),
+          historyButton: history.includes('data-evidence-page="12"'),
+          historyPageLabel: history.includes('PDF · 第 12 页')
+        }}));
+        """
+    )
+
+    assert result == {
+        "primaryButton": True,
+        "historyButton": False,
+        "historyPageLabel": True,
+    }
+
+
 def test_progressive_renderer_shows_observations_after_completed_empty_quick_result():
     result = _run_node(
         f"""

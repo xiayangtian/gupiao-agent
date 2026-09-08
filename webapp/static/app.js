@@ -1383,7 +1383,9 @@ function renderHistoryAnalysisState(item) {
         + '<span class="analysis-background-dot" aria-hidden="true"></span><span><strong>'
         + escapeHtml(analysisStageText(cached.data.stage || cached.status))
         + '</strong><small>快速结论先展示，详细内容完成后会自动补充。</small></span></div>'
-        + window.AnalysisWorkflow.renderProgressiveAnalysis(cached.data);
+        + window.AnalysisWorkflow.renderProgressiveAnalysis(
+          cached.data, { pdfEvidenceLinks: false }
+        );
       bindProgressiveTabs(detail, analysisKey(item.code, item.period));
     } else {
       detail.innerHTML = renderAnalysisProgress(cached);
@@ -1524,7 +1526,7 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   }
   // v3 结果先显示快速结论，再按有效证据动态生成主题；旧报告保持兼容渲染。
   html += isProgressive
-    ? window.AnalysisWorkflow.renderProgressiveAnalysis(content)
+    ? window.AnalysisWorkflow.renderProgressiveAnalysis(content, { pdfEvidenceLinks: false })
     : renderDimensionTabs(contentDims);
 
   // Meta info
