@@ -96,6 +96,9 @@ class EvidenceReference:
     source_type: SourceType
     source_locator: SourceLocator
     verification_state: VerificationState
+    fact_name: str = ""
+    label: str = ""
+    excerpt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,6 +109,9 @@ class EvidenceReference:
             "source_type": self.source_type.value,
             "source_locator": self.source_locator.to_dict(),
             "verification_state": self.verification_state.value,
+            "fact_name": self.fact_name,
+            "label": self.label,
+            "excerpt": self.excerpt,
         }
 
     @classmethod
@@ -115,6 +121,8 @@ class EvidenceReference:
             data.get("unit"), SourceType(data["source_type"]),
             SourceLocator.from_dict(data["source_locator"]),
             VerificationState(data["verification_state"]),
+            str(data.get("fact_name") or ""), str(data.get("label") or ""),
+            str(data.get("excerpt") or ""),
         )
 
 

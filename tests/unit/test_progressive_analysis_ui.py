@@ -8,6 +8,20 @@ from pathlib import Path
 
 import pytest
 
+from financial_report_fetcher.analysis_result import (
+    AnalysisDocument,
+    EvidenceReference,
+    EvidenceSummary,
+    QuickConclusion,
+    QuickResult,
+)
+from financial_report_fetcher.evidence.models import (
+    EntityScope,
+    SourceLocator,
+    SourceType,
+    VerificationState,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 INDEX = ROOT / "webapp" / "static" / "index.html"
@@ -181,6 +195,98 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
         "pdfPage": True,
         "structuredHasButton": False,
         "bodyHasDetails": False,
+    }
+
+
+def test_progressive_renderer_uses_real_document_catalog_display_metadata():
+    """渲染器必须消费真实 AnalysisDocument.to_dict() 中的可读证据元数据。"""
+    document = AnalysisDocument(
+        schema_version=3,
+        analysis_id="analysis-1",
+        report_id="601288:2025-12-31:annual",
+        interests=[],
+        stage="completed",
+        quick=QuickResult(conclusions=[QuickConclusion(
+            conclusion_id="q1",
+            claim="经营现金流下降",
+            key_data="",
+            significance="",
+            evidence_ids=("pdf-12",),
+            verification_state=VerificationState.SINGLE_SOURCE,
+        )]),
+        sections=[],
+        observations=[],
+        filtered_topics=[],
+        evidence_catalog={"pdf-12": EvidenceReference(
+            EntityScope.CONSOLIDATED,
+            "2025-12-31",
+            None,
+            None,
+            SourceType.PDF_TEXT,
+            SourceLocator(provider="pdf", page=12, record_id="page-12"),
+            VerificationState.SINGLE_SOURCE,
+            fact_name="pdf_page_12",
+            label="PDF · 第 12 页",
+            excerpt="经营现金流下降 10%",
+        )},
+        evidence_summary=EvidenceSummary(total=1, single_source=1),
+        errors=[],
+        created_at="2026-09-08T00:00:00Z",
+        updated_at="2026-09-08T00:00:00Z",
+    ).to_dict()
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({json.dumps(document, ensure_ascii=False)});
+        console.log(JSON.stringify({{
+          label: html.includes('PDF · 第 12 页'),
+          excerpt: html.includes('经营现金流下降 10%'),
+          opaqueId: html.includes('pdf-12')
+        }}));
+        """
+    )
+
+    assert result == {"label": True, "excerpt": True, "opaqueId": False}
+
+
+def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
+    """同时渲染主/历史详情时，引用必须命中各自证据区，旧缓存显示待核验。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const state = {{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{ text: '旧缓存结论', evidence_ids: ['pdf-12'] }}] }},
+          evidence_catalog: {{
+            'pdf-12': {{ fact_name: 'pdf_page_12', label: 'PDF · 第 12 页',
+                         excerpt: '经营现金流下降', source_type: 'pdf_text',
+                         source_locator: {{ page: 12 }} }}
+          }}
+        }};
+        const main = workflow.renderProgressiveAnalysis(
+          state, {{ evidenceAnchor: 'analysis-evidence-main' }}
+        );
+        const history = workflow.renderProgressiveAnalysis(
+          state, {{ evidenceAnchor: 'analysis-evidence-history', pdfEvidenceLinks: false }}
+        );
+        console.log(JSON.stringify({{
+          mainTarget: main.includes('href="#analysis-evidence-main"')
+            && main.includes('id="analysis-evidence-main"'),
+          historyTarget: history.includes('href="#analysis-evidence-history"')
+            && history.includes('id="analysis-evidence-history"'),
+          duplicateAnchor: (main + history).match(/id="analysis-evidence-main"/g)?.length || 0,
+          pendingTone: main.includes('analysis-tone-pending'),
+          pendingLabel: main.includes('>待核验<')
+        }}));
+        """
+    )
+
+    assert result == {
+        "mainTarget": True,
+        "historyTarget": True,
+        "duplicateAnchor": 1,
+        "pendingTone": True,
+        "pendingLabel": True,
     }
 
 

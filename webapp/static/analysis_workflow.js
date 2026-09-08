@@ -373,10 +373,19 @@
       return { key: 'risk', label: '风险' };
     }
     if (item && item.style === 'observation') return { key: 'observation', label: '观察' };
-    return { key: 'highlight', label: '重点' };
+    if (item && (item.risk_state === 'neutral' || item.style === 'highlight')) {
+      return { key: 'highlight', label: '重点' };
+    }
+    return { key: 'pending', label: '待核验' };
   }
 
-  function renderReportFinding(item, index) {
+  function evidenceAnchor(options) {
+    var anchor = options && options.evidenceAnchor;
+    return typeof anchor === 'string' && /^[A-Za-z][A-Za-z0-9_-]*$/.test(anchor)
+      ? anchor : 'analysis-evidence';
+  }
+
+  function renderReportFinding(item, index, anchor) {
     var finding = item || {};
     var claim = finding.claim || finding.text || finding.summary || '';
     if (!claim) return '';
@@ -388,8 +397,8 @@
       + '<p>' + emphasizedText(claim, finding.highlight_spans) + '</p>'
       + (finding.key_data ? '<p class="analysis-key-data">' + escapeMarkup(finding.key_data) + '</p>' : '')
       + (finding.significance ? '<p class="analysis-significance">' + escapeMarkup(finding.significance) + '</p>' : '')
-      + (evidenceCount ? '<a class="analysis-evidence-link" href="#analysis-evidence">引用证据 '
-        + evidenceCount + '</a>' : '')
+      + (evidenceCount ? '<a class="analysis-evidence-link" href="#'
+        + escapeMarkup(anchor) + '">引用证据 ' + evidenceCount + '</a>' : '')
       + '</article>';
   }
 
@@ -412,6 +421,7 @@
 
   function renderEvidenceSection(items, catalog, options) {
     var evidence = catalog || {};
+    var anchor = evidenceAnchor(options);
     var allowPdfLinks = !options || options.pdfEvidenceLinks !== false;
     var entries = uniqueEvidenceIds(items).map(function (id, index) {
       var record = evidence[id];
@@ -434,7 +444,8 @@
         + (meta ? '<span class="analysis-evidence-excerpt">' + escapeMarkup(meta) + '</span>' : '')
         + '</li>';
     }).filter(Boolean).join('');
-    return entries ? '<section id="analysis-evidence" class="analysis-evidence-section"><h3>证据与出处（'
+    return entries ? '<section id="' + escapeMarkup(anchor)
+      + '" class="analysis-evidence-section"><h3>证据与出处（'
       + (entries.match(/<li /g) || []).length + '）</h3><ol>' + entries + '</ol></section>' : '';
   }
 
@@ -463,6 +474,7 @@
       return Array.isArray(section.findings) && section.findings.length > 0;
     });
     var active = current.activeTab || 'quick';
+    var anchor = evidenceAnchor(options);
     var quickItems = conclusions.length ? conclusions : observations;
     var completedWithoutQuick = current.stage === 'completed' || current.stage === 'partial';
     var tabs = sections.map(function (section, index) {
@@ -485,7 +497,9 @@
       if (quickItems.length) {
         body = observationIntro + renderSummary(quickItems)
           + '<section class="analysis-report-body">'
-          + quickItems.map(renderReportFinding).join('') + '</section>'
+          + quickItems.map(function (item, index) {
+            return renderReportFinding(item, index, anchor);
+          }).join('') + '</section>'
           + renderEvidenceSection(quickItems, catalog, options) + correctionHtml;
       } else if (completedWithoutQuick) {
         body = '<section class="analysis-report-body"><p class="hint">本次未生成可核验的快速结论。</p></section>';
@@ -497,7 +511,9 @@
         .map(function (section) {
           return '<section class="analysis-report-body"><h3>' + escapeMarkup(section.title) + '</h3>'
             + (section.summary ? '<p class="analysis-section-summary">' + escapeMarkup(section.summary) + '</p>' : '')
-            + section.findings.map(renderReportFinding).join('') + '</section>'
+            + section.findings.map(function (item, index) {
+              return renderReportFinding(item, index, anchor);
+            }).join('') + '</section>'
             + renderEvidenceSection(section.findings, catalog, options);
         }).join('');
     }

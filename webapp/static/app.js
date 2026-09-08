@@ -655,8 +655,9 @@ function renderAnalysisPanel(key) {
     || Array.isArray(st.data.sections) || st.data.stage);
   updateBackgroundAnalysisStatus(st);
   if ((st.status === 'pending' || st.status === 'running') && progressive) {
-    ar.innerHTML = window.AnalysisWorkflow.renderProgressiveAnalysis(st.data)
-      + '<p class="hint analysis-deep-hint">快速结论会先展示；详细主题仍在后台分析，完成后会自动补充。</p>'
+    ar.innerHTML = window.AnalysisWorkflow.renderProgressiveAnalysis(
+      st.data, { evidenceAnchor: 'analysis-evidence-main' }
+    ) + '<p class="hint analysis-deep-hint">快速结论会先展示；详细主题仍在后台分析，完成后会自动补充。</p>'
       + '<button id="stop-analyze-btn" class="btn danger full-btn">⏹ 停止分析</button>';
     bindProgressiveTabs(ar, key);
     var stopBtn = $('#stop-analyze-btn');
@@ -675,7 +676,9 @@ function renderAnalysisPanel(key) {
     showRetryBtn(ar, 'retry-analyze-btn', '重新分析', function () { startAnalysis(); });
   } else if (st.status === 'done') {
     if (progressive) {
-      ar.innerHTML = window.AnalysisWorkflow.renderProgressiveAnalysis(st.data || {});
+      ar.innerHTML = window.AnalysisWorkflow.renderProgressiveAnalysis(
+        st.data || {}, { evidenceAnchor: 'analysis-evidence-main' }
+      );
       bindProgressiveTabs(ar, key);
     } else {
       ar.innerHTML = renderReport(st.data || {});
@@ -1383,9 +1386,10 @@ function renderHistoryAnalysisState(item) {
         + '<span class="analysis-background-dot" aria-hidden="true"></span><span><strong>'
         + escapeHtml(analysisStageText(cached.data.stage || cached.status))
         + '</strong><small>快速结论先展示，详细内容完成后会自动补充。</small></span></div>'
-        + window.AnalysisWorkflow.renderProgressiveAnalysis(
-          cached.data, { pdfEvidenceLinks: false }
-        );
+        + window.AnalysisWorkflow.renderProgressiveAnalysis(cached.data, {
+          pdfEvidenceLinks: false,
+          evidenceAnchor: 'analysis-evidence-history'
+        });
       bindProgressiveTabs(detail, analysisKey(item.code, item.period));
     } else {
       detail.innerHTML = renderAnalysisProgress(cached);
@@ -1526,7 +1530,10 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   }
   // v3 结果先显示快速结论，再按有效证据动态生成主题；旧报告保持兼容渲染。
   html += isProgressive
-    ? window.AnalysisWorkflow.renderProgressiveAnalysis(content, { pdfEvidenceLinks: false })
+    ? window.AnalysisWorkflow.renderProgressiveAnalysis(content, {
+      pdfEvidenceLinks: false,
+      evidenceAnchor: 'analysis-evidence-history'
+    })
     : renderDimensionTabs(contentDims);
 
   // Meta info

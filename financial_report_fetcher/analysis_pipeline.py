@@ -154,7 +154,19 @@ class ProgressiveAnalysisPipeline:
         return records
 
     @staticmethod
-    def _catalog(records: Sequence[EvidenceRecord]) -> dict[str, EvidenceReference]:
+    def _catalog_label(record: EvidenceRecord) -> str:
+        if record.source_type in {
+            SourceType.PDF_TEXT, SourceType.OCR_TEXT, SourceType.OCR_TABLE, SourceType.CHART,
+        } and record.source_locator.page:
+            return f"PDF · 第 {record.source_locator.page} 页"
+        return record.fact_name
+
+    @staticmethod
+    def _catalog_excerpt(record: EvidenceRecord) -> str:
+        return re.sub(r"\s+", " ", record.text or "").strip()[:240]
+
+    @classmethod
+    def _catalog(cls, records: Sequence[EvidenceRecord]) -> dict[str, EvidenceReference]:
         return {
             record.stable_id: EvidenceReference(
                 record.entity_scope,
@@ -164,6 +176,9 @@ class ProgressiveAnalysisPipeline:
                 record.source_type,
                 record.source_locator,
                 record.verification_state,
+                fact_name=record.fact_name,
+                label=cls._catalog_label(record),
+                excerpt=cls._catalog_excerpt(record),
             )
             for record in records
         }

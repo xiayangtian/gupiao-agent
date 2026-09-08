@@ -154,6 +154,19 @@ def test_pdf_records_resolve_to_single_source_when_scope_is_known():
     }
 
 
+def test_document_catalog_persists_stable_evidence_display_metadata(tmp_path):
+    """前端统一证据区必须从真实 document payload 得到可读标签和摘录。"""
+    pipeline, _ = _pipeline(tmp_path)
+    record = _record("pdf-12", source_type=SourceType.PDF_TEXT, page=12)
+
+    document = pipeline._new_document(_request(), QuickResult(), [record]).to_dict()
+    reference = document["evidence_catalog"][record.stable_id]
+
+    assert reference["fact_name"] == "revenue"
+    assert reference["label"] == "PDF · 第 12 页"
+    assert reference["excerpt"] == "营业收入 100 元"
+
+
 def _pipeline(tmp_path):
     analyzer = FakeInsightAnalyzer()
     planner = InsightPlanner(lambda records, interests: [

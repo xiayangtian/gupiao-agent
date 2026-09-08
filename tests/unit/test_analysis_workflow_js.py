@@ -35,11 +35,19 @@ def test_analysis_report_styles_define_semantic_tones_and_visible_focus():
     for selector in (
         ".analysis-report-body", ".analysis-report-finding",
         ".analysis-tone-risk", ".analysis-tone-highlight",
-        ".analysis-tone-observation", ".analysis-evidence-section",
+        ".analysis-tone-observation", ".analysis-tone-pending", ".analysis-evidence-section",
         ".analysis-evidence-page:focus-visible", ".analysis-result-tab.active",
     ):
         assert selector in css
     assert ".analysis-finding {" not in css
+
+
+def test_progressive_render_call_sites_assign_distinct_evidence_anchors():
+    """主分析页与历史详情同时存在时必须使用不同的证据锚点。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert source.count("evidenceAnchor: 'analysis-evidence-main'") == 2
+    assert source.count("evidenceAnchor: 'analysis-evidence-history'") == 2
 
 
 def test_analysis_report_mobile_evidence_items_use_one_column():
