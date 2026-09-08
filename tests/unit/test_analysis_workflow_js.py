@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_JS = ROOT / "webapp" / "static" / "analysis_workflow.js"
 APP_JS = ROOT / "webapp" / "static" / "app.js"
+STYLE_CSS = ROOT / "webapp" / "static" / "style.css"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="前端工作流回归测试需要 Node.js")
@@ -25,6 +26,20 @@ def _run_node(source: str) -> dict:
         text=True,
     )
     return json.loads(completed.stdout)
+
+
+def test_analysis_report_styles_define_semantic_tones_and_visible_focus():
+    """报告式分析页应定义语义状态、页码按钮焦点与激活 Tab。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    for selector in (
+        ".analysis-report-body", ".analysis-report-finding",
+        ".analysis-tone-risk", ".analysis-tone-highlight",
+        ".analysis-tone-observation", ".analysis-evidence-section",
+        ".analysis-evidence-page:focus-visible", ".analysis-result-tab.active",
+    ):
+        assert selector in css
+    assert ".analysis-finding {" not in css
 
 
 def test_analysis_task_registry_survives_reload_and_deduplicates_by_report():
