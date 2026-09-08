@@ -110,6 +110,50 @@ class FakeInsightAnalyzer:
         )
 
 
+def test_pdf_records_assign_entity_scope_from_statement_page_title():
+    """PDF 正文页归属报告主体；母公司报表页识别为母公司口径。"""
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual",
+        pdf_hash="b" * 64,
+        pages=(
+            DocumentPage(1, "合并资产负债表\n单位：元", 12, 0, 0.5, 0.5, 0.9, False),
+            DocumentPage(2, "母公司资产负债表\n单位：元", 12, 0, 0.5, 0.5, 0.9, False),
+            DocumentPage(3, "第三节 管理层讨论与分析\n公司营业收入增长。", 30, 0, 0.4, 0.4, 0.9, False),
+        ),
+    )
+
+    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
+
+    assert [record.entity_scope for record in records] == [
+        EntityScope.CONSOLIDATED,
+        EntityScope.PARENT,
+        EntityScope.CONSOLIDATED,
+    ]
+
+
+def test_pdf_records_resolve_to_single_source_when_scope_is_known():
+    """主体已知的 PDF 页不再被降级为 unknown，可参与单源引用。"""
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual",
+        pdf_hash="c" * 64,
+        pages=(
+            DocumentPage(1, "合并利润表\n营业收入增长。", 14, 0, 0.5, 0.5, 0.9, False),
+        ),
+    )
+
+    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
+    resolved = EvidenceResolver().resolve(records)
+
+    assert resolved.records
+    assert all(
+        record.verification_state is VerificationState.SINGLE_SOURCE
+        for record in resolved.records
+    )
+    assert VerificationState.UNKNOWN_SCOPE not in {
+        record.verification_state for record in resolved.records
+    }
+
+
 def _pipeline(tmp_path):
     analyzer = FakeInsightAnalyzer()
     planner = InsightPlanner(lambda records, interests: [

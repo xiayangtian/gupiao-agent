@@ -23,6 +23,20 @@ STATEMENT_FIELDS: tuple[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], ...
         (
             ("revenue", ("营业总收入", "营业收入")),
             ("net_profit", ("净利润",)),
+            ("parent_net_profit", ("归属于母公司所有者的净利润", "归属于母公司的净利润")),
+            ("operating_profit", ("营业利润",)),
+            ("total_profit", ("利润总额",)),
+            ("net_interest_income", ("净利息收入",)),
+            ("fee_income", ("手续费及佣金净收入", "手续费及佣金收入")),
+            ("investment_income", ("投资收益",)),
+            ("fair_value_gain", (
+                "公允价值变动收益/(损失)", "公允价值变动收益", "公允价值变动损益"
+            )),
+            ("credit_impairment_loss", ("信用减值损失", "资产减值损失")),
+            ("business_overhead", ("业务及管理费用",)),
+            ("basic_eps", ("基本每股收益",)),
+            ("diluted_eps", ("稀释每股收益",)),
+            ("comprehensive_income", ("综合收益总额",)),
         ),
     ),
     (
@@ -30,11 +44,35 @@ STATEMENT_FIELDS: tuple[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], ...
         (
             ("total_assets", ("资产总计",)),
             ("total_liabilities", ("负债合计",)),
+            ("parent_equity", (
+                "归属于母公司股东的权益", "归属于母公司股东权益合计",
+                "归属于母公司所有者权益合计", "股东权益合计",
+            )),
+            ("minority_interest", ("少数股东权益",)),
+            ("share_capital", ("股本", "实收资本")),
+            ("capital_reserve", ("资本公积",)),
+            ("retained_earnings", ("未分配利润",)),
+            ("monetary_funds", ("货币资金", "现金及存放中央银行款项")),
+            ("customer_deposits", ("客户存款(吸收存款)", "客户存款")),
+            ("loans_and_advances", ("发放贷款及垫款净额",)),
+            ("trading_assets", ("交易性金融资产",)),
+            ("inventory", ("存货",)),
+            ("fixed_assets", ("固定资产净额", "固定资产合计", "固定资产")),
+            ("construction_in_progress", ("在建工程",)),
+            ("goodwill", ("商誉",)),
         ),
     ),
     (
         "现金流量表",
-        (("operating_cash_flow", ("经营活动产生的现金流量净额",)),),
+        (
+            ("operating_cash_flow", ("经营活动产生的现金流量净额",)),
+            ("investing_cash_flow", ("投资活动产生的现金流量净额",)),
+            ("financing_cash_flow", ("筹资活动产生的现金流量净额",)),
+            ("capex_paid", ("购建固定资产、无形资产和其他长期资产支付的现金",)),
+            ("dividends_paid", ("分配股利、利润或偿付利息支付的现金",)),
+            ("cash_net_increase", ("现金及现金等价物净增加额",)),
+            ("cash_end_balance", ("期末现金及现金等价物余额", "现金的期末余额")),
+        ),
     ),
 )
 

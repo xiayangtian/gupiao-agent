@@ -406,9 +406,10 @@
     var quickBody = quickHtml + correctionHtml;
     if (!quickBody && completedWithoutQuick) {
       quickBody = observationHtml
-        ? '<p class="hint">以下为基于 PDF 文本的参考观察，证据尚待结构化核验。</p>'
+        ? '<h3 class="analysis-observation-title">参考观察</h3>'
+          + '<p class="hint">以下候选观察证据不足，未达到详细分析标准，仅供参考。</p>'
           + observationHtml
-        : '<p class="hint">本次未生成可验证的快速结论。</p>';
+        : '<p class="hint">本次未生成可核验的快速结论。</p>';
     }
     var body = active === 'quick'
       ? (quickBody || '<p class="hint">快速结论生成中…</p>')

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +40,18 @@ from .insights import (
 
 
 EventEmitter = Callable[[str, dict[str, Any]], None]
+
+
+_PARENT_SHEET_PATTERN = re.compile(
+    r"母公司\s*(资产负债表|利润表|现金流量表|所有者权益变动表)"
+)
+
+
+def _page_entity_scope(text: str) -> EntityScope:
+    """从页面标题推断财报页主体：母公司报表页归母公司，其余归合并。"""
+    if _PARENT_SHEET_PATTERN.search(text):
+        return EntityScope.PARENT
+    return EntityScope.CONSOLIDATED
 
 
 @dataclass(frozen=True)
@@ -119,9 +132,10 @@ class ProgressiveAnalysisPipeline:
             digest = hashlib.sha256(
                 f"{extracted.pdf_hash}:{page.page_number}:{text}".encode("utf-8")
             ).hexdigest()
+            scope = _page_entity_scope(text)
             records.append(EvidenceRecord(
                 report_id=extracted.report_id,
-                entity_scope=EntityScope.UNKNOWN,
+                entity_scope=scope,
                 fact_name=f"pdf_page_{page.page_number}",
                 value=None,
                 unit=None,

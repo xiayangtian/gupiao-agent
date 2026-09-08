@@ -129,12 +129,41 @@ def test_progressive_renderer_shows_observations_after_completed_empty_quick_res
         console.log(JSON.stringify({{
           observation: html.includes('现金流观察'),
           pending: html.includes('快速结论生成中'),
-          disclaimer: html.includes('证据尚待结构化核验')
+          referenceLabel: html.includes('参考观察'),
+          disclaimer: html.includes('未达到详细分析标准'),
+          staleCopy: html.includes('证据尚待结构化核验'),
+          hint: html.includes('未生成可核验的快速结论')
         }}));
         """
     )
 
-    assert result == {"observation": True, "pending": False, "disclaimer": True}
+    assert result == {
+        "observation": True,
+        "pending": False,
+        "referenceLabel": True,
+        "disclaimer": True,
+        "staleCopy": False,
+        "hint": False,
+    }
+
+
+def test_progressive_renderer_distinguishes_no_quick_and_no_observations():
+    """完成但既无快速结论也无观察时，只显示可核验结论缺失的说明。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed', quick: {{ conclusions: [] }},
+          observations: [], evidence_catalog: {{}}
+        }});
+        console.log(JSON.stringify({{
+          hint: html.includes('未生成可核验的快速结论'),
+          reference: html.includes('参考观察')
+        }}));
+        """
+    )
+
+    assert result == {"hint": True, "reference": False}
 
 
 def test_table_cleanup_drops_missing_rows_and_the_whole_empty_table():

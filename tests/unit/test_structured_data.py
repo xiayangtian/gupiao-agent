@@ -129,6 +129,98 @@ def test_akshare_maps_three_statements_and_preserves_raw_provenance():
     assert revenue.source_locator.section == "利润表"
 
 
+def test_akshare_maps_bank_and_manufacturing_statement_columns():
+    """新浪宽表应覆盖银行与制造两类公司的核心科目，而非只映射 5 个通用字段。"""
+    client = FakeAkshare({
+        "利润表": [{
+            "报告日": "20251231", "营业收入": 500, "净利润": 90,
+            "归属于母公司的净利润": 88, "营业利润": 120, "利润总额": 122,
+            "净利息收入": 300, "手续费及佣金净收入": 60, "投资收益": 10,
+            "业务及管理费用": 90, "信用减值损失": 5, "基本每股收益": 0.9,
+            "稀释每股收益": 0.89, "综合收益总额": 91,
+            "币种": "CNY", "类型": "合并期末", "更新日期": "2026-03-20T10:00:00",
+        }],
+        "资产负债表": [{
+            "报告日": "20251231", "资产总计": 5000, "负债合计": 2200,
+            "归属于母公司股东的权益": 2600, "少数股东权益": 200, "股本": 100,
+            "资本公积": 300, "未分配利润": 1500, "现金及存放中央银行款项": 900,
+            "客户存款(吸收存款)": 3200, "发放贷款及垫款净额": 1800,
+            "交易性金融资产": 400,
+            "币种": "CNY", "类型": "合并期末", "更新日期": "2026-03-20T10:00:00",
+        }],
+        "现金流量表": [{
+            "报告日": "20251231", "经营活动产生的现金流量净额": 130,
+            "投资活动产生的现金流量净额": -50, "筹资活动产生的现金流量净额": 40,
+            "购建固定资产、无形资产和其他长期资产支付的现金": 60,
+            "分配股利、利润或偿付利息支付的现金": 30,
+            "现金及现金等价物净增加额": 120, "期末现金及现金等价物余额": 900,
+            "币种": "CNY", "类型": "合并期末", "更新日期": "2026-03-20T10:00:00",
+        }],
+    })
+
+    records = AkshareProvider(client=client).fetch(
+        "601288", "2025-12-31", "601288:2025-12-31:annual"
+    )
+    facts = {record.fact_name for record in records}
+
+    # 银行核心科目应被映射出来，不再只有 5 个通用字段。
+    assert {
+        "parent_net_profit", "operating_profit", "total_profit",
+        "net_interest_income", "fee_income", "business_overhead",
+        "credit_impairment_loss", "basic_eps", "diluted_eps",
+        "comprehensive_income",
+    } <= facts
+    assert {
+        "parent_equity", "minority_interest", "share_capital",
+        "capital_reserve", "retained_earnings", "monetary_funds",
+        "customer_deposits", "loans_and_advances", "trading_assets",
+    } <= facts
+    assert {
+        "investing_cash_flow", "financing_cash_flow", "cash_net_increase",
+        "cash_end_balance", "dividends_paid",
+    } <= facts
+    assert len(facts) >= 24
+
+    interest = next(r for r in records if r.fact_name == "net_interest_income")
+    assert interest.raw_field_name == "净利息收入"
+    assert interest.source_locator.section == "利润表"
+
+
+def test_akshare_maps_manufacturing_only_columns_when_present():
+    """制造/非金融类公司的存货、在建工程等列应同样被映射。"""
+    client = FakeAkshare({
+        "利润表": [{
+            "报告日": "20251231", "营业总收入": 1000, "营业利润": 300,
+            "净利润": 220, "币种": "CNY", "类型": "合并",
+            "更新日期": "2026-03-20T10:00:00",
+        }],
+        "资产负债表": [{
+            "报告日": "20251231", "资产总计": 5000, "负债合计": 2200,
+            "货币资金": 800, "存货": 600, "在建工程": 120, "固定资产净额": 900,
+            "币种": "CNY", "类型": "合并",
+            "更新日期": "2026-03-20T10:00:00",
+        }],
+        "现金流量表": [{
+            "报告日": "20251231", "经营活动产生的现金流量净额": 130,
+            "购建固定资产、无形资产和其他长期资产支付的现金": 90,
+            "币种": "CNY", "类型": "合并",
+            "更新日期": "2026-03-20T10:00:00",
+        }],
+    })
+
+    records = AkshareProvider(client=client).fetch(
+        "600519", "2025-12-31", "600519:2025-12-31:annual"
+    )
+    facts = {record.fact_name for record in records}
+
+    assert {
+        "revenue", "operating_profit", "net_profit", "monetary_funds",
+        "inventory", "construction_in_progress", "fixed_assets", "capex_paid",
+    } <= facts
+    inventory = next(r for r in records if r.fact_name == "inventory")
+    assert inventory.raw_field_name == "存货"
+
+
 def test_akshare_does_not_guess_unknown_statement_scope():
     """缺少明确报表类型时必须保留 unknown，不能默认当作合并口径。"""
     client = FakeAkshare({
