@@ -8,6 +8,8 @@ from datetime import date
 from unittest.mock import MagicMock
 
 import pytest
+import requests
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import webapp.server as server
@@ -275,6 +277,18 @@ class TestAnalyze:
         assert result["schema_version"] == 3
         assert result["quick"]["conclusions"]
         assert result["sections"][0]["section_id"] == "financial-overview"
+
+    def test_analyze_returns_json_503_when_report_source_times_out(self, client, env):
+        """上游财报源超时应转为可供前端消费的 HTTP 异常。"""
+        env["fake_ds"].fetch_reports.side_effect = requests.exceptions.ReadTimeout(
+            "cninfo timeout"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            server._find_report_meta("600900", date(2025, 12, 31))
+
+        assert exc_info.value.status_code == 503
+        assert "暂时不可用" in exc_info.value.detail
 
     def test_analyze_task_exposes_dimension_progress_while_running(self, client, env):
         """分析尚未完成时，任务接口应返回当前维度对应的持久进度。"""

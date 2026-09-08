@@ -443,6 +443,21 @@
     return { text: '未分析', className: 'badge badge-warn' };
   }
 
+  function analysisErrorMessage(status, contentType, bodyText) {
+    var type = String(contentType || '').toLowerCase();
+    if (type.indexOf('application/json') >= 0) {
+      try {
+        var data = JSON.parse(String(bodyText || '').trim());
+        if (data && typeof data === 'object') {
+          var detail = data.detail || data.error || data.message;
+          if (typeof detail === 'string' && detail.trim()) return detail.trim();
+        }
+      } catch (_) { /* 忽略解析失败，回退到通用提示 */ }
+    }
+    var hint = status >= 500 ? '服务暂时不可用，请稍后重试' : '请求失败，请稍后重试';
+    return 'HTTP ' + status + '：' + hint;
+  }
+
   function historyDimensionDefaults(available, previous) {
     var availableIds = (available || []).map(function (item) { return String(item.id); });
     var prior = (previous || []).map(String).filter(function (id) {
@@ -543,6 +558,7 @@
 
   return {
     applyAnalysisEvent: applyAnalysisEvent,
+    analysisErrorMessage: analysisErrorMessage,
     cleanTableRows: cleanTableRows,
     analysisTerminalBadge: analysisTerminalBadge,
     analysisProgressModel: analysisProgressModel,

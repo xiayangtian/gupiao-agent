@@ -542,9 +542,14 @@ async function submitAnalysis(code, period, interests) {
     '/api/reports/' + code + '/' + period + '/analyze',
     { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ interests: interests }) });
-  var data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
-  return data;
+  if (res.ok) return res.json();
+  // 非 JSON 错误响应（如 500 HTML 错误页）不能再次触发解析异常；
+  // 统一在此转成可读错误信息供上层展示“分析失败：xxx”。
+  var bodyText = '';
+  try { bodyText = await res.text(); } catch (_) { /* 网络中断时无响应体 */ }
+  throw new Error(window.AnalysisWorkflow.analysisErrorMessage(
+    res.status, res.headers.get('content-type') || '', bodyText
+  ));
 }
 
 function showRetryBtn(container, btnId, label, onClick) {

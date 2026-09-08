@@ -474,6 +474,28 @@ def test_history_dimension_picker_uses_defaults_first_and_previous_dimensions_ag
     }
 
 
+def test_analysis_error_message_handles_json_and_html_error_responses():
+    """分析提交失败时，HTML 错误页不能再触发 JSON 解析异常。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        console.log(JSON.stringify({{
+          json: workflow.analysisErrorMessage(
+            503, 'application/json', '{{"detail":"财报数据源暂时不可用，请稍后重试"}}'
+          ),
+          html: workflow.analysisErrorMessage(
+            500, 'text/html', '<html>Internal Server Error</html>'
+          )
+        }}));
+        """
+    )
+
+    assert result == {
+        "json": "财报数据源暂时不可用，请稍后重试",
+        "html": "HTTP 500：服务暂时不可用，请稍后重试",
+    }
+
+
 def test_history_async_result_only_applies_to_the_report_still_selected():
     """快速从 A 切到 B 后，A 的迟到详情或维度响应必须被丢弃。"""
     result = _run_node(

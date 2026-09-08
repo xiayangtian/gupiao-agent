@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+import requests
 from pydantic import BaseModel, Field
 
 from financial_report_fetcher.ai_client import AIClient
@@ -538,14 +539,20 @@ def _parse_period(value: str) -> dt.date:
 
 
 def _find_report_meta(code: str, period: dt.date) -> ReportMeta:
-    """查询单份财报元信息（含公司名与下载地址）；查无 → 404"""
+    """查询单份财报元信息（含公司名与下载地址）；查无 → 404，上游不可用 → 503"""
     rt = _report_type_for_period(period)
-    reports = datasource.fetch_reports(
-        stock_code=code,
-        report_types=[rt],
-        start_date=period,
-        end_date=period,
-    )
+    try:
+        reports = datasource.fetch_reports(
+            stock_code=code,
+            report_types=[rt],
+            start_date=period,
+            end_date=period,
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.warning("查询 %s 财报元数据失败：%s", code, exc)
+        raise HTTPException(
+            503, "财报数据源暂时不可用，请稍后重试"
+        ) from exc
     if not reports:
         raise HTTPException(
             404, f"{code} 在 {period.isoformat()} 无 {rt.value} 财报"
