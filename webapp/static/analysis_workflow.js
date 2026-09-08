@@ -339,7 +339,9 @@
 
   function evidenceKind(evidence) {
     var type = String((evidence || {}).source_type || '');
-    if (type === 'pdf_text' || type === 'ocr') return 'pdf';
+    if (['pdf_text', 'ocr', 'ocr_text', 'ocr_table', 'chart'].indexOf(type) >= 0) {
+      return 'pdf';
+    }
     if (type === 'structured') return 'structured';
     return 'other';
   }
@@ -392,6 +394,7 @@
   }
 
   function renderSummary(items) {
+    var total = (items || []).length;
     var cards = (items || []).slice(0, 3).map(function (item) {
       var finding = item || {};
       var claim = finding.claim || finding.text || finding.summary || '';
@@ -403,7 +406,8 @@
         + (finding.key_data ? '<strong>' + escapeMarkup(finding.key_data) + '</strong>' : '')
         + '</article>';
     }).filter(Boolean).join('');
-    return cards ? '<section class="analysis-report-summary"><h3>本期要点</h3>' + cards + '</section>' : '';
+    return cards ? '<section class="analysis-report-summary"><h3>本期要点（' + total + '）</h3>'
+      + cards + '</section>' : '';
   }
 
   function renderEvidenceSection(items, catalog) {

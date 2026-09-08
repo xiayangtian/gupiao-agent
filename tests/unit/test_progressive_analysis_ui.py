@@ -130,33 +130,38 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
           activeTab: 'quick', stage: 'completed',
           quick: {{ conclusions: [
             {{ id: 'q1', text: '现金流承压', style: 'verified_risk',
-               evidence_ids: ['pdf-12', 'structured-1'] }},
+               evidence_ids: ['pdf-12', 'structured-1', 'ocr-text-13', 'ocr-table-14', 'chart-15'] }},
             {{ id: 'q2', text: '资本保持充足', evidence_ids: ['pdf-12'] }}
           ] }},
           sections: [{{
             section_id: 'cash', title: '现金流', findings: [
               {{ claim: '经营现金流下降', evidence_ids: ['pdf-12'] }},
-              {{ claim: '融资成本上升', evidence_ids: ['pdf-12', 'structured-1'] }}
+              {{ claim: '融资成本上升', evidence_ids: ['pdf-12', 'structured-1', 'ocr-text-13'] }}
             ]
           }}],
           evidence_catalog: {{
             'pdf-12': {{ label: '合并现金流量表', excerpt: '经营现金流下降',
                          source_type: 'pdf_text', source_locator: {{ page: 12 }} }},
             'structured-1': {{ label: '营业收入', value: '100', unit: '亿元', period: '2025-12-31',
-                               source_type: 'structured' }}
+                               source_type: 'structured', source_locator: {{ page: 16 }} }},
+            'ocr-text-13': {{ label: 'OCR 文字页', source_type: 'ocr_text', source_locator: {{ page: 13 }} }},
+            'ocr-table-14': {{ label: 'OCR 表格页', source_type: 'ocr_table', source_locator: {{ page: 14 }} }},
+            'chart-15': {{ label: 'OCR 图表页', source_type: 'chart', source_locator: {{ page: 15 }} }}
           }}
         }});
         console.log(JSON.stringify({{
           summary: html.includes('analysis-report-summary'),
+          summaryCount: html.includes('本期要点（2）'),
           reportBody: html.includes('analysis-report-body'),
           legacyCards: html.includes('class="analysis-finding"'),
           riskLabel: html.includes('>风险<'),
           quickTabCount: html.includes('01 快速结论（2）'),
           sectionTabCount: html.includes('02 现金流（2）'),
-          evidenceHeading: html.includes('证据与出处（2）'),
+          evidenceHeading: html.includes('证据与出处（5）'),
           pdfButtonOnce: (html.match(/data-evidence-page="12"/g) || []).length === 1,
+          ocrPages: [13, 14, 15].every(page => html.includes('data-evidence-page="' + page + '"')),
           pdfPage: html.includes('PDF · 第 12 页'),
-          structuredHasButton: html.includes('data-evidence-page="undefined"'),
+          structuredHasButton: html.includes('data-evidence-page="16"'),
           bodyHasDetails: html.includes('<details')
         }}));
         """
@@ -164,6 +169,7 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
 
     assert result == {
         "summary": True,
+        "summaryCount": True,
         "reportBody": True,
         "legacyCards": False,
         "riskLabel": True,
@@ -171,6 +177,7 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
         "sectionTabCount": True,
         "evidenceHeading": True,
         "pdfButtonOnce": True,
+        "ocrPages": True,
         "pdfPage": True,
         "structuredHasButton": False,
         "bodyHasDetails": False,
