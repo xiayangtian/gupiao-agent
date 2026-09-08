@@ -718,7 +718,9 @@ function bindProgressiveTabs(container, key) {
   container.addEventListener('click', function (event) {
     var evidenceButton = event.target && event.target.closest
       ? event.target.closest('[data-evidence-page]') : null;
-    if (evidenceButton) {
+    // 历史详情也复用 Tab 委托，但其 PDF 预览与主分析页不同；
+    // 仅主分析结果容器可驱动 #pdf-frame 的页码定位。
+    if (evidenceButton && container.id === 'analyze-result') {
       var page = Number(evidenceButton.dataset.evidencePage);
       container.dispatchEvent(new CustomEvent('analysis:evidence-page', {
         bubbles: true, detail: { page: page }

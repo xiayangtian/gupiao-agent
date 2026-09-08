@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_JS = ROOT / "webapp" / "static" / "analysis_workflow.js"
+APP_JS = ROOT / "webapp" / "static" / "app.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="前端工作流回归测试需要 Node.js")
@@ -342,6 +343,16 @@ def test_evidence_pdf_preview_url_only_accepts_current_report_and_positive_page(
         "zero": None,
         "noReport": None,
     }
+
+
+def test_pdf_evidence_event_is_scoped_to_the_primary_analysis_result():
+    """历史详情复用 Tab 绑定时，不能触发主分析页 PDF iframe 的跳页事件。"""
+    source = APP_JS.read_text(encoding="utf-8")
+    start = source.index("function bindProgressiveTabs")
+    end = source.index("function openEvidencePdfPage", start)
+    handler = source[start:end]
+
+    assert "container.id === 'analyze-result'" in handler
 
 
 def test_pdf_download_fallback_requires_missing_endpoint_and_same_report():
