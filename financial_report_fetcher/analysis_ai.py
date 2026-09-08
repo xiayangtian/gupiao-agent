@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping, Sequence
 
 from .analysis_config import AnalysisConfig
 from .analysis_pipeline import ProgressiveAnalysisPipeline
 from .analysis_result import QuickConclusion, QuickResult
 from .evidence.document import DocumentExtractor
-from .evidence.models import EvidenceRecord, VerificationState
+from .evidence.models import EvidenceRecord, SourceType, VerificationState
 from .evidence.ocr import PaddleStructureEngine
 from .evidence.resolver import EvidenceResolver
 from .evidence.structured import build_structured_gateway
@@ -22,18 +23,90 @@ from .insights import (
 )
 
 
+# 结构化证据全量保留；文本类证据封顶抽样，防止输入过大导致模型输出被截断。
+_TEXT_KEYWORD_PATTERN = re.compile(
+    r"(资产负债表|利润表|现金流量表|所有者权益变动表|经营情况|主营业务)"
+)
+TEXT_EVIDENCE_LIMIT = 40
+TEXT_EVIDENCE_CHARS = 240
+STRUCTURED_TEXT_CHARS = 300
+MAX_PLANNER_CANDIDATES = 8
+
+
+def _page_order(record) -> int:
+    locator = record.source_locator
+    page = getattr(locator, "page", None) if locator is not None else None
+    return page if isinstance(page, int) else 10 ** 9
+
+
+def _recover_truncated_json(content: str) -> dict[str, Any] | None:
+    """输出可能被截断：先尝试完整对象带尾随文字，再回溯到最后一个完整对象前缀。"""
+    stripped = content.rstrip()
+    if not stripped:
+        return None
+    try:
+        parsed, _end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    attempts = 0
+    for end in range(len(stripped) - 1, -1, -1):
+        if stripped[end] != "}":
+            continue
+        candidate = stripped[: end + 1]
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            attempts += 1
+            if attempts >= 20:
+                break
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 def _parse_json(text: str) -> dict[str, Any]:
     content = text.strip()
     if content.startswith("```"):
         lines = content.splitlines()
         content = "\n".join(lines[1:-1])
-    data = json.loads(content)
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        recovered = _recover_truncated_json(content)
+        if recovered is None:
+            raise
+        data = recovered
     if not isinstance(data, dict):
         raise ValueError("AI 分析结果必须是 JSON 对象")
     return data
 
 
 def _evidence_payload(records: Sequence[EvidenceRecord]) -> list[dict[str, Any]]:
+    selected: list[EvidenceRecord] = []
+    text_records: list[EvidenceRecord] = []
+    for record in records:
+        if record.source_type is SourceType.STRUCTURED:
+            selected.append(record)
+        else:
+            text_records.append(record)
+    if text_records:
+        # 含报表关键字的页优先，其余按页码升序；超限时等距抽样保持代表性与可控规模。
+        text_records.sort(key=lambda record: (
+            0 if _TEXT_KEYWORD_PATTERN.search(record.text or "") else 1,
+            _page_order(record),
+        ))
+        if len(text_records) <= TEXT_EVIDENCE_LIMIT:
+            selected.extend(text_records)
+        else:
+            step = len(text_records) / TEXT_EVIDENCE_LIMIT
+            picked = {
+                text_records[int(index * step)] for index in range(TEXT_EVIDENCE_LIMIT)
+            }
+            selected.extend(sorted(picked, key=_page_order))
+
     return [
         {
             "evidence_id": record.stable_id,
@@ -45,9 +118,13 @@ def _evidence_payload(records: Sequence[EvidenceRecord]) -> list[dict[str, Any]]
             "entity_scope": record.entity_scope.value,
             "verification_state": record.verification_state.value,
             "source_type": record.source_type.value,
-            "text": (record.text or "")[:600],
+            "text": (record.text or "")[: (
+                STRUCTURED_TEXT_CHARS
+                if record.source_type is SourceType.STRUCTURED
+                else TEXT_EVIDENCE_CHARS
+            )],
         }
-        for record in records[:120]
+        for record in selected
     ]
 
 
@@ -164,9 +241,10 @@ class AiTopicGenerator:
             ),
             prompt={
                 "interests": list(interests),
+                "max_candidates": MAX_PLANNER_CANDIDATES,
                 "evidence": _evidence_payload(list(evidence.values())),
             },
-            max_tokens=2200,
+            max_tokens=3000,
         )
         known = set(evidence)
         candidates: list[dict[str, Any]] = []

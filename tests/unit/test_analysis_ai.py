@@ -4,9 +4,12 @@ from decimal import Decimal
 import pytest
 
 from financial_report_fetcher.analysis_ai import (
+    TEXT_EVIDENCE_LIMIT,
     AiInsightAnalyzer,
     AiQuickAnalyzer,
     AiTopicGenerator,
+    _evidence_payload,
+    _parse_json,
 )
 from financial_report_fetcher.evidence.models import (
     EntityScope,
@@ -39,7 +42,7 @@ class SequenceAi:
         return next(self.responses)
 
 
-def _record(record_id, state=VerificationState.VERIFIED):
+def _record(record_id, state=VerificationState.VERIFIED, *, source_type=SourceType.STRUCTURED, page=None, text=None):
     return EvidenceRecord(
         report_id="r1",
         entity_scope=EntityScope.CONSOLIDATED,
@@ -48,13 +51,78 @@ def _record(record_id, state=VerificationState.VERIFIED):
         unit="元",
         currency="CNY",
         period="2025-12-31",
-        source_type=SourceType.STRUCTURED,
-        source_locator=SourceLocator(provider="fake", record_id=record_id),
+        source_type=source_type,
+        source_locator=SourceLocator(
+            provider="fake", page=page, record_id=record_id
+        ),
         extraction_confidence=0.9,
         verification_state=state,
         content_hash=record_id,
         parser_version="1",
+        text=text,
     )
+
+
+def test_evidence_payload_keeps_structured_and_samples_oversized_text_records():
+    """证据载荷：结构化全保留；文本记录超限时抽样子集并截断，避免输出被截断。"""
+    structured = [_record(f"s{i}") for i in range(8)]
+    text_records = []
+    for index in range(120):
+        text = "资产负债表：公司经营情况良好。" if index == 3 else f"第 {index} 页叙述内容。"
+        text_records.append(_record(
+            f"p{index}",
+            source_type=SourceType.PDF_TEXT,
+            page=index + 1,
+            text=text + "字" * 300,
+        ))
+
+    payload = _evidence_payload([*text_records, *structured])
+    text_items = [item for item in payload if item["source_type"] == "pdf_text"]
+    structured_items = [item for item in payload if item["source_type"] == "structured"]
+
+    assert len(structured_items) == 8, "结构化证据必须全部保留"
+    assert len(text_items) <= TEXT_EVIDENCE_LIMIT
+    assert all(len(item["text"]) <= 240 for item in text_items)
+    # 含报表关键字的页应保留在抽样内，不会被长文本输入淹没。
+    assert any(item["text"].startswith("资产负债表：") for item in text_items)
+
+
+def test_parse_json_recovers_truncated_output_prefix():
+    """解析对截断与尾随文字有回退；完全无法恢复时仍抛出解析错误。"""
+    assert _parse_json('{"a": 1, "b": "完整"}') == {"a": 1, "b": "完整"}
+    # 完整对象后带模型解释文字：raw_decode 应能取回对象。
+    assert _parse_json('{"a": 1} 以上是根据财报得出的结论') == {"a": 1}
+
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json('{"a": ')
+
+
+def test_topic_generator_caps_candidates_and_sends_bounded_evidence():
+    """主题规划器应限制候选数量、上调输出预算，并发送封顶后的证据。"""
+    records = {
+        **{f"s{i}": _record(f"s{i}") for i in range(5)},
+        **{
+            f"p{i}": _record(
+                f"p{i}",
+                source_type=SourceType.PDF_TEXT,
+                page=i + 1,
+                text="经营情况叙述。" + "字" * 200,
+            )
+            for i in range(60)
+        },
+    }
+    ai = FakeAi({"candidates": []})
+
+    AiTopicGenerator(ai)(records, interests=("cash_flow",))
+
+    prompt = json.loads(ai.last_prompt)
+    assert prompt["max_candidates"] == 8
+    text_sent = [e for e in prompt["evidence"] if e["source_type"] == "pdf_text"]
+    structured_sent = [e for e in prompt["evidence"] if e["source_type"] == "structured"]
+    assert len(structured_sent) == 5
+    assert len(text_sent) <= TEXT_EVIDENCE_LIMIT
+    assert ai.last_kwargs["max_tokens"] >= 3000
+
 
 
 def test_quick_analyzer_drops_unknown_and_conflicting_evidence_claims():
