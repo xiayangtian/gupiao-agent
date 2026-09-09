@@ -399,9 +399,14 @@
     }).join('');
   }
 
+  function readableSupplement(value) {
+    var text = String(value == null ? '' : value).trim();
+    return !!text && !/^(?:high|medium|low)$/i.test(text) && !/^[{[]/.test(text);
+  }
+
   function isCompactFinding(finding, claim) {
-    return !finding.title && !finding.key_data && !finding.significance
-      && String(claim).length <= 80;
+    return !finding.title && !readableSupplement(finding.key_data)
+      && !readableSupplement(finding.significance) && String(claim).length <= 160;
   }
 
   function renderReportFinding(item, index, anchor) {
@@ -409,6 +414,8 @@
     var claim = finding.claim || finding.text || finding.summary || '';
     if (!claim) return '';
     var citations = renderEvidenceCitationLinks(finding.evidence_ids, anchor);
+    var keyData = readableSupplement(finding.key_data) ? finding.key_data : '';
+    var significance = readableSupplement(finding.significance) ? finding.significance : '';
     if (isCompactFinding(finding, claim)) {
       return '<p class="analysis-compact-finding">' + emphasizedText(claim, finding.highlight_spans)
         + (citations ? ' <span class="analysis-inline-citations">' + citations + '</span>' : '') + '</p>';
@@ -418,8 +425,8 @@
       + '<span class="analysis-finding-label">' + tone.label + '</span>'
       + (finding.title ? '<h3>' + escapeMarkup(finding.title) + '</h3>' : '')
       + '<p>' + emphasizedText(claim, finding.highlight_spans) + '</p>'
-      + (finding.key_data ? '<p class="analysis-key-data">' + escapeMarkup(finding.key_data) + '</p>' : '')
-      + (finding.significance ? '<p class="analysis-significance">' + escapeMarkup(finding.significance) + '</p>' : '')
+      + (keyData ? '<p class="analysis-key-data">' + escapeMarkup(keyData) + '</p>' : '')
+      + (significance ? '<p class="analysis-significance">' + escapeMarkup(significance) + '</p>' : '')
       + (citations ? '<span class="analysis-inline-citations">' + citations + '</span>' : '')
       + '</article>';
   }

@@ -715,6 +715,17 @@ function updateBackgroundAnalysisStatus(task) {
     + '</span>';
 }
 
+function openHistoryEvidencePdfPage(page) {
+  var item = STATE.historySelected;
+  if (!item || !item.pdf_filename || !Number.isInteger(page) || page < 1) return false;
+  setHistoryView('pdf');
+  var frame = $('#history-pdf-frame');
+  if (!frame) return false;
+  frame.src = '/api/history-pdf/' + encodeURIComponent(item.pdf_filename) + '#page=' + page;
+  if (frame.focus) frame.focus();
+  return true;
+}
+
 function bindProgressiveTabs(container, key) {
   if (!container || container.dataset.progressiveTabsBound) return;
   container.dataset.progressiveTabsBound = '1';
@@ -724,6 +735,13 @@ function bindProgressiveTabs(container, key) {
     if (citation) {
       var targetId = (citation.getAttribute('href') || '').slice(1);
       var target = targetId ? document.getElementById(targetId) : null;
+      var pageButton = target && target.querySelector
+        ? target.querySelector('[data-evidence-page]') : null;
+      if (container.id === 'history-detail' && pageButton) {
+        event.preventDefault();
+        openHistoryEvidencePdfPage(Number(pageButton.dataset.evidencePage));
+        return;
+      }
       var details = target && target.closest ? target.closest('details') : null;
       if (details) details.open = true;
       if (target && target.scrollIntoView) {
@@ -737,11 +755,15 @@ function bindProgressiveTabs(container, key) {
       ? event.target.closest('[data-evidence-page]') : null;
     // 历史详情也复用 Tab 委托，但其 PDF 预览与主分析页不同；
     // 仅主分析结果容器可驱动 #pdf-frame 的页码定位。
-    if (evidenceButton && container.id === 'analyze-result') {
+    if (evidenceButton) {
       var page = Number(evidenceButton.dataset.evidencePage);
-      container.dispatchEvent(new CustomEvent('analysis:evidence-page', {
-        bubbles: true, detail: { page: page }
-      }));
+      if (container.id === 'history-detail') {
+        openHistoryEvidencePdfPage(page);
+      } else if (container.id === 'analyze-result') {
+        container.dispatchEvent(new CustomEvent('analysis:evidence-page', {
+          bubbles: true, detail: { page: page }
+        }));
+      }
       return;
     }
     var tab = event.target && event.target.closest
@@ -1401,7 +1423,7 @@ function renderHistoryAnalysisState(item) {
         + escapeHtml(analysisStageText(cached.data.stage || cached.status))
         + '</strong><small>快速结论先展示，详细内容完成后会自动补充。</small></span></div>'
         + window.AnalysisWorkflow.renderProgressiveAnalysis(cached.data, {
-          pdfEvidenceLinks: false,
+          pdfEvidenceLinks: true,
           evidenceAnchor: 'analysis-evidence-history'
         });
       bindProgressiveTabs(detail, analysisKey(item.code, item.period));
@@ -1545,7 +1567,7 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   // v3 结果先显示快速结论，再按有效证据动态生成主题；旧报告保持兼容渲染。
   html += isProgressive
     ? window.AnalysisWorkflow.renderProgressiveAnalysis(content, {
-      pdfEvidenceLinks: false,
+      pdfEvidenceLinks: true,
       evidenceAnchor: 'analysis-evidence-history'
     })
     : renderDimensionTabs(contentDims);

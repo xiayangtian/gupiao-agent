@@ -230,6 +230,37 @@ def test_progressive_renderer_keeps_short_quick_conclusions_in_one_compact_flow(
     }
 
 
+def test_progressive_renderer_keeps_machine_metadata_out_of_short_conclusions():
+    """对象数据和 high/medium 等内部等级不能把一句结论拆成卡片。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{
+            text: '营业收入同比增长 10.5%。',
+            key_data: "{{'revenue': 206255000000}}", significance: 'high', evidence_ids: ['e1']
+          }}] }},
+          evidence_catalog: {{ e1: {{ label: '利润表', source_type: 'pdf_text',
+            source_locator: {{ page: 8 }} }} }}
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          card: html.includes('analysis-report-finding'),
+          machineObject: html.includes('206255000000'),
+          machineLevel: html.includes('>high<')
+        }}));
+        """
+    )
+
+    assert result == {
+        "compact": True,
+        "card": False,
+        "machineObject": False,
+        "machineLevel": False,
+    }
+
+
 def test_progressive_renderer_uses_real_document_catalog_display_metadata():
     """渲染器必须消费真实 AnalysisDocument.to_dict() 中的可读证据元数据。"""
     document = AnalysisDocument(

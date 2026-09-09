@@ -58,6 +58,8 @@ def test_evidence_citation_opens_its_compact_source_before_scrolling():
     assert "details.open = true" in source
     assert "target.scrollIntoView" in source
     assert "target.focus({ preventScroll: true })" in source
+    assert "openHistoryEvidencePdfPage" in source
+    assert "setHistoryView('pdf')" in source
     assert 'tabindex="-1"' in WORKFLOW_JS.read_text(encoding="utf-8")
 
 
