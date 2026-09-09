@@ -721,7 +721,8 @@ function openHistoryEvidencePdfPage(page) {
   setHistoryView('pdf');
   var frame = $('#history-pdf-frame');
   if (!frame) return false;
-  frame.src = '/api/history-pdf/' + encodeURIComponent(item.pdf_filename) + '#page=' + page;
+  frame.src = '/api/history-pdf/' + encodeURIComponent(item.pdf_filename)
+    + '?jump=' + encodeURIComponent(Date.now()) + '#page=' + page;
   if (frame.focus) frame.focus();
   return true;
 }
@@ -783,7 +784,7 @@ function openEvidencePdfPage(event) {
     code: STATE.selected.code, period: STATE.selectedReport.period
   } : null;
   var url = window.AnalysisWorkflow.evidencePdfPreviewUrl(
-    selected, event.detail && event.detail.page
+    selected, event.detail && event.detail.page, Date.now()
   );
   var frame = $('#pdf-frame');
   if (!url || !frame) return;
@@ -1411,6 +1412,7 @@ function renderHistoryAnalysisState(item) {
   var cached = STATE.analysisCache[analysisKey(item.code, item.period)];
   var detail = $('#history-detail');
   if (!cached || !detail) return false;
+  detail.classList.remove('hint');
   var badge = $('#history-detail-badge');
   if (badge) {
     var badgeModel = window.AnalysisWorkflow.analysisTerminalBadge(cached.status, item.has_analysis);
@@ -1544,6 +1546,7 @@ async function loadAndShowAnalysis(filename, callback, isCurrent) {
 function renderAnalysisInDetail(company, code, period, year, content, source) {
   var detail = $('#history-detail');
   if (!detail) return;
+  detail.classList.remove('hint');
 
   var isProgressive = Number(content.schema_version) === 3;
   if (isProgressive && !STATE.analysisCache[analysisKey(code, period)]) {

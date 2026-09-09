@@ -404,6 +404,31 @@ def test_evidence_pdf_preview_url_only_accepts_current_report_and_positive_page(
     }
 
 
+def test_pdf_evidence_url_uses_a_cache_buster_before_the_page_fragment():
+    """同一 PDF 再次定位时必须强制 iframe 重新加载，不能只改 fragment。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        console.log(JSON.stringify(workflow.evidencePdfPreviewUrl(
+          {{ code: '601288', period: '2026-03-31' }}, 12, 12345
+        )));
+        """
+    )
+
+    assert result == "/api/reports/601288/2026-03-31.pdf?jump=12345#page=12"
+
+
+def test_history_detail_keeps_analysis_content_left_aligned_and_delete_button_compact():
+    """历史结果不能继承空状态的居中样式，删除按钮尺寸应与重新分析一致。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    assert "#history-detail:not(.hint) { text-align: left; }" in css
+    assert "detail.classList.remove('hint')" in APP_JS.read_text(encoding="utf-8")
+    assert "#history-delete-analysis-btn" in css
+    assert "padding: 4px 12px" in css
+    assert "font-size: 12px" in css
+
+
 def test_pdf_evidence_event_is_scoped_to_the_primary_analysis_result():
     """历史详情复用 Tab 绑定时，不能触发主分析页 PDF iframe 的跳页事件。"""
     source = APP_JS.read_text(encoding="utf-8")

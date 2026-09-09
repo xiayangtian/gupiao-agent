@@ -360,12 +360,14 @@
     }, []);
   }
 
-  function evidencePdfPreviewUrl(selected, page) {
+  function evidencePdfPreviewUrl(selected, page, jumpVersion) {
     var number = Number(page);
     if (!selected || !selected.code || !selected.period
       || !Number.isInteger(number) || number < 1) return null;
-    return '/api/reports/' + encodeURIComponent(selected.code) + '/'
-      + encodeURIComponent(selected.period) + '.pdf#page=' + number;
+    var url = '/api/reports/' + encodeURIComponent(selected.code) + '/'
+      + encodeURIComponent(selected.period) + '.pdf';
+    if (jumpVersion !== undefined) url += '?jump=' + encodeURIComponent(jumpVersion);
+    return url + '#page=' + number;
   }
 
   function findingTone(item) {

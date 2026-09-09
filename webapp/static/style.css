@@ -1734,6 +1734,13 @@ input, select, button { font-family: inherit; font-size: inherit; }
   background: #fff;
 }
 
+#history-detail:not(.hint) { text-align: left; }
+
+#history-delete-analysis-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
 #history-detail-title {
   flex: 1;
   overflow: hidden;
