@@ -385,20 +385,42 @@
       ? anchor : 'analysis-evidence';
   }
 
+  function evidenceItemAnchor(anchor, id) {
+    var encoded = String(id).split('').map(function (character) {
+      return character.charCodeAt(0).toString(16);
+    }).join('-');
+    return anchor + '-' + encoded;
+  }
+
+  function renderEvidenceCitationLinks(ids, anchor) {
+    return (ids || []).map(function (id, index) {
+      return '<a class="analysis-evidence-link" href="#'
+        + escapeMarkup(evidenceItemAnchor(anchor, id)) + '">证据 ' + (index + 1) + '</a>';
+    }).join('');
+  }
+
+  function isCompactFinding(finding, claim) {
+    return !finding.title && !finding.key_data && !finding.significance
+      && String(claim).length <= 80;
+  }
+
   function renderReportFinding(item, index, anchor) {
     var finding = item || {};
     var claim = finding.claim || finding.text || finding.summary || '';
     if (!claim) return '';
+    var citations = renderEvidenceCitationLinks(finding.evidence_ids, anchor);
+    if (isCompactFinding(finding, claim)) {
+      return '<p class="analysis-compact-finding">' + emphasizedText(claim, finding.highlight_spans)
+        + (citations ? ' <span class="analysis-inline-citations">' + citations + '</span>' : '') + '</p>';
+    }
     var tone = findingTone(finding);
-    var evidenceCount = (finding.evidence_ids || []).length;
     return '<article class="analysis-report-finding analysis-tone-' + tone.key + '">'
       + '<span class="analysis-finding-label">' + tone.label + '</span>'
       + (finding.title ? '<h3>' + escapeMarkup(finding.title) + '</h3>' : '')
       + '<p>' + emphasizedText(claim, finding.highlight_spans) + '</p>'
       + (finding.key_data ? '<p class="analysis-key-data">' + escapeMarkup(finding.key_data) + '</p>' : '')
       + (finding.significance ? '<p class="analysis-significance">' + escapeMarkup(finding.significance) + '</p>' : '')
-      + (evidenceCount ? '<a class="analysis-evidence-link" href="#'
-        + escapeMarkup(anchor) + '">引用证据 ' + evidenceCount + '</a>' : '')
+      + (citations ? '<span class="analysis-inline-citations">' + citations + '</span>' : '')
       + '</article>';
   }
 
@@ -435,7 +457,8 @@
       var meta = [record.period, excerpt].filter(Boolean).join(' · ');
       var sourceLabel = kind === 'structured' ? '结构化数据'
         : (hasPage ? 'PDF · 第 ' + page + ' 页' : (record.source_type || '来源记录'));
-      return '<li class="analysis-evidence-item"><span class="analysis-evidence-index">'
+      return '<li id="' + escapeMarkup(evidenceItemAnchor(anchor, id))
+        + '" class="analysis-evidence-item" tabindex="-1"><span class="analysis-evidence-index">'
         + (index + 1) + '</span><strong>' + escapeMarkup(label) + '</strong>'
         + (hasPage && allowPdfLinks ? '<button type="button" class="analysis-evidence-page" data-evidence-page="'
           + page + '">PDF · 第 ' + page + ' 页</button>'
@@ -444,9 +467,8 @@
         + (meta ? '<span class="analysis-evidence-excerpt">' + escapeMarkup(meta) + '</span>' : '')
         + '</li>';
     }).filter(Boolean).join('');
-    return entries ? '<section id="' + escapeMarkup(anchor)
-      + '" class="analysis-evidence-section"><h3>证据与出处（'
-      + (entries.match(/<li /g) || []).length + '）</h3><ol>' + entries + '</ol></section>' : '';
+    return entries ? '<details class="analysis-evidence-section"><summary>证据与出处（'
+      + (entries.match(/<li /g) || []).length + '）</summary><ol>' + entries + '</ol></details>' : '';
   }
 
   function missingValue(value) {
@@ -495,8 +517,7 @@
     var body = '';
     if (active === 'quick') {
       if (quickItems.length) {
-        body = observationIntro + renderSummary(quickItems)
-          + '<section class="analysis-report-body">'
+        body = observationIntro + '<section class="analysis-report-body">'
           + quickItems.map(function (item, index) {
             return renderReportFinding(item, index, anchor);
           }).join('') + '</section>'

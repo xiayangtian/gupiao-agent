@@ -50,6 +50,17 @@ def test_progressive_render_call_sites_assign_distinct_evidence_anchors():
     assert source.count("evidenceAnchor: 'analysis-evidence-history'") == 2
 
 
+def test_evidence_citation_opens_its_compact_source_before_scrolling():
+    """点击正文证据时，应先展开折叠来源再定位到对应条目。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "closest('.analysis-evidence-link')" in source
+    assert "details.open = true" in source
+    assert "target.scrollIntoView" in source
+    assert "target.focus({ preventScroll: true })" in source
+    assert 'tabindex="-1"' in WORKFLOW_JS.read_text(encoding="utf-8")
+
+
 def test_analysis_report_mobile_evidence_items_use_one_column():
     """窄屏证据项必须单列，所有子项均回到首列，避免证据内容被挤压。"""
     css = STYLE_CSS.read_text(encoding="utf-8")

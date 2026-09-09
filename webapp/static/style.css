@@ -1342,6 +1342,22 @@ input, select, button { font-family: inherit; font-size: inherit; }
   font-weight: 700;
 }
 
+.analysis-compact-finding {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.72;
+}
+
+.analysis-compact-finding + .analysis-compact-finding { margin-top: var(--space-sm); }
+
+.analysis-inline-citations {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-sm);
+  margin-left: var(--space-xs);
+}
+
 .analysis-evidence-link {
   display: inline-flex;
   margin-top: 9px;
@@ -1358,12 +1374,21 @@ input, select, button { font-family: inherit; font-size: inherit; }
 }
 
 .analysis-evidence-section {
-  display: grid;
   gap: var(--space-sm);
   padding-top: var(--space-lg);
   border-top: 1px solid var(--border);
   color: var(--text-primary);
 }
+
+.analysis-evidence-section > summary {
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  list-style-position: outside;
+}
+
+.analysis-evidence-section[open] > summary { margin-bottom: var(--space-sm); }
 
 .analysis-evidence-section > ol {
   display: grid;

@@ -719,6 +719,20 @@ function bindProgressiveTabs(container, key) {
   if (!container || container.dataset.progressiveTabsBound) return;
   container.dataset.progressiveTabsBound = '1';
   container.addEventListener('click', function (event) {
+    var citation = event.target && event.target.closest
+      ? event.target.closest('.analysis-evidence-link') : null;
+    if (citation) {
+      var targetId = (citation.getAttribute('href') || '').slice(1);
+      var target = targetId ? document.getElementById(targetId) : null;
+      var details = target && target.closest ? target.closest('details') : null;
+      if (details) details.open = true;
+      if (target && target.scrollIntoView) {
+        event.preventDefault();
+        target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+      if (target && target.focus) target.focus({ preventScroll: true });
+      return;
+    }
     var evidenceButton = event.target && event.target.closest
       ? event.target.closest('[data-evidence-page]') : null;
     // 历史详情也复用 Tab 委托，但其 PDF 预览与主分析页不同；

@@ -120,7 +120,7 @@ def test_progressive_renderer_uses_inline_citations_not_folded_evidence():
         console.log(JSON.stringify({{
           hasDetails: html.includes('<details'),
           hasRisk: html.includes('analysis-tone-risk'),
-          citation: html.includes('引用证据'),
+          citation: html.includes('证据 1'),
           highlights: (html.match(/<mark/g) || []).length,
           emptyTopic: html.includes('空主题')
         }}));
@@ -128,8 +128,8 @@ def test_progressive_renderer_uses_inline_citations_not_folded_evidence():
     )
 
     assert result == {
-        "hasDetails": False,
-        "hasRisk": True,
+        "hasDetails": True,
+        "hasRisk": False,
         "citation": True,
         "highlights": 2,
         "emptyTopic": False,
@@ -182,11 +182,11 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
     )
 
     assert result == {
-        "summary": True,
-        "summaryCount": True,
+        "summary": False,
+        "summaryCount": False,
         "reportBody": True,
         "legacyCards": False,
-        "riskLabel": True,
+        "riskLabel": False,
         "quickTabCount": True,
         "sectionTabCount": True,
         "evidenceHeading": True,
@@ -194,7 +194,39 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
         "ocrPages": True,
         "pdfPage": True,
         "structuredHasButton": False,
-        "bodyHasDetails": False,
+        "bodyHasDetails": True,
+    }
+
+
+def test_progressive_renderer_keeps_short_quick_conclusions_in_one_compact_flow():
+    """短结论不应被重复摘要、标签和卡片层级拆散。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{ text: '经营现金流同比下降 10%', evidence_ids: ['e1'] }}] }},
+          evidence_catalog: {{ e1: {{ label: '现金流量表', source_type: 'pdf_text',
+            source_locator: {{ page: 12 }} }} }}
+        }}, {{ evidenceAnchor: 'analysis-evidence-main' }});
+        console.log(JSON.stringify({{
+          summary: html.includes('analysis-report-summary'),
+          label: html.includes('analysis-finding-label'),
+          finding: html.includes('analysis-report-finding'),
+          citationTarget: html.includes('href="#analysis-evidence-main-65-31"'),
+          evidenceTarget: html.includes('id="analysis-evidence-main-65-31"'),
+          collapsedEvidence: html.includes('<details class="analysis-evidence-section"')
+        }}));
+        """
+    )
+
+    assert result == {
+        "summary": False,
+        "label": False,
+        "finding": False,
+        "citationTarget": True,
+        "evidenceTarget": True,
+        "collapsedEvidence": True,
     }
 
 
@@ -256,7 +288,7 @@ def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
         const state = {{
           activeTab: 'quick', stage: 'completed',
-          quick: {{ conclusions: [{{ text: '旧缓存结论', evidence_ids: ['pdf-12'] }}] }},
+          quick: {{ conclusions: [{{ text: '旧缓存结论', key_data: '待复核', evidence_ids: ['pdf-12'] }}] }},
           evidence_catalog: {{
             'pdf-12': {{ fact_name: 'pdf_page_12', label: 'PDF · 第 12 页',
                          excerpt: '经营现金流下降', source_type: 'pdf_text',
@@ -270,11 +302,11 @@ def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
           state, {{ evidenceAnchor: 'analysis-evidence-history', pdfEvidenceLinks: false }}
         );
         console.log(JSON.stringify({{
-          mainTarget: main.includes('href="#analysis-evidence-main"')
-            && main.includes('id="analysis-evidence-main"'),
-          historyTarget: history.includes('href="#analysis-evidence-history"')
-            && history.includes('id="analysis-evidence-history"'),
-          duplicateAnchor: (main + history).match(/id="analysis-evidence-main"/g)?.length || 0,
+          mainTarget: main.includes('href="#analysis-evidence-main-70-64-66-2d-31-32"')
+            && main.includes('id="analysis-evidence-main-70-64-66-2d-31-32"'),
+          historyTarget: history.includes('href="#analysis-evidence-history-70-64-66-2d-31-32"')
+            && history.includes('id="analysis-evidence-history-70-64-66-2d-31-32"'),
+          duplicateAnchor: (main + history).match(/id="analysis-evidence-main-70-64-66-2d-31-32"/g)?.length || 0,
           pendingTone: main.includes('analysis-tone-pending'),
           pendingLabel: main.includes('>待核验<')
         }}));

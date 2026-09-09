@@ -1,6 +1,7 @@
 """分析维度弹窗布局的浏览器回归测试。"""
 
 import json
+import os
 import re
 import signal
 import shutil
@@ -65,9 +66,8 @@ def test_analysis_dialog_is_centered_in_the_viewport(tmp_path):
         encoding="utf-8",
     )
 
-    try:
-        completed = subprocess.run(
-            [
+    process = subprocess.Popen(
+        [
             CHROME,
             "--headless=new",
             "--no-sandbox",
@@ -80,17 +80,37 @@ def test_analysis_dialog_is_centered_in_the_viewport(tmp_path):
             "--virtual-time-budget=1000",
             "--dump-dom",
             html_path.as_uri(),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        if exc.returncode == -signal.SIGABRT:
-            pytest.skip("当前宿主的 Chrome headless 进程不可用")
-        raise
-    match = re.search(r"<body>(\{.*?\})\s*</body>", completed.stdout, re.DOTALL)
-    assert match, completed.stdout
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                pytest.fail("Chrome 进程组在 SIGKILL 后仍未退出")
+        pytest.skip("当前宿主的 Chrome --dump-dom 在 15 秒内未退出")
+    if process.returncode == -signal.SIGABRT:
+        pytest.skip("当前宿主的 Chrome headless 进程不可用")
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, process.args, stdout, stderr)
+    match = re.search(r"<body>(\{.*?\})\s*</body>", stdout, re.DOTALL)
+    assert match, stdout
     layout = json.loads(match.group(1))
 
     assert layout["dialogCenterX"] == pytest.approx(layout["viewportCenterX"], abs=1)
