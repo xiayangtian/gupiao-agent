@@ -628,6 +628,26 @@ def get_history(search: str = Query(default="")) -> Dict[str, Any]:
     return {"items": items}
 
 
+@app.delete("/api/history/{filename:path}")
+def delete_history_analysis(filename: str) -> Dict[str, Any]:
+    """删除一份本地 AI 分析 JSON 及其 Markdown 副本，保留原始 PDF。"""
+    safe_name = os.path.basename(filename)
+    if safe_name != filename or not safe_name.endswith("_分析报告.json"):
+        raise HTTPException(404, "分析报告不存在")
+    json_path = os.path.join(ANALYSIS_DIR, safe_name)
+    if not os.path.isfile(json_path):
+        raise HTTPException(404, f"分析报告不存在：{safe_name}")
+    try:
+        os.remove(json_path)
+        markdown_path = os.path.splitext(json_path)[0] + ".md"
+        if os.path.isfile(markdown_path):
+            os.remove(markdown_path)
+    except OSError as exc:
+        logger.exception("删除分析报告失败：%s", safe_name)
+        raise HTTPException(500, f"删除分析报告失败：{exc}") from exc
+    return {"deleted": safe_name}
+
+
 @app.get("/api/history-pdf/{filename:path}")
 def get_history_pdf(filename: str) -> FileResponse:
     """以内联方式返回历史记录中的本地 PDF，不触发远端查询或下载。"""

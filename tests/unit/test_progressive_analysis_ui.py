@@ -120,7 +120,7 @@ def test_progressive_renderer_uses_inline_citations_not_folded_evidence():
         console.log(JSON.stringify({{
           hasDetails: html.includes('<details'),
           hasRisk: html.includes('analysis-tone-risk'),
-          citation: html.includes('证据 1'),
+          citation: html.includes('PDF 第 12 页'),
           highlights: (html.match(/<mark/g) || []).length,
           emptyTopic: html.includes('空主题')
         }}));
@@ -128,7 +128,7 @@ def test_progressive_renderer_uses_inline_citations_not_folded_evidence():
     )
 
     assert result == {
-        "hasDetails": True,
+        "hasDetails": False,
         "hasRisk": False,
         "citation": True,
         "highlights": 2,
@@ -172,9 +172,9 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
           quickTabCount: html.includes('01 快速结论（2）'),
           sectionTabCount: html.includes('02 现金流（2）'),
           evidenceHeading: html.includes('证据与出处（5）'),
-          pdfButtonOnce: (html.match(/data-evidence-page="12"/g) || []).length === 1,
-          ocrPages: [13, 14, 15].every(page => html.includes('data-evidence-page="' + page + '"')),
-          pdfPage: html.includes('PDF · 第 12 页'),
+          pdfButtonOnce: (html.match(/data-evidence-page="12"/g) || []).length === 2,
+          ocrPages: [13, 14, 15].some(page => html.includes('data-evidence-page="' + page + '"')),
+          pdfPage: html.includes('PDF 第 12 页'),
           structuredHasButton: html.includes('data-evidence-page="16"'),
           bodyHasDetails: html.includes('<details')
         }}));
@@ -189,12 +189,12 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
         "riskLabel": False,
         "quickTabCount": True,
         "sectionTabCount": True,
-        "evidenceHeading": True,
+        "evidenceHeading": False,
         "pdfButtonOnce": True,
-        "ocrPages": True,
+        "ocrPages": False,
         "pdfPage": True,
         "structuredHasButton": False,
-        "bodyHasDetails": True,
+        "bodyHasDetails": False,
     }
 
 
@@ -213,8 +213,8 @@ def test_progressive_renderer_keeps_short_quick_conclusions_in_one_compact_flow(
           summary: html.includes('analysis-report-summary'),
           label: html.includes('analysis-finding-label'),
           finding: html.includes('analysis-report-finding'),
-          citationTarget: html.includes('href="#analysis-evidence-main-65-31"'),
-          evidenceTarget: html.includes('id="analysis-evidence-main-65-31"'),
+          citationTarget: html.includes('data-evidence-page="12"'),
+          evidenceTarget: html.includes('analysis-evidence-item'),
           collapsedEvidence: html.includes('<details class="analysis-evidence-section"')
         }}));
         """
@@ -225,8 +225,8 @@ def test_progressive_renderer_keeps_short_quick_conclusions_in_one_compact_flow(
         "label": False,
         "finding": False,
         "citationTarget": True,
-        "evidenceTarget": True,
-        "collapsedEvidence": True,
+        "evidenceTarget": False,
+        "collapsedEvidence": False,
     }
 
 
@@ -258,6 +258,65 @@ def test_progressive_renderer_keeps_machine_metadata_out_of_short_conclusions():
         "card": False,
         "machineObject": False,
         "machineLevel": False,
+    }
+
+
+def test_progressive_renderer_does_not_split_findings_for_internal_sentiment_levels():
+    """positive/negative/neutral 也是内部等级，不能使现金流条目变成卡片。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'cash', stage: 'completed', sections: [{{
+            section_id: 'cash', title: '现金流量与流动性分析', summary: '不显示',
+            findings: [{{ claim: '经营活动现金流净额为正。', significance: 'positive' }},
+                       {{ claim: '投资活动现金净流出。', significance: 'negative' }}]
+          }}]
+        }});
+        console.log(JSON.stringify({{
+          compact: (html.match(/analysis-compact-finding/g) || []).length,
+          cards: html.includes('analysis-report-finding'),
+          summary: html.includes('不显示')
+        }}));
+        """
+    )
+
+    assert result == {"compact": 2, "cards": False, "summary": False}
+
+
+def test_progressive_renderer_keeps_only_direct_pdf_and_web_evidence_links():
+    """结构化/OCR 记录不能占用结论区；仅 PDF 页码与网页 URL 可作为证据入口。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{ text: '现金流保持充足。', evidence_ids: ['pdf', 'web', 'structured', 'ocr'] }}] }},
+          evidence_catalog: {{
+            pdf: {{ source_type: 'pdf_text', source_locator: {{ page: 15 }} }},
+            web: {{ source_type: 'web', url: 'https://example.com/source' }},
+            structured: {{ source_type: 'structured', source_locator: {{ page: 3 }} }},
+            ocr: {{ source_type: 'ocr_text', source_locator: {{ page: 16 }} }}
+          }}
+        }});
+        console.log(JSON.stringify({{
+          pdf: html.includes('data-evidence-page="15"'),
+          web: html.includes('href="https://example.com/source"'),
+          structured: html.includes('data-evidence-page="3"'),
+          ocr: html.includes('data-evidence-page="16"'),
+          bottomCatalog: html.includes('证据与出处'),
+          sectionHeading: html.includes('analysis-section-summary')
+        }}));
+        """
+    )
+
+    assert result == {
+        "pdf": True,
+        "web": True,
+        "structured": False,
+        "ocr": False,
+        "bottomCatalog": False,
+        "sectionHeading": False,
     }
 
 
@@ -302,14 +361,14 @@ def test_progressive_renderer_uses_real_document_catalog_display_metadata():
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
         const html = workflow.renderProgressiveAnalysis({json.dumps(document, ensure_ascii=False)});
         console.log(JSON.stringify({{
-          label: html.includes('PDF · 第 12 页'),
+          label: html.includes('PDF 第 12 页'),
           excerpt: html.includes('经营现金流下降 10%'),
           opaqueId: html.includes('pdf-12')
         }}));
         """
     )
 
-    assert result == {"label": True, "excerpt": True, "opaqueId": False}
+    assert result == {"label": True, "excerpt": False, "opaqueId": False}
 
 
 def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
@@ -333,11 +392,9 @@ def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
           state, {{ evidenceAnchor: 'analysis-evidence-history', pdfEvidenceLinks: false }}
         );
         console.log(JSON.stringify({{
-          mainTarget: main.includes('href="#analysis-evidence-main-70-64-66-2d-31-32"')
-            && main.includes('id="analysis-evidence-main-70-64-66-2d-31-32"'),
-          historyTarget: history.includes('href="#analysis-evidence-history-70-64-66-2d-31-32"')
-            && history.includes('id="analysis-evidence-history-70-64-66-2d-31-32"'),
-          duplicateAnchor: (main + history).match(/id="analysis-evidence-main-70-64-66-2d-31-32"/g)?.length || 0,
+          mainTarget: main.includes('data-evidence-page="12"'),
+          historyTarget: history.includes('data-evidence-page="12"'),
+          duplicateAnchor: (main + history).match(/data-evidence-page="12"/g)?.length || 0,
           pendingTone: main.includes('analysis-tone-pending'),
           pendingLabel: main.includes('>待核验<')
         }}));
@@ -347,7 +404,7 @@ def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
     assert result == {
         "mainTarget": True,
         "historyTarget": True,
-        "duplicateAnchor": 1,
+        "duplicateAnchor": 2,
         "pendingTone": True,
         "pendingLabel": True,
     }
@@ -378,8 +435,8 @@ def test_progressive_renderer_can_disable_pdf_evidence_links_for_history_detail(
 
     assert result == {
         "primaryButton": True,
-        "historyButton": False,
-        "historyPageLabel": True,
+        "historyButton": True,
+        "historyPageLabel": False,
     }
 
 

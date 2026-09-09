@@ -584,6 +584,30 @@ class TestHistoryApi:
         r = client.get("/api/history/不存在的文件.json")
         assert r.status_code == 404
 
+    def test_delete_history_analysis_removes_only_analysis_artifacts(
+        self, client, tmp_path, monkeypatch
+    ):
+        """删除分析只移除同名 JSON/Markdown，不能触及原始 PDF。"""
+        analysis_dir = tmp_path / "analysis"
+        reports_dir = tmp_path / "reports"
+        analysis_dir.mkdir()
+        reports_dir.mkdir()
+        filename = "长江电力_600900_2025_分析报告.json"
+        (analysis_dir / filename).write_text("{}", encoding="utf-8")
+        (analysis_dir / filename.replace(".json", ".md")).write_text("# 分析", encoding="utf-8")
+        pdf = reports_dir / "长江电力_600900_年报_2025.pdf"
+        pdf.write_bytes(b"%PDF")
+        monkeypatch.setattr(server, "ANALYSIS_DIR", str(analysis_dir))
+        monkeypatch.setattr(server, "REPORTS_DIR", str(reports_dir))
+
+        response = client.delete(f"/api/history/{filename}")
+
+        assert response.status_code == 200
+        assert response.json() == {"deleted": filename}
+        assert not (analysis_dir / filename).exists()
+        assert not (analysis_dir / filename.replace(".json", ".md")).exists()
+        assert pdf.exists()
+
     def test_history_pdf_serves_local_file_inline(self, client, tmp_path, monkeypatch):
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()

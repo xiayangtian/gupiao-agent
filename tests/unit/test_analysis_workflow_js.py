@@ -63,6 +63,17 @@ def test_evidence_citation_opens_its_compact_source_before_scrolling():
     assert 'tabindex="-1"' in WORKFLOW_JS.read_text(encoding="utf-8")
 
 
+def test_history_analysis_delete_control_is_guarded_and_refreshes_local_state():
+    """删除入口必须二次确认，成功后清理缓存并刷新历史列表。"""
+    source = APP_JS.read_text(encoding="utf-8")
+    index = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="history-delete-analysis-btn"' in index
+    assert "window.confirm('确定删除此分析报告吗？原始 PDF 将保留。')" in source
+    assert "fetch('/api/history/' + encodeURIComponent(item.analysis_filename), { method: 'DELETE' })" in source
+    assert "delete STATE.analysisCache[analysisKey(item.code, item.period)]" in source
+
+
 def test_analysis_report_mobile_evidence_items_use_one_column():
     """窄屏证据项必须单列，所有子项均回到首列，避免证据内容被挤压。"""
     css = STYLE_CSS.read_text(encoding="utf-8")

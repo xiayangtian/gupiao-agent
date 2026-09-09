@@ -1367,6 +1367,8 @@ async function selectHistoryItem(code, period) {
   // 详情面板右上角「重新分析」：仅已分析的报告可重新触发
   var reBtn = $('#history-reanalyze-btn');
   if (reBtn) reBtn.classList.toggle('hidden', !item.has_analysis);
+  var deleteBtn = $('#history-delete-analysis-btn');
+  if (deleteBtn) deleteBtn.classList.toggle('hidden', !item.has_analysis);
 
   // Update detail panel header
   var title = $('#history-detail-title');
@@ -1618,6 +1620,31 @@ var historyReanalyzeBtn = $('#history-reanalyze-btn');
 if (historyReanalyzeBtn) {
   historyReanalyzeBtn.addEventListener('click', function () {
     if (STATE.historySelected) startHistoryAnalysis(STATE.historySelected);
+  });
+}
+
+var historyDeleteAnalysisBtn = $('#history-delete-analysis-btn');
+if (historyDeleteAnalysisBtn) {
+  historyDeleteAnalysisBtn.addEventListener('click', async function () {
+    var item = STATE.historySelected;
+    if (!item || !item.has_analysis || !item.analysis_filename) return;
+    if (!window.confirm('确定删除此分析报告吗？原始 PDF 将保留。')) return;
+    historyDeleteAnalysisBtn.disabled = true;
+    try {
+      var response = await fetch('/api/history/' + encodeURIComponent(item.analysis_filename), { method: 'DELETE' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      delete STATE.analysisCache[analysisKey(item.code, item.period)];
+      delete STATE.historyAnalysisByReport[analysisKey(item.code, item.period)];
+      await loadHistoryItems();
+      var refreshed = (STATE.historyItems || []).find(function (candidate) {
+        return candidate.code === item.code && candidate.period === item.period;
+      });
+      if (refreshed) await selectHistoryItem(refreshed.code, refreshed.period);
+    } catch (err) {
+      showError('删除分析报告失败：' + err.message);
+    } finally {
+      historyDeleteAnalysisBtn.disabled = false;
+    }
   });
 }
 

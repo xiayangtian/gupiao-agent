@@ -392,16 +392,29 @@
     return anchor + '-' + encoded;
   }
 
-  function renderEvidenceCitationLinks(ids, anchor) {
-    return (ids || []).map(function (id, index) {
-      return '<a class="analysis-evidence-link" href="#'
-        + escapeMarkup(evidenceItemAnchor(anchor, id)) + '">证据 ' + (index + 1) + '</a>';
-    }).join('');
+  function renderEvidenceCitationLinks(ids, catalog) {
+    return (ids || []).map(function (id) {
+      var record = (catalog || {})[id] || {};
+      var locator = record.source_locator || {};
+      var page = Number(locator.page);
+      if (record.source_type === 'pdf_text' && Number.isInteger(page) && page > 0) {
+        return '<button type="button" class="analysis-evidence-page" data-evidence-page="'
+          + page + '">PDF 第 ' + page + ' 页</button>';
+      }
+      var url = record.url || locator.url || '';
+      if ((record.source_type === 'web' || record.source_type === 'web_search')
+        && /^https?:\/\//i.test(String(url))) {
+        return '<a class="analysis-evidence-link" href="' + escapeMarkup(url)
+          + '" target="_blank" rel="noopener noreferrer">网页证据</a>';
+      }
+      return '';
+    }).filter(Boolean).join('');
   }
 
   function readableSupplement(value) {
     var text = String(value == null ? '' : value).trim();
-    return !!text && !/^(?:high|medium|low)$/i.test(text) && !/^[{[]/.test(text);
+    return !!text && !/^(?:high|medium|low|positive|negative|neutral)$/i.test(text)
+      && !/^[{[]/.test(text);
   }
 
   function isCompactFinding(finding, claim) {
@@ -409,11 +422,11 @@
       && !readableSupplement(finding.significance) && String(claim).length <= 160;
   }
 
-  function renderReportFinding(item, index, anchor) {
+  function renderReportFinding(item, index, catalog) {
     var finding = item || {};
     var claim = finding.claim || finding.text || finding.summary || '';
     if (!claim) return '';
-    var citations = renderEvidenceCitationLinks(finding.evidence_ids, anchor);
+    var citations = renderEvidenceCitationLinks(finding.evidence_ids, catalog);
     var keyData = readableSupplement(finding.key_data) ? finding.key_data : '';
     var significance = readableSupplement(finding.significance) ? finding.significance : '';
     if (isCompactFinding(finding, claim)) {
@@ -526,9 +539,8 @@
       if (quickItems.length) {
         body = observationIntro + '<section class="analysis-report-body">'
           + quickItems.map(function (item, index) {
-            return renderReportFinding(item, index, anchor);
-          }).join('') + '</section>'
-          + renderEvidenceSection(quickItems, catalog, options) + correctionHtml;
+            return renderReportFinding(item, index, catalog);
+          }).join('') + '</section>' + correctionHtml;
       } else if (completedWithoutQuick) {
         body = '<section class="analysis-report-body"><p class="hint">本次未生成可核验的快速结论。</p></section>';
       } else {
@@ -537,12 +549,10 @@
     } else {
       body = sections.filter(function (section) { return section.section_id === active; })
         .map(function (section) {
-          return '<section class="analysis-report-body"><h3>' + escapeMarkup(section.title) + '</h3>'
-            + (section.summary ? '<p class="analysis-section-summary">' + escapeMarkup(section.summary) + '</p>' : '')
+          return '<section class="analysis-report-body">'
             + section.findings.map(function (item, index) {
-              return renderReportFinding(item, index, anchor);
-            }).join('') + '</section>'
-            + renderEvidenceSection(section.findings, catalog, options);
+              return renderReportFinding(item, index, catalog);
+            }).join('') + '</section>';
         }).join('');
     }
     return '<div class="analysis-result-tabs" role="tablist">'
