@@ -1348,8 +1348,6 @@ input, select, button { font-family: inherit; font-size: inherit; }
   font-weight: 700;
 }
 
-.analysis-key-data-inline { color: var(--text-secondary); }
-
 .analysis-compact-finding mark {
   padding: 1px 4px;
   border-radius: 4px;

@@ -419,41 +419,6 @@
       && !/^[{[]/.test(text);
   }
 
-  // 比较前先去掉标点与虚词，避免“营业收入为 X”与“营业收入 X”被当成不同内容。
-  function normalizeFindingText(value) {
-    return String(value == null ? '' : value)
-      .replace(/[\s，,；;：:、。．（）()【】\[\]“”"'’%％为是约近达共]/g, '');
-  }
-
-  // 判断一段 key_data 是否已被结论覆盖：数字全部命中，且不含结论里没出现过的用词字符。
-  // 只要还引入了新字符（如“成本”相对“收入”），即使数值相同也视为新信息，不得删除。
-  function coveredByClaim(part, claim) {
-    var text = String(part == null ? '' : part);
-    var haystack = String(claim == null ? '' : claim);
-    var numbers = text.match(/\d+(?:\.\d+)?/g) || [];
-    if (!numbers.every(function (number) { return haystack.indexOf(number) >= 0; })) return false;
-    var words = text.replace(/[\d.\s，,；;：:、。．（）()【】\[\]“”"'’%％]/g, '');
-    if (!words.length) return true;
-    return words.split('').every(function (character) {
-      return haystack.indexOf(character) >= 0;
-    });
-  }
-
-  function keyDataCovered(part, claim) {
-    var needle = normalizeFindingText(part);
-    if (!needle) return true;
-    return normalizeFindingText(claim).indexOf(needle) >= 0 || coveredByClaim(part, claim);
-  }
-
-  // 结论里缺失的补充数据：只接上结论未覆盖的片段，避免整句重复。
-  function supplementaryKeyData(keyData, claim) {
-    if (!readableSupplement(keyData)) return '';
-    var parts = String(keyData).split(/[，,；;]/).filter(function (part) {
-      return !keyDataCovered(part, claim);
-    });
-    return parts.length ? parts.join('；') : '';
-  }
-
   function carriesToneLabel(finding) {
     var state = finding.risk_state || finding.style;
     return state === 'verified_risk' || state === 'observation';
@@ -474,10 +439,9 @@
     var keyData = readableSupplement(finding.key_data) ? finding.key_data : '';
     var significance = readableSupplement(finding.significance) ? finding.significance : '';
     if (isCompactFinding(finding, claim)) {
-      var extra = supplementaryKeyData(keyData, claim);
+      // 紧凑段落只保留结论本身：key_data 无法可靠判定是重述还是新数据，
+      // 任何自动去重都可能误删（“营业成本100亿元” vs “营业收入100亿元”）。
       return '<p class="analysis-compact-finding">' + emphasizedText(claim, finding.highlight_spans)
-        + (extra ? ' <span class="analysis-key-data-inline">'
-          + escapeMarkup(extra) + '</span>' : '')
         + (citations ? ' <span class="analysis-inline-citations">' + citations + '</span>' : '') + '</p>';
     }
     var tone = findingTone(finding);

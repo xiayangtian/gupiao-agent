@@ -237,137 +237,60 @@ def test_readable_duplicate_key_data_keeps_quick_conclusion_compact():
     }
 
 
-def test_non_redundant_key_data_stays_inside_the_same_paragraph():
-    """key_data 携带结论里没有的数据时必须保留，但不能因此变成独立模块。"""
+def test_compact_conclusion_never_injects_key_data():
+    """紧凑段落只保留结论本身：无法可靠判断 key_data 是重述还是新数据。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const state = (claim, keyData) => ({{ activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{ claim: claim, key_data: keyData }}] }} }});
+        const render = s => workflow.renderProgressiveAnalysis(s);
+        const cases = {{
+          verbatim: render(state('营业收入为100亿元，同比增长10%。', '营业收入为100亿元')),
+          paraphrased: render(state('经营活动现金流净额为2876.12亿元。', '经营现金流2876.12亿元')),
+          sameValueOtherMetric: render(state('营业收入为100亿元。', '营业成本为100亿元')),
+          plainText: render(state('旧缓存结论', '待复核'))
+        }};
+        const out = {{}};
+        Object.keys(cases).forEach(function (name) {{
+          out[name] = {{
+            compact: cases[name].includes('analysis-compact-finding'),
+            supplement: cases[name].includes('analysis-key-data-inline'),
+            card: cases[name].includes('analysis-report-finding')
+          }};
+        }});
+        console.log(JSON.stringify(out));
+        """
+    )
+
+    assert result == {
+        "verbatim": {"compact": True, "supplement": False, "card": False},
+        "paraphrased": {"compact": True, "supplement": False, "card": False},
+        "sameValueOtherMetric": {"compact": True, "supplement": False, "card": False},
+        "plainText": {"compact": True, "supplement": False, "card": False},
+    }
+
+
+def test_layered_finding_still_shows_key_data():
+    """分层卡片（长结论/带标题）仍要展示 key_data，避免信息丢失。"""
     result = _run_node(
         f"""
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
         const html = workflow.renderProgressiveAnalysis({{
           activeTab: 'risk', stage: 'completed', sections: [{{
             section_id: 'risk', title: '信用风险',
-            findings: [{{ claim: '资产质量总体保持稳定。',
+            findings: [{{ title: '资产质量', claim: '不良率与拨备覆盖率双降。',
                          key_data: '不良贷款率 1.05 1.13' }}]
           }}]
         }});
         console.log(JSON.stringify({{
-          compact: html.includes('analysis-compact-finding'),
           card: html.includes('analysis-report-finding'),
-          inlineSupplement: html.includes('不良贷款率 1.05 1.13')
+          keyData: html.includes('不良贷款率 1.05 1.13')
         }}));
         """
     )
 
-    assert result == {"compact": True, "card": False, "inlineSupplement": True}
-
-
-def test_compact_conclusion_only_appends_the_missing_key_data_parts():
-    """补充数据只接上结论里缺失的部分，不能把 key_data 整句重复一遍。"""
-    result = _run_node(
-        f"""
-        const workflow = require({json.dumps(str(WORKFLOW_JS))});
-        const html = workflow.renderProgressiveAnalysis({{
-          activeTab: 'quick', stage: 'completed',
-          quick: {{ conclusions: [{{
-            claim: '信用减值损失为1106.2亿元，同比增加，需关注资产质量风险。',
-            key_data: '信用减值损失1106.2亿元，同比增加12.9%'
-          }}] }}
-        }});
-        console.log(JSON.stringify({{
-          compact: html.includes('analysis-compact-finding'),
-          card: html.includes('analysis-report-finding'),
-          kept: html.includes('同比增加12.9%'),
-          repeated: (html.split('信用减值损失').length - 1)
-        }}));
-        """
-    )
-
-    assert result == {"compact": True, "card": False, "kept": True, "repeated": 1}
-
-
-def test_compact_conclusion_keeps_key_data_for_a_different_metric_with_same_value():
-    """数值相同但指标不同的 key_data 不能被当成重述删除（营收 100 亿 vs 成本 100 亿）。"""
-    result = _run_node(
-        f"""
-        const workflow = require({json.dumps(str(WORKFLOW_JS))});
-        const html = workflow.renderProgressiveAnalysis({{
-          activeTab: 'quick', stage: 'completed',
-          quick: {{ conclusions: [{{
-            claim: '营业收入为100亿元。',
-            key_data: '营业成本为100亿元'
-          }}] }}
-        }});
-        console.log(JSON.stringify({{
-          compact: html.includes('analysis-compact-finding'),
-          kept: html.includes('营业成本为100亿元')
-        }}));
-        """
-    )
-
-    assert result == {"compact": True, "kept": True}
-
-
-def test_compact_conclusion_drops_key_data_restated_in_different_words():
-    """key_data 只是换个说法重述同一批数字时，不要产生重复补充句。"""
-    result = _run_node(
-        f"""
-        const workflow = require({json.dumps(str(WORKFLOW_JS))});
-        const html = workflow.renderProgressiveAnalysis({{
-          activeTab: 'quick', stage: 'completed',
-          quick: {{ conclusions: [{{
-            claim: '经营活动现金流净额为2876.12亿元，投资活动现金流净额为-13607.84亿元。',
-            key_data: '经营现金流2876.12亿元，投资现金流-13607.84亿元'
-          }}] }}
-        }});
-        console.log(JSON.stringify({{
-          compact: html.includes('analysis-compact-finding'),
-          supplement: html.includes('analysis-key-data-inline')
-        }}));
-        """
-    )
-
-    assert result == {"compact": True, "supplement": False}
-
-
-def test_compact_conclusion_keeps_key_data_with_a_reused_number():
-    """同一数字出现在不同指标里时，key_data 不能被当成重复内容删除。"""
-    result = _run_node(
-        f"""
-        const workflow = require({json.dumps(str(WORKFLOW_JS))});
-        const html = workflow.renderProgressiveAnalysis({{
-          activeTab: 'quick', stage: 'completed',
-          quick: {{ conclusions: [{{
-            claim: '本期净利润为12.5亿元，盈利能力提升。',
-            key_data: '净利润同比增长12.5%'
-          }}] }}
-        }});
-        console.log(JSON.stringify({{
-          compact: html.includes('analysis-compact-finding'),
-          kept: html.includes('净利润同比增长12.5%')
-        }}));
-        """
-    )
-
-    assert result == {"compact": True, "kept": True}
-
-
-def test_compact_conclusion_keeps_plain_text_supplement():
-    """非数字补充信息（如待复核）不能因为压平而丢失。"""
-    result = _run_node(
-        f"""
-        const workflow = require({json.dumps(str(WORKFLOW_JS))});
-        const html = workflow.renderProgressiveAnalysis({{
-          activeTab: 'quick', stage: 'completed',
-          quick: {{ conclusions: [{{ text: '旧缓存结论', key_data: '待复核' }}] }}
-        }});
-        console.log(JSON.stringify({{
-          compact: html.includes('analysis-compact-finding'),
-          kept: html.includes('待复核'),
-          label: html.includes('analysis-finding-label')
-        }}));
-        """
-    )
-
-    assert result == {"compact": True, "kept": True, "label": False}
+    assert result == {"card": True, "keyData": True}
 
 
 def test_risk_finding_keeps_its_layered_risk_label():
@@ -565,8 +488,8 @@ def test_progressive_renderer_uses_real_document_catalog_display_metadata():
     assert result == {"label": True, "excerpt": False, "opaqueId": False}
 
 
-def test_progressive_renderer_uses_unique_evidence_anchors_and_inline_notes():
-    """同时渲染主/历史详情时，引用必须命中各自证据区，普通结论不再挂待核验标签。"""
+def test_progressive_renderer_uses_unique_evidence_anchors_and_compact_conclusions():
+    """同时渲染主/历史详情时，引用必须命中各自证据区，普通结论不再挂标签或重复数据。"""
     result = _run_node(
         f"""
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
@@ -591,7 +514,8 @@ def test_progressive_renderer_uses_unique_evidence_anchors_and_inline_notes():
           duplicateAnchor: (main + history).match(/data-evidence-page="12"/g)?.length || 0,
           pendingTone: main.includes('analysis-tone-pending'),
           pendingLabel: main.includes('>待核验<'),
-          inlineNote: main.includes('待复核')
+          compact: main.includes('analysis-compact-finding'),
+          repeatedKeyData: main.includes('analysis-key-data-inline')
         }}));
         """
     )
@@ -602,7 +526,8 @@ def test_progressive_renderer_uses_unique_evidence_anchors_and_inline_notes():
         "duplicateAnchor": 2,
         "pendingTone": False,
         "pendingLabel": False,
-        "inlineNote": True,
+        "compact": True,
+        "repeatedKeyData": False,
     }
 
 
