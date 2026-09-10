@@ -419,37 +419,40 @@
       && !/^[{[]/.test(text);
   }
 
-  function numericTokens(value) {
-    return String(value == null ? '' : value).match(/\d+(?:\.\d+)?/g) || [];
+  // 比较前先去掉标点与虚词，避免“营业收入为 X”与“营业收入 X”被当成不同内容。
+  function normalizeFindingText(value) {
+    return String(value == null ? '' : value)
+      .replace(/[\s，,；;：:、。．（）()【】\[\]“”"'’%％为是约近达共]/g, '');
   }
 
-  function keyDataRepeatsClaim(keyData, claim) {
-    var tokens = numericTokens(keyData);
-    if (!tokens.length) return false;
+  // 判断一段 key_data 是否已被结论覆盖：数字全部命中，且指标用词也基本重合。
+  // 只比对数字会把“本期净利润12.5亿元”与“同比增长12.5%”误当成重复而丢数据。
+  function coveredByClaim(part, claim) {
+    var text = String(part == null ? '' : part);
     var haystack = String(claim == null ? '' : claim);
-    return tokens.every(function (token) { return haystack.indexOf(token) >= 0; });
+    var numbers = text.match(/\d+(?:\.\d+)?/g) || [];
+    if (!numbers.every(function (number) { return haystack.indexOf(number) >= 0; })) return false;
+    var words = text.replace(/[\d.\s，,；;：:、。．（）()【】\[\]“”"'’%％]/g, '');
+    if (!words.length) return true;
+    var hits = words.split('').filter(function (character) {
+      return haystack.indexOf(character) >= 0;
+    }).length;
+    return hits / words.length >= 0.5;
   }
 
-  // key_data 常是结论的重述；只保留结论里缺失的数字片段，避免整句重复。
-  function missingKeyDataParts(keyData, claim) {
-    var haystack = String(claim == null ? '' : claim);
-    return String(keyData == null ? '' : keyData).split(/[，,；;]/).filter(function (part) {
-      var tokens = numericTokens(part);
-      return tokens.length > 0 && tokens.some(function (token) {
-        return haystack.indexOf(token) < 0;
-      });
-    });
+  function keyDataCovered(part, claim) {
+    var needle = normalizeFindingText(part);
+    if (!needle) return true;
+    return normalizeFindingText(claim).indexOf(needle) >= 0 || coveredByClaim(part, claim);
   }
 
-  // 结论里缺失的补充数据：优先只接上缺数字的片段，纯文字补充则原样接上。
+  // 结论里缺失的补充数据：只接上结论未覆盖的片段，避免整句重复。
   function supplementaryKeyData(keyData, claim) {
     if (!readableSupplement(keyData)) return '';
-    if (keyDataRepeatsClaim(keyData, claim)) return '';
-    var parts = missingKeyDataParts(keyData, claim);
-    if (parts.length) return parts.join('；');
-    var text = String(keyData).trim();
-    if (numericTokens(text).length) return '';
-    return String(claim == null ? '' : claim).indexOf(text) >= 0 ? '' : text;
+    var parts = String(keyData).split(/[，,；;]/).filter(function (part) {
+      return !keyDataCovered(part, claim);
+    });
+    return parts.length ? parts.join('；') : '';
   }
 
   function carriesToneLabel(finding) {

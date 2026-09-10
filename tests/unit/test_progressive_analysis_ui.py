@@ -284,6 +284,50 @@ def test_compact_conclusion_only_appends_the_missing_key_data_parts():
     assert result == {"compact": True, "card": False, "kept": True, "repeated": 1}
 
 
+def test_compact_conclusion_drops_key_data_restated_in_different_words():
+    """key_data 只是换个说法重述同一批数字时，不要产生重复补充句。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{
+            claim: '经营活动现金流净额为2876.12亿元，投资活动现金流净额为-13607.84亿元。',
+            key_data: '经营现金流2876.12亿元，投资现金流-13607.84亿元'
+          }}] }}
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          supplement: html.includes('analysis-key-data-inline')
+        }}));
+        """
+    )
+
+    assert result == {"compact": True, "supplement": False}
+
+
+def test_compact_conclusion_keeps_key_data_with_a_reused_number():
+    """同一数字出现在不同指标里时，key_data 不能被当成重复内容删除。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{
+            claim: '本期净利润为12.5亿元，盈利能力提升。',
+            key_data: '净利润同比增长12.5%'
+          }}] }}
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          kept: html.includes('净利润同比增长12.5%')
+        }}));
+        """
+    )
+
+    assert result == {"compact": True, "kept": True}
+
+
 def test_compact_conclusion_keeps_plain_text_supplement():
     """非数字补充信息（如待复核）不能因为压平而丢失。"""
     result = _run_node(
