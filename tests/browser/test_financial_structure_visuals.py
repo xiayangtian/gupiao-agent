@@ -127,6 +127,94 @@ document.body.dataset.result = JSON.stringify({{
     return json.loads(result.group(1).replace("&quot;", '"'))
 
 
+def _dump_actual_app_lifecycle(tmp_path: Path) -> dict:
+    """加载实际 app.js，并切换 v4→v3 验证图表、事件、历史 PDF 与销毁链路。"""
+    workflow_js = ROOT / "webapp" / "static" / "analysis_workflow.js"
+    app_js = ROOT / "webapp" / "static" / "app.js"
+    html_path = tmp_path / "actual-app-lifecycle.html"
+    html_path.write_text(
+        f"""<!doctype html><html><head><meta charset="utf-8"></head><body>
+<div id="analyze-result"></div><div id="analysis-background-status"></div>
+<div id="history-detail"></div><iframe id="history-pdf-frame"></iframe>
+<script>
+window.fetch = async function() {{ return {{ ok: true, json: async function() {{ return {{ ai_key_configured: false }}; }} }}; }};
+window.Chart = function() {{ this.destroy = function() {{ window.destroyedCharts = (window.destroyedCharts || 0) + 1; }}; }};
+</script>
+<script src="{workflow_js.as_uri()}"></script>
+<script src="{VISUALIZATIONS_JS.as_uri()}"></script>
+<script src="{app_js.as_uri()}"></script>
+<script>
+const catalog = {{pdf: {{source_type: 'pdf_text', source_locator: {{page: 12}}}}}};
+const section = {{section_id: 'cash', title: '现金流', findings: [{{content: '正文', evidence_ids: []}}]}};
+const v4 = {{schema_version: 4, stage: 'completed', activeTab: 'cash', quick: {{conclusions: []}}, sections: [section], evidence_catalog: catalog, visualizations: {{version: 1, cards: [{{
+  id: 'cash_flow_structure', topic_id: 'cash', title: '现金流结构', kind: 'cash_flow', status: 'partial', rows: [
+    {{metric_id: 'operating_cash_flow', label: '经营活动现金流净额', value: 22, unit: '亿元', direction: 'inflow', evidence_ids: ['pdf']}},
+    {{metric_id: 'investing_cash_flow', label: '投资活动现金流净额', value: -8, unit: '亿元', direction: 'outflow', evidence_ids: ['pdf']}}
+  ]
+}}]}}}};
+const v3 = {{schema_version: 3, stage: 'completed', activeTab: 'cash', quick: {{conclusions: []}}, sections: [section], evidence_catalog: catalog}};
+STATE.selected = {{code: '600900'}};
+STATE.selectedReport = {{period: '2026-06-30'}};
+STATE.analysisCache['600900:2026-06-30'] = {{status: 'done', data: v4}};
+let mainPage = null;
+document.querySelector('#analyze-result').addEventListener('analysis:evidence-page', event => {{ mainPage = event.detail.page; }});
+renderAnalysisPanel('600900:2026-06-30');
+document.querySelector('#analyze-result .analysis-visualization-evidence').click();
+STATE.historySelected = {{code: '600900', period: '2026-06-30', pdf_filename: 'report.pdf'}};
+renderAnalysisInDetail('示例公司', '600900', '2026-06-30', '2026', v4, 'fixture');
+document.querySelector('#history-detail .analysis-visualization-evidence').click();
+const historyPdf = document.querySelector('#history-pdf-frame').src;
+renderAnalysisInDetail('示例公司', '600900', '2026-06-30', '2026', v3, 'fixture');
+document.body.dataset.result = JSON.stringify({{
+  mainPage, historyPdf, destroyed: window.destroyedCharts || 0,
+  legacy: document.querySelector('#history-detail').textContent.includes('重新分析后可生成结构图'),
+  oldCanvas: document.querySelector('#history-detail canvas') !== null
+}});
+</script></body></html>""",
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [CHROME, "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-breakpad",
+         "--disable-crash-reporter", "--allow-file-access-from-files",
+         f"--user-data-dir={tmp_path / 'chrome-profile-app'}", "--virtual-time-budget=1000",
+         "--dump-dom", html_path.as_uri()],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        pytest.skip("当前宿主的 Chrome --dump-dom 在 15 秒内未退出")
+    if process.returncode == -signal.SIGABRT:
+        pytest.skip("当前宿主的 Chrome headless 进程不可用")
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, process.args, stdout, stderr)
+    result = re.search(r'data-result="([^"]+)"', stdout)
+    assert result, stdout
+    return json.loads(result.group(1).replace("&quot;", '"'))
+
+
+def test_actual_app_lifecycle_mounts_v4_routes_pdf_pages_and_cleans_up_for_v3(tmp_path):
+    """真实 app.js 主/历史路径必须支持 v4，并在切回 v3 时回收图表。"""
+    rendered = _dump_actual_app_lifecycle(tmp_path)
+
+    assert rendered["mainPage"] == 12
+    assert rendered["historyPdf"].endswith("?jump=" + rendered["historyPdf"].split("?jump=")[1].split("#")[0] + "#page=12")
+    assert rendered["destroyed"] >= 2
+    assert rendered["legacy"] is True
+    assert rendered["oldCanvas"] is False
+
+
 @pytest.mark.parametrize("viewport", [(1280, 800), (768, 900), (390, 844)])
 def test_v4_financial_structure_visuals_render_semantic_tables_and_pdf_pages(tmp_path, viewport):
     """三类 v4 图表有表格替代，未提供卡片不画空 canvas，窄屏不溢出。"""

@@ -74,6 +74,30 @@ def test_v4_history_report_uses_progressive_renderer_and_mounts_visualizations()
     assert "AnalysisVisualizations.destroy" in source
 
 
+def test_visualization_lifecycle_clears_before_all_replaced_analysis_containers():
+    """v4 图表切到旧/空内容时，容器替换前必须销毁并清空实例映射。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "function clearAnalysisVisualizations()" in source
+    assert "clearAnalysisVisualizations();\n  var st = STATE.analysisCache[key];" in source
+    assert "clearAnalysisVisualizations();\n  detail.classList.remove('hint');" in source
+    assert "function showHistoryNoAnalysis(item)" in source
+    assert "clearAnalysisVisualizations();\n  detail.innerHTML" in source
+    assert "clearAnalysisVisualizations();\n        detail.innerHTML = '<p class=\"hint\">无法读取分析文件</p>'" in source
+    assert "clearAnalysisVisualizations();\n      detail2.innerHTML = '<p class=\"hint\">读取分析文件失败</p>'" in source
+    assert "clearAnalysisVisualizations();\n}" in source[source.index("function destroyAllCharts()"):]
+
+
+def test_visualization_chartjs_fallback_keeps_table_and_removes_canvas():
+    """缺失 Chart.js 时不能留下空画布，必须保留数据表并告知用户。"""
+    source = (ROOT / "webapp" / "static" / "analysis_visualizations.js").read_text(encoding="utf-8")
+
+    assert "function chartUnavailable(slot, canvas)" in source
+    assert "图表组件不可用，已展示数据表" in source
+    assert "chartBox.innerHTML = message" in source
+    assert "if (!ChartClass)" in source
+
+
 def test_topic_tab_binding_always_uses_the_current_report_key():
     """同一容器复用时必须刷新 key，否则切换报告后主题 Tab 会串到上一份报告。"""
     source = APP_JS.read_text(encoding="utf-8")

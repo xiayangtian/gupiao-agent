@@ -649,6 +649,7 @@ function isCurrentAnalysis(code, period) {
 function renderAnalysisPanel(key) {
   var ar = $('#analyze-result');
   if (!ar) return;
+  clearAnalysisVisualizations();
   var st = STATE.analysisCache[key];
   if (!st) { ar.innerHTML = ''; updateBackgroundAnalysisStatus(null); return; }
   var progressive = st.data && (Number(st.data.schema_version) >= 3 || st.data.quick
@@ -729,12 +730,25 @@ function openHistoryEvidencePdfPage(page) {
   return true;
 }
 
+function clearAnalysisVisualizations() {
+  var charts = STATE.charts.visualizations;
+  if (!charts) return;
+  var visualizer = window.AnalysisVisualizations;
+  if (visualizer && typeof visualizer.destroy === 'function') {
+    window.AnalysisVisualizations.destroy(charts);
+  } else if (typeof charts.forEach === 'function') {
+    charts.forEach(function (chart) {
+      if (chart && typeof chart.destroy === 'function') chart.destroy();
+    });
+    if (typeof charts.clear === 'function') charts.clear();
+  }
+  STATE.charts.visualizations = null;
+}
+
 function mountAnalysisVisualizations(container, data, isHistory) {
   var visualizer = window.AnalysisVisualizations;
+  clearAnalysisVisualizations();
   if (!visualizer || typeof visualizer.mount !== 'function') return;
-  if (STATE.charts.visualizations && typeof visualizer.destroy === 'function') {
-    visualizer.destroy(STATE.charts.visualizations);
-  }
   STATE.charts.visualizations = window.AnalysisVisualizations.mount(container, data && data.visualizations, {
     onEvidencePage: function (page) {
       if (isHistory) {
@@ -1438,6 +1452,7 @@ function renderHistoryAnalysisState(item) {
   var cached = STATE.analysisCache[analysisKey(item.code, item.period)];
   var detail = $('#history-detail');
   if (!cached || !detail) return false;
+  clearAnalysisVisualizations();
   detail.classList.remove('hint');
   var badge = $('#history-detail-badge');
   if (badge) {
@@ -1532,6 +1547,7 @@ if (historyViewTabs) {
 function showHistoryNoAnalysis(item) {
   var detail = $('#history-detail');
   if (!detail) return;
+  clearAnalysisVisualizations();
   detail.innerHTML = ''
     + '<div class="history-detail-empty">'
     + '<div class="empty-icon">📄</div>'
@@ -1559,12 +1575,14 @@ async function loadAndShowAnalysis(filename, callback, isCurrent) {
     } else {
       var detail = $('#history-detail');
       if (detail && (!isCurrent || isCurrent())) {
+        clearAnalysisVisualizations();
         detail.innerHTML = '<p class="hint">无法读取分析文件</p>';
       }
     }
   } catch (_) {
     var detail2 = $('#history-detail');
     if (detail2 && (!isCurrent || isCurrent())) {
+      clearAnalysisVisualizations();
       detail2.innerHTML = '<p class="hint">读取分析文件失败</p>';
     }
   }
@@ -1573,6 +1591,7 @@ async function loadAndShowAnalysis(filename, callback, isCurrent) {
 function renderAnalysisInDetail(company, code, period, year, content, source) {
   var detail = $('#history-detail');
   if (!detail) return;
+  clearAnalysisVisualizations();
   detail.classList.remove('hint');
 
   var isProgressive = Number(content.schema_version) >= 3;
@@ -1824,13 +1843,7 @@ async function sendHistoryQA(code, period) {
 function destroyAllCharts() {
   if (STATE.charts.revenue) { STATE.charts.revenue.destroy(); STATE.charts.revenue = null; }
   if (STATE.charts.ratio)   { STATE.charts.ratio.destroy();   STATE.charts.ratio = null; }
-  if (STATE.charts.visualizations) {
-    var visualizer = window.AnalysisVisualizations;
-    if (visualizer && typeof visualizer.destroy === 'function') {
-      window.AnalysisVisualizations.destroy(STATE.charts.visualizations);
-    }
-    STATE.charts.visualizations = null;
-  }
+  clearAnalysisVisualizations();
 }
 
 // ═══════════════════════════════════════════════════════════════

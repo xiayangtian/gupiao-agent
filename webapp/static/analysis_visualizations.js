@@ -126,16 +126,31 @@
     }).join('');
   }
 
+  function chartUnavailable(slot, canvas) {
+    var chartBox = canvas && canvas.parentNode;
+    var message = '<p class="analysis-visualization-chart-unavailable" role="status">图表组件不可用，已展示数据表</p>';
+    if (chartBox && typeof chartBox.innerHTML === 'string') {
+      chartBox.innerHTML = message;
+    } else if (canvas && typeof canvas.remove === 'function') {
+      canvas.remove();
+      if (slot && typeof slot.insertAdjacentHTML === 'function') slot.insertAdjacentHTML('afterbegin', message);
+    }
+  }
+
   function mount(container, visualizations, options) {
     var charts = new Map();
     var ChartClass = typeof globalThis !== 'undefined' ? globalThis.Chart : null;
-    if (!container || !container.querySelectorAll || !ChartClass || !visualizations || !Array.isArray(visualizations.cards)) return charts;
+    if (!container || !container.querySelectorAll || !visualizations || !Array.isArray(visualizations.cards)) return charts;
     var byId = {};
     visualizations.cards.forEach(function (card) { if (card && card.id) byId[card.id] = card; });
     container.querySelectorAll('.analysis-visualization-slot[data-visualization-card-id]').forEach(function (slot) {
       var card = byId[slot.getAttribute('data-visualization-card-id')];
       var canvas = slot.querySelector('canvas');
       if (!card || !canvas || card.status === 'unavailable') return;
+      if (!ChartClass) {
+        chartUnavailable(slot, canvas);
+        return;
+      }
       charts.set(card.id, new ChartClass(canvas, chartConfig(card)));
     });
     if (options && typeof options.onEvidencePage === 'function') {

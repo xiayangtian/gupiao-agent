@@ -72,6 +72,34 @@ def test_structure_visualization_configs_and_safe_fallbacks():
     }
 
 
+def test_structure_visualization_without_chartjs_removes_canvas_but_keeps_evidence_binding():
+    result = _run_node(
+        f"""
+        const visuals = require({json.dumps(str(VISUALIZATIONS_JS))});
+        delete global.Chart;
+        const chartBox = {{ innerHTML: '<canvas></canvas>' }};
+        const canvas = {{ parentNode: chartBox, remove: () => {{ throw new Error('should replace parent HTML'); }} }};
+        const evidenceButton = {{ dataset: {{ evidencePage: '12' }}, addEventListener: (_name, listener) => {{ evidenceButton.listener = listener; }} }};
+        const slot = {{ getAttribute: () => 'cash_flow_structure', querySelector: () => canvas }};
+        const container = {{ querySelectorAll: selector => selector.indexOf('slot') >= 0 ? [slot] : [evidenceButton] }};
+        let page = null;
+        const charts = visuals.mount(container, {{ version: 1, cards: [{{
+          id: 'cash_flow_structure', kind: 'cash_flow', status: 'partial', rows: [
+            {{ label: '经营', value: 1, unit: '亿元', direction: 'inflow' }},
+            {{ label: '投资', value: -1, unit: '亿元', direction: 'outflow' }}
+          ]
+        }}] }}, {{ onEvidencePage: value => page = value }});
+        evidenceButton.listener({{ stopPropagation: () => {{}} }});
+        console.log(JSON.stringify({{ charts: charts.size, chartBox: chartBox.innerHTML, page }}));
+        """
+    )
+    assert result == {
+        "charts": 0,
+        "chartBox": '<p class="analysis-visualization-chart-unavailable" role="status">图表组件不可用，已展示数据表</p>',
+        "page": 12,
+    }
+
+
 def test_structure_visualization_mounts_charts_and_binds_pdf_buttons():
     result = _run_node(
         f"""
