@@ -274,6 +274,7 @@ def _candidate_to_dict(candidate: InsightCandidate) -> dict[str, Any]:
         "evidence_ids": list(candidate.evidence_ids),
         "materiality_score": candidate.materiality_score,
         "clarity_score": candidate.clarity_score,
+        "tab_label": candidate.tab_label,
     }
 
 
@@ -282,6 +283,7 @@ def _candidate_from_dict(data: Mapping[str, Any]) -> InsightCandidate:
         str(data["candidate_id"]), str(data["title"]), str(data.get("summary", "")),
         tuple(data.get("interest_tags", ())), tuple(data.get("evidence_ids", ())),
         int(data.get("materiality_score", 0)), int(data.get("clarity_score", 0)),
+        data.get("tab_label", ""),
     )
 
 
@@ -311,6 +313,7 @@ def _section_to_dict(section: InsightSection) -> dict[str, Any]:
         ],
         "score": _score_to_dict(section.score),
         "verification_state": section.verification_state.value,
+        "tab_label": section.tab_label,
     }
 
 
@@ -325,6 +328,7 @@ def _section_from_dict(data: Mapping[str, Any]) -> InsightSection:
             str(item.get("risk_state", "neutral")), bool(item.get("has_disclosed_content", True)),
         ) for item in data.get("findings", ())),
         InsightScore(**score), VerificationState(data["verification_state"]),
+        data.get("tab_label", ""),
     )
 
 
