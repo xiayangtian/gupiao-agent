@@ -1,4 +1,4 @@
-"""渐进式财报分析 v3 结果对象、兼容读取与原子持久化。"""
+"""渐进式财报分析 v3/v4 结果对象、兼容读取与原子持久化。"""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from .evidence.models import (
     VerificationState,
 )
 from .insights import InsightCandidate, InsightFinding, InsightScore, InsightSection
+from .visualizations import VisualizationBundle
 
 
 @dataclass(frozen=True)
@@ -181,13 +182,14 @@ class AnalysisDocument:
     period: str = ""
     source_file: str = ""
     performance: dict[str, Any] = field(default_factory=dict)
+    visualizations: VisualizationBundle | None = None
 
     @property
     def legacy(self) -> bool:
         return False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "schema_version": self.schema_version,
             "analysis_id": self.analysis_id,
             "report_id": self.report_id,
@@ -212,15 +214,21 @@ class AnalysisDocument:
                 "source_file": self.source_file,
             },
         }
+        if self.schema_version == 4:
+            data["visualizations"] = (
+                None if self.visualizations is None else self.visualizations.to_dict()
+            )
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "AnalysisDocument":
-        if int(data.get("schema_version", 0)) != 3:
-            raise ValueError("不是受支持的 v3 分析文档")
+        schema_version = int(data.get("schema_version", 0))
+        if schema_version not in {3, 4}:
+            raise ValueError("不是受支持的 v3 或 v4 分析文档")
         meta = data.get("meta") if isinstance(data.get("meta"), Mapping) else {}
         summary = data.get("evidence_summary") or {}
         return cls(
-            schema_version=3,
+            schema_version=schema_version,
             analysis_id=str(data["analysis_id"]),
             report_id=str(data["report_id"]),
             interests=list(data.get("interests", ())),
@@ -242,6 +250,11 @@ class AnalysisDocument:
             period=str(meta.get("period", "")),
             source_file=str(meta.get("source_file", "")),
             performance=dict(data.get("performance") or {}),
+            visualizations=(
+                VisualizationBundle.from_dict(data["visualizations"])
+                if schema_version == 4 and isinstance(data.get("visualizations"), Mapping)
+                else None
+            ),
         )
 
 

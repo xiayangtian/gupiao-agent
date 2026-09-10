@@ -23,6 +23,11 @@ from financial_report_fetcher.evidence.models import (
 )
 from financial_report_fetcher.evidence.resolver import EvidenceResolver
 from financial_report_fetcher.evidence.structured import StructuredFetchResult
+from financial_report_fetcher.visualizations import (
+    VisualizationBundle,
+    VisualizationCard,
+    VisualizationRow,
+)
 from financial_report_fetcher.insights import (
     InsightCandidate,
     InsightFinding,
@@ -167,7 +172,35 @@ def test_document_catalog_persists_stable_evidence_display_metadata(tmp_path):
     assert reference["excerpt"] == "营业收入 100 元"
 
 
-def _pipeline(tmp_path):
+class FakeStructureVisualizer:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.calls = []
+
+    def analyze(self, records, period, topic_ids):
+        self.calls.append((records, period, topic_ids))
+        if self.fail:
+            raise RuntimeError("visualization failed")
+        topic_id = topic_ids["cash_flow_structure"]
+        return VisualizationBundle(version=1, cards=(VisualizationCard(
+            id="cash_flow_structure",
+            topic_id=topic_id,
+            title="现金流结构",
+            kind="cash_flow",
+            status="partial",
+            unavailable_reason=None,
+            rows=(
+                VisualizationRow(
+                    "operating_cash_flow", "经营活动现金流净额", 12.0, "亿元", "inflow", ("pdf",),
+                ),
+                VisualizationRow(
+                    "investing_cash_flow", "投资活动现金流净额", -3.0, "亿元", "outflow", ("pdf",),
+                ),
+            ),
+        ),))
+
+
+def _pipeline(tmp_path, structure_visualizer=None):
     analyzer = FakeInsightAnalyzer()
     planner = InsightPlanner(lambda records, interests: [
         {
@@ -190,6 +223,7 @@ def _pipeline(tmp_path):
         insight_scorer=InsightScorer(),
         quick_analyzer=FakeQuickAnalyzer(),
         insight_analyzer=analyzer,
+        structure_visualizer=structure_visualizer,
         output_dir=str(tmp_path),
         config=AnalysisConfig(detail_score_threshold=70),
     )
@@ -206,6 +240,50 @@ def _request():
         pdf_path="report.pdf",
         interests=("现金流",),
     )
+
+
+def test_pipeline_persists_visualizations_and_emits_ready_event(tmp_path):
+    visualizer = FakeStructureVisualizer()
+    pipeline, _ = _pipeline(tmp_path, structure_visualizer=visualizer)
+    events = []
+
+    result = pipeline.run(_request(), lambda kind, data: events.append((kind, data)), Event())
+
+    assert result.schema_version == 4
+    assert result.visualizations.cards[0].id == "cash_flow_structure"
+    assert any(name == "visualizations.ready" for name, _payload in events)
+    assert visualizer.calls[0][2]["cash_flow_structure"] in {
+        section.section_id for section in result.sections
+    }
+    assert load_analysis_document(tmp_path / "analysis-1.json").schema_version == 4
+
+
+def test_visualization_failure_does_not_interrupt_analysis(tmp_path):
+    pipeline, _ = _pipeline(tmp_path, structure_visualizer=FakeStructureVisualizer(fail=True))
+    events = []
+
+    result = pipeline.run(_request(), lambda kind, data: events.append((kind, data)), Event())
+
+    assert result.stage == "partial"
+    assert result.visualizations is None
+    assert any(error.code == "visualization_failed" for error in result.errors)
+    assert not any(name == "visualizations.ready" for name, _payload in events)
+    assert result.sections
+
+
+def test_visualization_topic_mapping_uses_dynamic_first_matching_detail(tmp_path):
+    pipeline, _ = _pipeline(tmp_path)
+    candidates = [
+        InsightCandidate("dynamic-first", "现金流质量", "经营活动现金流改善", (), (), 0, 0),
+        InsightCandidate("dynamic-second", "现金流风险", "筹资活动减少", (), (), 0, 0),
+        InsightCandidate("dynamic-profit", "盈利能力", "营业收入提升", (), (), 0, 0),
+        InsightCandidate("unmatched", "治理", "公司治理", (), (), 0, 0),
+    ]
+
+    assert pipeline.visualization_topic_ids(candidates) == {
+        "cash_flow_structure": "dynamic-first",
+        "profit_structure": "dynamic-profit",
+    }
 
 
 def test_quick_result_is_persisted_and_emitted_before_ocr_and_deep_sections(tmp_path):

@@ -46,6 +46,17 @@ _PARENT_SHEET_PATTERN = re.compile(
     r"母公司\s*(资产负债表|利润表|现金流量表|所有者权益变动表)"
 )
 
+_TOPIC_STRONG_KEYWORDS = {
+    "profit_structure": ("营业收入", "营业成本", "净利润", "利润总额", "毛利"),
+    "balance_sheet_structure": ("资产负债", "发放贷款", "客户存款"),
+    "cash_flow_structure": ("现金流", "经营活动", "投资活动", "筹资活动"),
+}
+_TOPIC_KEYWORDS = {
+    "profit_structure": ("收入", "营收", "盈利", "利润", "成本", "毛利"),
+    "balance_sheet_structure": ("资产负债", "资产", "负债", "权益", "资本", "贷款", "存款"),
+    "cash_flow_structure": ("现金流", "经营活动", "投资活动", "筹资活动"),
+}
+
 
 def _page_entity_scope(text: str) -> EntityScope:
     """从页面标题推断财报页主体：母公司报表页归母公司，其余归合并。"""
@@ -88,6 +99,7 @@ class ProgressiveAnalysisPipeline:
         insight_analyzer,
         output_dir: str,
         config: AnalysisConfig | None = None,
+        structure_visualizer=None,
     ):
         self.structured_gateway = structured_gateway
         self.document_extractor = document_extractor
@@ -97,6 +109,7 @@ class ProgressiveAnalysisPipeline:
         self.insight_scorer = insight_scorer
         self.quick_analyzer = quick_analyzer
         self.insight_analyzer = insight_analyzer
+        self.structure_visualizer = structure_visualizer
         self.output_dir = Path(output_dir)
         self.config = config or AnalysisConfig()
         self.quick_executor = ThreadPoolExecutor(
@@ -222,6 +235,32 @@ class ProgressiveAnalysisPipeline:
             source_file=request.pdf_path,
         )
 
+    @staticmethod
+    def visualization_topic_ids(
+        candidates: Sequence[InsightCandidate],
+    ) -> dict[str, str]:
+        """将动态主题按披露语义映射到结构卡片，不依赖候选 ID 或完整标题。"""
+        topic_ids: dict[str, str] = {}
+        for candidate in candidates:
+            text = "\n".join((
+                candidate.title,
+                candidate.summary,
+                *candidate.interest_tags,
+            )).casefold()
+            strong_matches = {
+                card_id for card_id, keywords in _TOPIC_STRONG_KEYWORDS.items()
+                if any(keyword.casefold() in text for keyword in keywords)
+            }
+            matches = strong_matches or {
+                card_id for card_id, keywords in _TOPIC_KEYWORDS.items()
+                if any(keyword.casefold() in text for keyword in keywords)
+            }
+            if len(matches) != 1:
+                continue
+            card_id = next(iter(matches))
+            topic_ids.setdefault(card_id, candidate.candidate_id)
+        return topic_ids
+
     def _rank(
         self,
         candidates: Sequence[InsightCandidate],
@@ -340,6 +379,15 @@ class ProgressiveAnalysisPipeline:
         evidence = {record.stable_id: record for record in resolved.records}
         candidates = self.insight_planner.plan(evidence, request.interests)
         ranked, scores = self._rank(candidates, resolved.records, request.interests)
+        visualization_future = None
+        topic_ids = self.visualization_topic_ids(ranked.details)
+        if self.structure_visualizer is not None and topic_ids:
+            visualization_future = self.deep_executor.submit(
+                self.structure_visualizer.analyze,
+                resolved.records,
+                request.period,
+                topic_ids,
+            )
         document.observations = list(ranked.observations)
         for candidate in ranked.filtered:
             score = scores[candidate.candidate_id]
@@ -388,6 +436,22 @@ class ProgressiveAnalysisPipeline:
                 if item["section_id"] == section.section_id
             )
             emit("section.ready", {"section": section_payload})
+
+        if visualization_future is not None:
+            try:
+                visualizations = visualization_future.result()
+            except Exception as exc:
+                document.errors.append(AnalysisError(
+                    "deep_processing", None, "visualization_failed", str(exc), True
+                ))
+            else:
+                if visualizations.cards:
+                    document.schema_version = 4
+                    document.visualizations = visualizations
+                    self._save(document, request)
+                    emit("visualizations.ready", {
+                        "visualizations": visualizations.to_dict(),
+                    })
 
         ocr_records, ocr_ms = ocr_future.result()
         document.performance["ocr_ms"] = ocr_ms

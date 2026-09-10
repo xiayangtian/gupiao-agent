@@ -459,6 +459,7 @@ def build_progressive_pipeline(
             ai_client, max_conclusions=resolved_config.max_quick_conclusions
         ),
         insight_analyzer=AiInsightAnalyzer(ai_client, scorer),
+        structure_visualizer=AiStructureVisualizer(ai_client),
         output_dir=output_dir,
         config=resolved_config,
     )
