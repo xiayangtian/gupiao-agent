@@ -79,7 +79,7 @@ def actual_app_url():
 @pytest.fixture
 def browser_session(actual_app_url):
     session = f"financial-visuals-{uuid.uuid4().hex}"
-    _run_browser(session, "open", actual_app_url)
+    _run_browser(session, "open", actual_app_url + "/#/analysis")
     try:
         yield session
     finally:
@@ -116,9 +116,53 @@ def _eval(session: str, script: str):
     return json.loads(result)
 
 
+def _data(session: str, command: str, *args: str) -> dict:
+    return (_run_browser(session, command, *args).get("data") or {})
+
+
+def _start_observing(session: str) -> None:
+    """清空缓冲，只观察本用例产生的 console/错误/网络事件。"""
+    _run_browser(session, "console", "--clear")
+    _run_browser(session, "errors", "--clear")
+    _run_browser(session, "network", "requests", "--clear")
+
+
+def _console_errors(session: str) -> list:
+    messages = _data(session, "console").get("messages") or []
+    return [message.get("text") for message in messages if message.get("type") == "error"]
+
+
+def _page_errors(session: str) -> list:
+    return _data(session, "errors").get("errors") or []
+
+
+def _failed_requests(session: str, origin: str) -> list:
+    requests = _data(session, "network", "requests").get("requests") or []
+    failed = []
+    for request in requests:
+        url = request.get("url") or ""
+        status = request.get("status")
+        if not url.startswith(origin) or not isinstance(status, int):
+            continue
+        if url.endswith("/favicon.ico"):
+            continue  # 应用未提供 favicon，与财务结构可视化无关
+        if not 200 <= status < 400:
+            failed.append({"url": url, "status": status})
+    return failed
+
+
+def _cash_flow_card(topic_id: str = 'cash') -> str:
+    return """
+    {id: 'cash_flow_structure', topic_id: '%s', title: '现金流结构', kind: 'cash_flow', status: 'partial', rows: [
+      {metric_id: 'operating_cash_flow', label: '经营活动现金流净额', value: 22, unit: '亿元', direction: 'inflow', evidence_ids: ['pdf']},
+      {metric_id: 'investing_cash_flow', label: '投资活动现金流净额', value: -8, unit: '亿元', direction: 'outflow', evidence_ids: ['pdf']}
+    ]}""" % topic_id
+
+
 def _visualization_script() -> str:
     return """
 (() => {
+  const routeVisible = !document.querySelector('#page-analysis').classList.contains('hidden');
   const catalog = {pdf: {source_type: 'pdf_text', source_locator: {page: 12}}};
   const cards = [
     {id: 'profit_structure', topic_id: 'profit', title: '利润结构', kind: 'profit', status: 'complete', rows: [
@@ -143,34 +187,115 @@ def _visualization_script() -> str:
   let evidencePage = null;
   AnalysisVisualizations.mount(root, {version: 1, cards}, {onEvidencePage(page) { evidencePage = page; }});
   root.querySelector('.analysis-visualization-evidence').click();
+  const chartBox = root.querySelector('.analysis-visualization-chart').getBoundingClientRect();
+  const wrap = root.querySelector('.analysis-visualization-table-wrap');
   return JSON.stringify({
+    routeVisible,
     headings: Array.from(root.querySelectorAll('h3')).map(node => node.textContent),
     tables: root.querySelectorAll('table').length,
     canvases: root.querySelectorAll('canvas').length,
     unavailableCanvas: root.querySelector('[aria-label="暂不可用结构"]').querySelectorAll('canvas').length,
     evidencePage,
+    chartBoxWidth: Math.round(chartBox.width),
+    chartBoxHeight: Math.round(chartBox.height),
+    tableFitsWrapper: wrap.scrollWidth <= wrap.clientWidth + 1,
     overflow: document.documentElement.scrollWidth > window.innerWidth
   });
 })()
 """
 
 
+def _route_remount_script() -> str:
+    return """
+(() => {
+  const catalog = {pdf: {source_type: 'pdf_text', source_locator: {page: 12}}};
+  const section = {section_id: 'cash', title: '现金流', findings: [{content: '正文', evidence_ids: []}]};
+  const v4 = {schema_version: 4, stage: 'completed', activeTab: 'cash', quick: {conclusions: []},
+    sections: [section], evidence_catalog: catalog, visualizations: {version: 1, cards: [%s]}};
+  STATE.selected = {code: '600900', name: '长江电力'};
+  STATE.selectedReport = {period: '2026-06-30'};
+  STATE.analysisCache['600900:2026-06-30'] = {status: 'done', data: v4};
+  const mounted = () => {
+    const canvas = document.querySelector('#analyze-result canvas');
+    return !!(canvas && window.Chart && window.Chart.getChart(canvas));
+  };
+  renderAnalysisPanel('600900:2026-06-30');
+  const beforeLeave = mounted();
+  window.location.hash = '#/home';
+  handleRoute();
+  const afterLeave = mounted();
+  window.location.hash = '#/analysis';
+  handleRoute();
+  return JSON.stringify({
+    mountedBeforeLeave: beforeLeave,
+    mountedAfterLeave: afterLeave,
+    mountedAfterReturn: mounted(),
+    routeVisible: !document.querySelector('#page-analysis').classList.contains('hidden')
+  });
+})()
+""" % _cash_flow_card()
+
+
+def _history_remount_script() -> str:
+    return """
+(async () => {
+  const catalog = {pdf: {source_type: 'pdf_text', source_locator: {page: 12}}};
+  const section = {section_id: 'cash', title: '现金流', findings: [{content: '正文', evidence_ids: []}]};
+  const v4 = {schema_version: 4, stage: 'completed', activeTab: 'cash', quick: {conclusions: []},
+    sections: [section], evidence_catalog: catalog, visualizations: {version: 1, cards: [%s]}};
+  const item = {code: '600900', period: '2026-06-30', company: '长江电力', year: '2026',
+                type: '半年报', has_analysis: true, analysis_filename: '600900.json', pdf_filename: '600900.pdf'};
+  STATE.historySelected = item;
+  renderAnalysisInDetail('长江电力', '600900', '2026-06-30', '2026', v4, 'fixture');
+  const mounted = () => {
+    const canvas = document.querySelector('#history-detail canvas');
+    return !!(canvas && window.Chart && window.Chart.getChart(canvas));
+  };
+  const beforeLeave = mounted();
+  window.location.hash = '#/home';
+  handleRoute();
+  const afterLeave = mounted();
+  window.location.hash = '#/history';
+  handleRoute();
+  const deadline = Date.now() + 5000;
+  while (!mounted() && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  return JSON.stringify({
+    mountedBeforeLeave: beforeLeave,
+    mountedAfterLeave: afterLeave,
+    mountedAfterReturn: mounted()
+  });
+})()
+""" % _cash_flow_card()
+
+
 @pytest.mark.parametrize("viewport", [(1280, 800), (768, 900), (390, 844)])
-def test_v4_visualizations_render_in_actual_application(browser_session, viewport):
+def test_v4_visualizations_render_in_actual_application(browser_session, actual_app_url, viewport):
     """默认 pytest 在 agent-browser 可用时真实访问应用，并验证桌面到手机布局。"""
     _run_browser(browser_session, "set", "viewport", str(viewport[0]), str(viewport[1]))
+    _run_browser(browser_session, "open", f"{actual_app_url}/#/analysis")
+    _start_observing(browser_session)
+
     rendered = _eval(browser_session, _visualization_script())
 
+    assert rendered["routeVisible"] is True, "必须路由到真实分析页，隐藏容器量不出布局"
     assert rendered["headings"] == ["利润结构", "资产负债结构", "现金流结构", "暂不可用结构"]
     assert rendered["tables"] == 3
     assert rendered["canvases"] == 3
     assert rendered["unavailableCanvas"] == 0
     assert rendered["evidencePage"] == 12
+    assert rendered["chartBoxWidth"] > 0 and rendered["chartBoxHeight"] > 0
+    assert rendered["tableFitsWrapper"] is True
     assert not rendered["overflow"]
+    assert _console_errors(browser_session) == []
+    assert _page_errors(browser_session) == []
+    assert _failed_requests(browser_session, actual_app_url) == []
 
 
-def test_actual_app_lifecycle_mounts_v4_routes_pdf_and_cleans_up_for_v3(browser_session):
+def test_actual_app_lifecycle_mounts_v4_routes_pdf_and_cleans_up_for_v3(browser_session, actual_app_url):
     """真实 app.js 主/历史路径必须支持 v4，并在切回 v3 时回收图表。"""
+    _run_browser(browser_session, "open", f"{actual_app_url}/#/analysis")
     rendered = _eval(browser_session, """
 (() => {
   const catalog = {pdf: {source_type: 'pdf_text', source_locator: {page: 12}}};
@@ -207,3 +332,26 @@ def test_actual_app_lifecycle_mounts_v4_routes_pdf_and_cleans_up_for_v3(browser_
     assert "?jump=" in rendered["historyPdf"]
     assert rendered["legacy"] is True
     assert rendered["oldCanvas"] is False
+
+
+def test_returning_to_the_analysis_route_remounts_visualization_charts(browser_session, actual_app_url):
+    """切页会销毁 Chart 实例，返回分析页必须重新渲染并重新挂载，不能留下空画布。"""
+    _run_browser(browser_session, "open", f"{actual_app_url}/#/analysis")
+
+    rendered = _eval(browser_session, _route_remount_script())
+
+    assert rendered["mountedBeforeLeave"] is True
+    assert rendered["mountedAfterLeave"] is False
+    assert rendered["mountedAfterReturn"] is True
+    assert rendered["routeVisible"] is True
+
+
+def test_returning_to_the_history_route_remounts_visualization_charts(browser_session, actual_app_url):
+    """历史详情返回时同样要重建图表实例。"""
+    _run_browser(browser_session, "open", f"{actual_app_url}/#/analysis")
+
+    rendered = _eval(browser_session, _history_remount_script())
+
+    assert rendered["mountedBeforeLeave"] is True
+    assert rendered["mountedAfterLeave"] is False
+    assert rendered["mountedAfterReturn"] is True

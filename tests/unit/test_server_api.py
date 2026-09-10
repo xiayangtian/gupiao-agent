@@ -1840,6 +1840,24 @@ class TestIndexCache:
         assert body.index(workflow_src) < body.index(app_src)
         assert body.index(chat_rendering_src) < body.index(app_src)
 
+    def test_asset_version_tracks_the_structure_visualization_script(self, client, monkeypatch):
+        """结构图脚本必须计入版本号，否则浏览器会继续用旧缓存。"""
+        import webapp.server as server
+
+        newest = 2_000_000_000
+        real_getmtime = os.path.getmtime
+        visualization_asset = os.path.join(server.STATIC_DIR, "analysis_visualizations.js")
+
+        def fake_getmtime(path):
+            if path == visualization_asset:
+                return newest
+            return real_getmtime(path)
+
+        monkeypatch.setattr(os.path, "getmtime", fake_getmtime)
+        body = client.get("/").text
+
+        assert "/static/analysis_visualizations.js?v=%d" % newest in body
+
 
 class TestHealthStartedAt:
     def test_health_includes_started_at(self, client):

@@ -107,15 +107,15 @@ function handleRoute() {
     link.classList.toggle('active', link.getAttribute('href') === hash);
   });
 
+  // 图表实例挂在页面容器内，离开前先回收，返回时由页面初始化重新渲染并挂载。
+  destroyAllCharts();
+
   // Page init
   if (page === 'home') initHomePage();
   if (page === 'analysis') initAnalysisPage();
   if (page === 'history') initHistoryPage();
   if (page === 'rag') initRagPage();
   if (page === 'chat') initChatPage();
-
-  // Cleanup charts on leave
-  destroyAllCharts();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -261,6 +261,9 @@ async function initAnalysisPage() {
       STATE.analysisRestoreStarted = true;
       await restoreAnalysisSelection(active[active.length - 1]);
     }
+  } else if (STATE.selected && STATE.selectedReport) {
+    // 切页已销毁图表实例，返回时必须按当前选择重新渲染并重新挂载。
+    renderAnalysisPanel(analysisKey(STATE.selected.code, STATE.selectedReport.period));
   }
 }
 
@@ -1236,7 +1239,16 @@ async function initHistoryPage() {
   if (list) list.innerHTML = '<p class="hint">正在读取本地数据…</p>';
   await loadHistoryItems();
   bindHistoryFilters();
-  await window.AnalysisWorkflow.openPendingHistoryReport(STATE, selectHistoryItem);
+  var opened = await window.AnalysisWorkflow.openPendingHistoryReport(STATE, selectHistoryItem);
+  if (!opened) reRenderSelectedHistoryDetail();
+}
+
+// 切页会销毁图表实例，返回历史页时按当前选中项重建详情与图表。
+function reRenderSelectedHistoryDetail() {
+  var item = STATE.historySelected;
+  if (!item) return;
+  if (renderHistoryAnalysisState(item)) return;
+  if (!item.has_analysis) showHistoryNoAnalysis(item);
 }
 
 async function loadHistoryItems() {

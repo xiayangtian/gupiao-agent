@@ -76,6 +76,30 @@ class FakeExtractor:
         )
 
 
+class CellExtractor:
+    """返回带定位表头的报表页，使管线只能从本期列产生单元格证据。"""
+
+    def extract(self, pdf_path, report_id):
+        return DocumentExtraction(
+            report_id=report_id,
+            pdf_hash="b" * 64,
+            pages=(DocumentPage(
+                1, "合并现金流量表", 9, 0, 0.5, 0.5, 0.9, False,
+                fragments=(
+                    DocumentTextFragment("项目", 80, 700),
+                    DocumentTextFragment("2025年12月31日 本期", 300, 700),
+                    DocumentTextFragment("上期", 330, 700),
+                    DocumentTextFragment("经营活动现金流净额", 80, 680),
+                    DocumentTextFragment("100", 300, 680),
+                    DocumentTextFragment("90", 330, 680),
+                    DocumentTextFragment("投资活动现金流净额", 80, 660),
+                    DocumentTextFragment("50", 300, 660),
+                    DocumentTextFragment("40", 330, 660),
+                ),
+            ),),
+        )
+
+
 class FakeOcr:
     def __init__(self):
         self.calls = []
@@ -141,10 +165,10 @@ def test_pdf_records_assign_entity_scope_from_statement_page_title():
     ]
 
 
-def test_pdf_records_only_create_current_period_cell_evidence_from_positioned_header():
-    extraction = DocumentExtraction(
+def _positioned_current_period_extraction(pdf_hash: str) -> DocumentExtraction:
+    return DocumentExtraction(
         report_id="600900:2025-12-31:annual",
-        pdf_hash="d" * 64,
+        pdf_hash=pdf_hash,
         pages=(DocumentPage(
             1, "合并现金流量表", 7, 0, 0.5, 0.5, 0.9, False,
             fragments=(
@@ -158,29 +182,133 @@ def test_pdf_records_only_create_current_period_cell_evidence_from_positioned_he
             ),
         ),),
     )
-    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
-    cells = [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+
+
+def test_visualization_cell_evidence_comes_only_from_the_positioned_current_period_column():
+    extraction = _positioned_current_period_extraction("d" * 64)
+
+    cells = ProgressiveAnalysisPipeline.visualization_cell_records(extraction, "2025-12-31")
+
     assert len(cells) == 1
     assert "100" in cells[0].text
     assert "90" not in cells[0].text  # 上期列绝不进入本期单元格证据上下文。
     assert "—" not in cells[0].text
     assert "经营活动现金流净额" in cells[0].text
     assert cells[0].source_locator.bbox is not None
+
+
+def test_page_level_pdf_evidence_cannot_back_structure_visualization_rows():
+    """整页文本没有本期列坐标，绝不能作为结构图数据行的证据。"""
+    extraction = _positioned_current_period_extraction("d" * 64)
+    pages = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
+
+    assert [record.fact_name for record in pages] == ["pdf_page_1"]
+    assert not [
+        record for record in pages if record.raw_field_name == "current_period_pdf_cell"
+    ]
     rejected = validate_visualization_payload(
         {"cards": [{
             "id": "cash_flow_structure", "topic_id": "cash", "title": "现金流结构",
             "kind": "cash_flow", "rows": [
                 {"metric_id": "operating_cash_flow", "label": "经营活动现金流净额",
                  "value": 1, "unit": "亿元", "direction": "inflow",
-                 "evidence_ids": [records[0].stable_id]},
+                 "evidence_ids": [pages[0].stable_id]},
                 {"metric_id": "investing_cash_flow", "label": "投资活动现金流净额",
                  "value": -1, "unit": "亿元", "direction": "outflow",
-                 "evidence_ids": [records[0].stable_id]},
+                 "evidence_ids": [pages[0].stable_id]},
             ],
         }]},
-        period="2025-12-31", allowed_pdf_evidence={record.stable_id: record for record in records},
+        period="2025-12-31", allowed_pdf_evidence={record.stable_id: record for record in pages},
     )
     assert rejected.cards[0].status == "unavailable"
+
+
+def test_current_period_cells_never_cross_into_the_next_statement_table():
+    """同页相邻报表的数据行只能归最近的上方表头，且表头行本身不是数据行。"""
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual",
+        pdf_hash="7" * 64,
+        pages=(DocumentPage(
+            1, "合并现金流量表", 7, 0, 0.5, 0.5, 0.9, False,
+            fragments=(
+                DocumentTextFragment("项目", 80, 700),
+                DocumentTextFragment("2025年12月31日 本期", 300, 700),
+                DocumentTextFragment("上期", 330, 700),
+                DocumentTextFragment("经营活动现金流净额", 80, 680),
+                DocumentTextFragment("100", 300, 680),
+                DocumentTextFragment("90", 330, 680),
+                DocumentTextFragment("项目", 80, 600),
+                DocumentTextFragment("2025年12月31日 本期", 300, 600),
+                DocumentTextFragment("上期", 330, 600),
+                DocumentTextFragment("投资活动现金流净额", 80, 580),
+                DocumentTextFragment("555", 300, 580),
+                DocumentTextFragment("444", 330, 580),
+            ),
+        ),),
+    )
+
+    cells = ProgressiveAnalysisPipeline.visualization_cell_records(extraction, "2025-12-31")
+
+    assert len(cells) == 2
+    operation = [cell for cell in cells if "经营活动现金流净额" in cell.text]
+    investment = [cell for cell in cells if "投资活动现金流净额" in cell.text]
+    assert len(operation) == 1 and len(investment) == 1
+    assert "555" not in operation[0].text
+    assert "100" in operation[0].text
+    assert investment[0].source_locator.bbox[3] == 600
+
+
+def test_row_label_column_left_edge_uses_the_known_table_column():
+    """行名列左边界来自表格已知最左列，不能反射列宽把表格左侧标记并入行名。"""
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual",
+        pdf_hash="8" * 64,
+        pages=(DocumentPage(
+            1, "合并利润表", 6, 0, 0.5, 0.5, 0.9, False,
+            fragments=(
+                DocumentTextFragment("项目", 80, 700),
+                DocumentTextFragment("本期", 300, 700),
+                DocumentTextFragment("上期", 330, 700),
+                DocumentTextFragment("*", 20, 680),
+                DocumentTextFragment("营业收入", 80, 680),
+                DocumentTextFragment("100", 300, 680),
+                DocumentTextFragment("90", 330, 680),
+            ),
+        ),),
+    )
+
+    cells = ProgressiveAnalysisPipeline.visualization_cell_records(extraction, "2025-12-31")
+
+    assert len(cells) == 1
+    assert "营业收入" in cells[0].text
+    assert "100" in cells[0].text
+    assert "*" not in cells[0].text
+
+
+def test_current_period_header_matches_unpadded_chinese_dates():
+    """表头写成“2025年6月30日”时也必须归一到报告期，不能静默丢失覆盖。"""
+    extraction = DocumentExtraction(
+        report_id="600900:2025-06-30:semi_annual",
+        pdf_hash="9" * 64,
+        pages=(DocumentPage(
+            1, "合并利润表", 6, 0, 0.5, 0.5, 0.9, False,
+            fragments=(
+                DocumentTextFragment("项目", 80, 700),
+                DocumentTextFragment("2025年6月30日", 300, 700),
+                DocumentTextFragment("2024年6月30日", 330, 700),
+                DocumentTextFragment("营业收入", 80, 680),
+                DocumentTextFragment("100", 300, 680),
+                DocumentTextFragment("90", 330, 680),
+            ),
+        ),),
+    )
+
+    cells = ProgressiveAnalysisPipeline.visualization_cell_records(extraction, "2025-06-30")
+
+    assert len(cells) == 1
+    assert cells[0].period == "2025-06-30"
+    assert "100" in cells[0].text
+    assert "90" not in cells[0].text
 
 
 def test_current_period_evidence_excludes_prior_numeric_column_left_of_current_column():
@@ -203,8 +331,7 @@ def test_current_period_evidence_excludes_prior_numeric_column_left_of_current_c
         ),),
     )
 
-    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
-    cells = [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+    cells = ProgressiveAnalysisPipeline.visualization_cell_records(extraction, "2025-12-31")
 
     assert len(cells) == 1
     assert "营业收入" in cells[0].text
@@ -231,8 +358,7 @@ def test_current_period_evidence_is_not_created_without_recognized_row_label_geo
         ),),
     )
 
-    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
-    assert not [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+    assert not ProgressiveAnalysisPipeline.visualization_cell_records(extraction, "2025-12-31")
 
 
 def test_current_period_evidence_rejects_row_number_as_financial_label():
@@ -255,8 +381,7 @@ def test_current_period_evidence_rejects_row_number_as_financial_label():
         ),),
     )
 
-    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
-    assert not [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+    assert not ProgressiveAnalysisPipeline.visualization_cell_records(extraction, "2025-12-31")
 
 
 def test_pdf_records_without_positioned_current_period_header_do_not_create_visualization_evidence():
@@ -264,8 +389,7 @@ def test_pdf_records_without_positioned_current_period_header_do_not_create_visu
         report_id="600900:2025-12-31:annual", pdf_hash="e" * 64,
         pages=(DocumentPage(1, "合并现金流量表\\n本期 100 上期 90", 20, 0, 0.5, 0.5, 0.9, False),),
     )
-    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
-    assert not [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+    assert not ProgressiveAnalysisPipeline.visualization_cell_records(extraction, "2025-12-31")
 
 
 def test_pdf_records_resolve_to_single_source_when_scope_is_known():
@@ -335,8 +459,63 @@ class FakeStructureVisualizer:
         ),))
 
 
-def _pipeline(tmp_path, structure_visualizer=None):
-    analyzer = FakeInsightAnalyzer()
+class RecordingQuickAnalyzer(FakeQuickAnalyzer):
+    def __init__(self):
+        self.record_sets = []
+
+    def analyze(self, records, interests):
+        self.record_sets.append(list(records))
+        return super().analyze(records, interests)
+
+
+class RecordingInsightAnalyzer(FakeInsightAnalyzer):
+    def __init__(self):
+        super().__init__()
+        self.record_sets = []
+
+    def analyze(self, candidate, records, interests):
+        self.record_sets.append(list(records))
+        return super().analyze(candidate, records, interests)
+
+
+class ReferencingStructureVisualizer:
+    """只引用传入单元格证据的结构图实现，用于验证目录写入范围。"""
+
+    def __init__(self, row_evidence_index=0):
+        self.row_evidence_index = row_evidence_index
+        self.calls = []
+
+    def analyze(self, records, period, topic_ids):
+        self.calls.append(list(records))
+        evidence_id = records[self.row_evidence_index].stable_id
+        return VisualizationBundle(version=1, cards=(VisualizationCard(
+            id="cash_flow_structure",
+            topic_id=topic_ids["cash_flow_structure"],
+            title="现金流结构",
+            kind="cash_flow",
+            status="partial",
+            unavailable_reason=None,
+            rows=(
+                VisualizationRow(
+                    "operating_cash_flow", "经营活动现金流净额", 12.0, "亿元", "inflow",
+                    (evidence_id,),
+                ),
+                VisualizationRow(
+                    "investing_cash_flow", "投资活动现金流净额", -3.0, "亿元", "outflow",
+                    (evidence_id,),
+                ),
+            ),
+        ),))
+
+
+def _pipeline(
+    tmp_path,
+    structure_visualizer=None,
+    extractor=None,
+    quick_analyzer=None,
+    insight_analyzer=None,
+):
+    analyzer = insight_analyzer or FakeInsightAnalyzer()
     planner = InsightPlanner(lambda records, interests: [
         {
             "candidate_id": item,
@@ -351,12 +530,12 @@ def _pipeline(tmp_path, structure_visualizer=None):
     ])
     pipeline = ProgressiveAnalysisPipeline(
         structured_gateway=FakeGateway(),
-        document_extractor=FakeExtractor(),
+        document_extractor=extractor or FakeExtractor(),
         ocr_engine=FakeOcr(),
         resolver=EvidenceResolver(),
         insight_planner=planner,
         insight_scorer=InsightScorer(),
-        quick_analyzer=FakeQuickAnalyzer(),
+        quick_analyzer=quick_analyzer or FakeQuickAnalyzer(),
         insight_analyzer=analyzer,
         structure_visualizer=structure_visualizer,
         output_dir=str(tmp_path),
@@ -435,6 +614,55 @@ def test_visualization_topic_mapping_uses_dynamic_first_matching_detail(tmp_path
         "cash_flow_structure": "dynamic-first",
         "profit_structure": "dynamic-profit",
     }
+
+
+def test_current_period_cells_are_sampled_only_by_the_structure_visualizer(tmp_path):
+    """单元格证据只服务结构图：快速结论与主题 AI 的证据采样不得引入表格行。"""
+    quick = RecordingQuickAnalyzer()
+    analyzer = RecordingInsightAnalyzer()
+    visualizer = ReferencingStructureVisualizer()
+    pipeline, _ = _pipeline(
+        tmp_path,
+        structure_visualizer=visualizer,
+        extractor=CellExtractor(),
+        quick_analyzer=quick,
+        insight_analyzer=analyzer,
+    )
+
+    pipeline.run(_request(), lambda kind, data: None, Event())
+
+    assert quick.record_sets and analyzer.record_sets
+    for records in [*quick.record_sets, *analyzer.record_sets]:
+        assert not [
+            record for record in records
+            if record.raw_field_name == "current_period_pdf_cell"
+        ]
+    assert [
+        record.raw_field_name for record in visualizer.calls[0]
+    ] == ["current_period_pdf_cell", "current_period_pdf_cell"]
+
+
+def test_evidence_catalog_only_gains_cells_referenced_by_validated_rows(tmp_path):
+    """未被卡片行引用的单元格不得进入目录，避免无用的表格证据膨胀。"""
+    visualizer = ReferencingStructureVisualizer(row_evidence_index=0)
+    pipeline, _ = _pipeline(
+        tmp_path, structure_visualizer=visualizer, extractor=CellExtractor()
+    )
+
+    result = pipeline.run(_request(), lambda kind, data: None, Event())
+
+    cells = visualizer.calls[0]
+    assert len(cells) == 2
+    referenced, unreferenced = cells[0], cells[1]
+    catalog = result.to_dict()["evidence_catalog"]
+    cell_entries = [
+        evidence_id for evidence_id, reference in catalog.items()
+        if reference["fact_name"].startswith("pdf_current_period_cell")
+    ]
+    assert cell_entries == [referenced.stable_id]
+    assert catalog[referenced.stable_id]["source_type"] == "pdf_text"
+    assert catalog[referenced.stable_id]["source_locator"]["page"] == 1
+    assert unreferenced.stable_id not in catalog
 
 
 def test_quick_result_is_persisted_and_emitted_before_ocr_and_deep_sections(tmp_path):

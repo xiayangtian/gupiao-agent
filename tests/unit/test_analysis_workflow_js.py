@@ -751,6 +751,23 @@ def test_analysis_event_reducer_merges_visualizations_ready_payload():
     }
 
 
+def test_route_change_remounts_visualizations_instead_of_leaving_dead_canvases():
+    """切页会销毁图表实例，因此返回分析/历史页必须重新渲染并重新挂载。"""
+    source = APP_JS.read_text(encoding="utf-8")
+    route = source[source.index("function handleRoute()"):source.index("async function loadHealth")]
+    analysis = source[
+        source.index("async function initAnalysisPage()"):source.index("async function restoreAnalysisSelection")
+    ]
+    history = source[
+        source.index("async function initHistoryPage()"):source.index("async function loadHistoryItems")
+    ]
+
+    assert route.index("destroyAllCharts();") < route.index("if (page === 'analysis') initAnalysisPage();")
+    assert "renderAnalysisPanel(analysisKey(STATE.selected.code, STATE.selectedReport.period));" in analysis
+    assert "reRenderSelectedHistoryDetail()" in history
+    assert "if (renderHistoryAnalysisState(item)) return;" in source
+
+
 def test_v2_history_dimension_panels_offer_the_same_reanalysis_hint():
     """旧 v2 维度正文也应提示重新分析，而不创建图表或自动重分析。"""
     source = APP_JS.read_text(encoding="utf-8")

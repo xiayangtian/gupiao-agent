@@ -30,6 +30,7 @@ from .evidence.models import (
     SourceType,
     VerificationState,
 )
+from .visualizations import VisualizationBundle
 from .insights import (
     InsightCandidate,
     InsightScorer,
@@ -47,6 +48,9 @@ _PARENT_SHEET_PATTERN = re.compile(
 )
 _CURRENT_PERIOD_CELL_FIELD = "current_period_pdf_cell"
 _NUMERIC_CELL_PATTERN = re.compile(r"[-−]?\d[\d,，]*(?:\.\d+)?")
+_PERIOD_NUMBER_PATTERN = re.compile(r"\d+")
+# 表头与数据行的最大垂直距离，避免跨页/跨大段空白误配。
+_MAX_HEADER_ROW_DISTANCE = 500
 # 只有这些明确的报表表头才可定义行名列。没有可识别的标签列时宁可不生成
 # 结构图证据，也不能把本期列左侧的上期/附注列误传给模型。
 _ROW_LABEL_HEADERS = frozenset({"项目", "项目名称", "科目"})
@@ -68,6 +72,22 @@ def _page_entity_scope(text: str) -> EntityScope:
     if _PARENT_SHEET_PATTERN.search(text):
         return EntityScope.PARENT
     return EntityScope.CONSOLIDATED
+
+
+def _normalized_period_digits(text: str) -> str:
+    """把 2025年6月30日 / 2025-06-30 / 2025/6/30 归一到可比较的数字串。"""
+    groups = _PERIOD_NUMBER_PATTERN.findall(text or "")
+    if not groups:
+        return ""
+    parts = [groups[0].zfill(4)]
+    parts.extend(group.zfill(2) for group in groups[1:3])
+    return "".join(parts)
+
+
+def _nearest_header_row_above(row: int, header_rows: set[int]) -> int | None:
+    """PDF 纵坐标向上增长：最近的上方表头行是大于该行的最小值。"""
+    candidates = [header_row for header_row in header_rows if header_row > row]
+    return min(candidates) if candidates else None
 
 
 @dataclass(frozen=True)
@@ -142,6 +162,7 @@ class ProgressiveAnalysisPipeline:
 
     @staticmethod
     def pdf_records(extracted, period: str) -> list[EvidenceRecord]:
+        """页面级 PDF 文本证据；快速结论与主题 AI 只采样这里的内容。"""
         records: list[EvidenceRecord] = []
         for page in extracted.pages:
             text = page.text.strip()
@@ -150,10 +171,9 @@ class ProgressiveAnalysisPipeline:
             digest = hashlib.sha256(
                 f"{extracted.pdf_hash}:{page.page_number}:{text}".encode("utf-8")
             ).hexdigest()
-            scope = _page_entity_scope(text)
             records.append(EvidenceRecord(
                 report_id=extracted.report_id,
-                entity_scope=scope,
+                entity_scope=_page_entity_scope(text),
                 fact_name=f"pdf_page_{page.page_number}",
                 value=None,
                 unit=None,
@@ -169,11 +189,23 @@ class ProgressiveAnalysisPipeline:
                 parser_version=extracted.parser_version,
                 text=text,
             ))
-            if scope is EntityScope.CONSOLIDATED:
-                records.extend(ProgressiveAnalysisPipeline._current_period_cell_records(
-                    extracted, page, period
-                ))
         return records
+
+    @classmethod
+    def visualization_cell_records(cls, extracted, period: str) -> list[EvidenceRecord]:
+        """结构图专用的本期单元格证据，只传给结构抽取器。
+
+        表格行证据既不适合作为通用分析证据，也会稀释快速/主题 AI 的
+        文本采样，因此与页面级证据分开产出。
+        """
+        unique: dict[str, EvidenceRecord] = {}
+        for page in extracted.pages:
+            text = page.text.strip()
+            if not text or _page_entity_scope(text) is not EntityScope.CONSOLIDATED:
+                continue
+            for record in cls._current_period_cell_records(extracted, page, period):
+                unique.setdefault(record.stable_id, record)
+        return list(unique.values())
 
     @staticmethod
     def _current_period_cell_records(extracted, page, period: str) -> list[EvidenceRecord]:
@@ -181,7 +213,7 @@ class ProgressiveAnalysisPipeline:
         fragments = tuple(getattr(page, "fragments", ()) or ())
         if not fragments:
             return []
-        target = re.sub(r"\D", "", period)
+        target = _normalized_period_digits(period)
         lines: dict[int, list[Any]] = {}
         for fragment in fragments:
             text = getattr(fragment, "text", "")
@@ -191,12 +223,20 @@ class ProgressiveAnalysisPipeline:
         headers = [
             (fragment, sorted(line, key=lambda item: float(item.x)))
             for line in lines.values() for fragment in line
-            if ("本期" in fragment.text or target in re.sub(r"\D", "", fragment.text))
+            if "本期" in fragment.text
+            or (target and _normalized_period_digits(fragment.text) == target)
         ]
         if not headers:
             return []
+        # 表头行本身不是数据行；同一页存在多张报表时，数据行只能归
+        # 最近的上方表头，不能跨越中间表头行绑定到上一张报表。
+        header_rows = {round(float(header.y) / 2) for header, _line in headers}
+        nearest_header_row = {
+            row: _nearest_header_row_above(row, header_rows) for row in lines
+        }
         records: list[EvidenceRecord] = []
         for header, header_line in headers:
+            header_row = round(float(header.y) / 2)
             # 两个相邻表头的中点才是可审计的列边界。没有左右边界（例如
             # PDF 只提取到一个日期表头）或表头坐标重叠时，绝不猜测列宽。
             try:
@@ -220,9 +260,11 @@ class ProgressiveAnalysisPipeline:
                 continue
             header_y = float(header.y)
             for line_y, line in lines.items():
+                if line_y in header_rows or nearest_header_row[line_y] != header_row:
+                    continue
                 # PDF 坐标向上增长：表头下方的数据行 y 必须更小，且限制在合理距离内。
                 y = line_y * 2
-                if not 0 < header_y - y <= 500:
+                if not 0 < header_y - y <= _MAX_HEADER_ROW_DISTANCE:
                     continue
                 cells = [
                     fragment for fragment in line
@@ -241,20 +283,23 @@ class ProgressiveAnalysisPipeline:
                 label_index, label_header = label_headers[0]
                 if label_index == len(header_line) - 1:
                     continue
-                next_label_column = header_line[label_index + 1]
                 label_x = float(label_header.x)
-                next_label_x = float(next_label_column.x)
+                next_label_x = float(header_line[label_index + 1].x)
                 if not label_x < next_label_x:
                     continue
-                label_half_width = (next_label_x - label_x) / 2
-                label_left_boundary = label_x - label_half_width
-                label_right_boundary = label_x + label_half_width
-                if not label_left_boundary < label_x < label_right_boundary:
+                # 行名列左边界取表格已知最左列（或与左侧已知列的中点），
+                # 不能用反射列宽猜测，否则表格左侧的标记会被并入行名。
+                label_left_boundary = (
+                    label_x if label_index == 0
+                    else (float(header_line[label_index - 1].x) + label_x) / 2
+                )
+                label_right_boundary = (label_x + next_label_x) / 2
+                if not label_left_boundary <= label_x < label_right_boundary:
                     continue
 
                 label_cells = [
                     fragment for fragment in line
-                    if label_left_boundary < float(fragment.x) < label_right_boundary
+                    if label_left_boundary <= float(fragment.x) < label_right_boundary
                 ]
                 current_cells = [
                     fragment for fragment in line
@@ -296,6 +341,20 @@ class ProgressiveAnalysisPipeline:
                     raw_field_name=_CURRENT_PERIOD_CELL_FIELD,
                 ))
         return records
+
+    @staticmethod
+    def _referenced_cell_evidence(
+        visualizations: VisualizationBundle,
+        cell_records: Sequence[EvidenceRecord],
+    ) -> list[EvidenceRecord]:
+        """返回卡片行真正引用的单元格证据，保持产出顺序稳定。"""
+        referenced = {
+            evidence_id
+            for card in visualizations.cards
+            for row in card.rows
+            for evidence_id in row.evidence_ids
+        }
+        return [record for record in cell_records if record.stable_id in referenced]
 
     @staticmethod
     def _catalog_label(record: EvidenceRecord) -> str:
@@ -467,6 +526,7 @@ class ProgressiveAnalysisPipeline:
             resolved = self.resolver.resolve([
                 *structured.records, *self.pdf_records(extracted, request.period)
             ])
+            cell_records = self.visualization_cell_records(extracted, request.period)
             quick = self.quick_analyzer.analyze(resolved.records, request.interests)
         except Exception as exc:
             emit("job.failed", {"stage": "fast_processing", "error": str(exc)})
@@ -515,7 +575,7 @@ class ProgressiveAnalysisPipeline:
         if self.structure_visualizer is not None and topic_ids:
             visualization_future = self.deep_executor.submit(
                 self.structure_visualizer.analyze,
-                resolved.records,
+                cell_records,
                 request.period,
                 topic_ids,
             )
@@ -568,6 +628,7 @@ class ProgressiveAnalysisPipeline:
             )
             emit("section.ready", {"section": section_payload})
 
+        visualization_evidence: list[EvidenceRecord] = []
         if visualization_future is not None:
             try:
                 visualizations = visualization_future.result()
@@ -577,6 +638,14 @@ class ProgressiveAnalysisPipeline:
                 ))
             else:
                 if any(card.status in {"complete", "partial"} for card in visualizations.cards):
+                    # 只有卡片行真正引用的单元格才进入证据目录，未使用的表格行
+                    # 既不参与通用分析证据，也不扩大持久化体积。
+                    visualization_evidence = self._referenced_cell_evidence(
+                        visualizations, cell_records
+                    )
+                    catalog_records = [*resolved.records, *visualization_evidence]
+                    document.evidence_catalog = self._catalog(catalog_records)
+                    document.evidence_summary = self._summary(catalog_records)
                     document.schema_version = 4
                     document.visualizations = visualizations
                     self._save(document, request)
@@ -591,8 +660,9 @@ class ProgressiveAnalysisPipeline:
             return self._finish_cancelled(document, request, emit)
         if ocr_records:
             merged = self.resolver.resolve([*resolved.records, *ocr_records])
-            document.evidence_catalog = self._catalog(merged.records)
-            document.evidence_summary = self._summary(merged.records)
+            catalog_records = [*merged.records, *visualization_evidence]
+            document.evidence_catalog = self._catalog(catalog_records)
+            document.evidence_summary = self._summary(catalog_records)
             correct = getattr(self.quick_analyzer, "correct", None)
             if callable(correct) and document.quick is not None:
                 corrections = list(correct(document.quick, merged.records) or ())
