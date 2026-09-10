@@ -47,6 +47,9 @@ _PARENT_SHEET_PATTERN = re.compile(
 )
 _CURRENT_PERIOD_CELL_FIELD = "current_period_pdf_cell"
 _NUMERIC_CELL_PATTERN = re.compile(r"[-−]?\d[\d,，]*(?:\.\d+)?")
+# 只有这些明确的报表表头才可定义行名列。没有可识别的标签列时宁可不生成
+# 结构图证据，也不能把本期列左侧的上期/附注列误传给模型。
+_ROW_LABEL_HEADERS = frozenset({"项目", "项目名称", "科目", "行次"})
 
 _TOPIC_STRONG_KEYWORDS = {
     "profit_structure": ("营业收入", "营业成本", "净利润", "利润总额", "毛利"),
@@ -227,13 +230,44 @@ class ProgressiveAnalysisPipeline:
                 ]
                 if not any(_NUMERIC_CELL_PATTERN.search(fragment.text) for fragment in cells):
                     continue
-                # 证据摘录仅保留明确在本期列左侧的行名和本期列单元格。
-                # 不能保留整行的非数值片段：上期列常以“—/未披露”表达，
-                # 它们和数值一样会污染模型的本期上下文。
+                # 用同一表头行中明确的“项目/科目”等标签表头定义行名列，而不是
+                # 把本期列左侧全部片段当作行名：相邻的上期数值列也可能位于左侧。
+                label_headers = [
+                    (index, item) for index, item in enumerate(header_line)
+                    if item.text.strip() in _ROW_LABEL_HEADERS and float(item.x) < header_x
+                ]
+                if len(label_headers) != 1:
+                    continue
+                label_index, label_header = label_headers[0]
+                if label_index == len(header_line) - 1:
+                    continue
+                next_label_column = header_line[label_index + 1]
+                label_x = float(label_header.x)
+                next_label_x = float(next_label_column.x)
+                if not label_x < next_label_x:
+                    continue
+                label_half_width = (next_label_x - label_x) / 2
+                label_left_boundary = label_x - label_half_width
+                label_right_boundary = label_x + label_half_width
+                if not label_left_boundary < label_x < label_right_boundary:
+                    continue
+
+                label_cells = [
+                    fragment for fragment in line
+                    if label_left_boundary < float(fragment.x) < label_right_boundary
+                ]
+                current_cells = [
+                    fragment for fragment in line
+                    if left_boundary < float(fragment.x) < right_boundary
+                ]
+                if not label_cells:
+                    continue
+                # 证据摘录只能由明确的标签列和本期列构成；上期/附注列的数值、
+                # 破折号或任何文本都不能进入模型上下文。
                 line_text = " ".join(
-                    fragment.text for fragment in sorted(line, key=lambda item: item.x)
-                    if float(fragment.x) < left_boundary
-                    or left_boundary < float(fragment.x) < right_boundary
+                    fragment.text for fragment in sorted(
+                        [*label_cells, *current_cells], key=lambda item: item.x
+                    )
                 )
                 evidence_text = f"本期表头：{header.text}\n数据行：{line_text}"
                 digest = hashlib.sha256(

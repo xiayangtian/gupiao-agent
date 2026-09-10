@@ -19,14 +19,16 @@ def test_dialog_layout_browser_probe_is_not_collected_as_a_unit_test():
     assert "assert match, stdout" in source
 
 
-def test_financial_structure_browser_timeout_fails_after_process_group_cleanup():
-    """Chrome 超时是测试失败，不得伪装成宿主 skip；清理必须确认退出。"""
+def test_financial_structure_browser_tests_use_agent_browser_without_opt_in_skip():
+    """默认入口在可用 agent-browser 下运行真实 URL，只有 CLI 缺失才允许跳过。"""
     source = STRUCTURE_BROWSER_TEST.read_text(encoding="utf-8")
 
-    assert "RUN_BROWSER_INTEGRATION = os.environ.get(\"RUN_BROWSER_INTEGRATION\") == \"1\"" in source
-    assert "not RUN_BROWSER_INTEGRATION or CHROME is None" in source
-    assert "def _terminate_timed_out_process" in source
-    assert source.count("_terminate_timed_out_process(process)") == 2
-    assert source.count('pytest.fail("Chrome --dump-dom 在 15 秒内未退出")') == 2
-    assert "当前宿主的 Chrome --dump-dom 在 15 秒内未退出" not in source
-    assert 'pytest.fail("Chrome 进程组在 SIGKILL 后仍未退出")' in source
+    assert "AGENT_BROWSER" in source
+    assert "RUN_BROWSER_INTEGRATION" not in source
+    assert "agent-browser CLI 不可用" in source
+    assert "uvicorn" in source
+    assert '"webapp.server:app"' in source
+    assert "actual_app_url" in source
+    assert "file://" in source  # 文档明确说明该测试不是 file:// fixture。
+    assert "timeout=15" in source
+    assert "真实应用服务在 15 秒内未就绪" in source

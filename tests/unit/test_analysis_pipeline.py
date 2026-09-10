@@ -183,6 +183,58 @@ def test_pdf_records_only_create_current_period_cell_evidence_from_positioned_he
     assert rejected.cards[0].status == "unavailable"
 
 
+def test_current_period_evidence_excludes_prior_numeric_column_left_of_current_column():
+    """行名必须来自表头识别的标签列，不能把左侧上期数值传给模型。"""
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual",
+        pdf_hash="f" * 64,
+        pages=(DocumentPage(
+            1, "合并利润表", 6, 0, 0.5, 0.5, 0.9, False,
+            fragments=(
+                DocumentTextFragment("项目", 80, 700),
+                DocumentTextFragment("上期", 220, 700),
+                DocumentTextFragment("2025年12月31日 本期", 300, 700),
+                DocumentTextFragment("附注", 380, 700),
+                DocumentTextFragment("营业收入", 80, 680),
+                DocumentTextFragment("90", 220, 680),
+                DocumentTextFragment("100", 300, 680),
+                DocumentTextFragment("—", 380, 680),
+            ),
+        ),),
+    )
+
+    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
+    cells = [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+
+    assert len(cells) == 1
+    assert "营业收入" in cells[0].text
+    assert "100" in cells[0].text
+    assert "90" not in cells[0].text
+    assert "—" not in cells[0].text
+
+
+def test_current_period_evidence_is_not_created_without_recognized_row_label_geometry():
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual",
+        pdf_hash="1" * 64,
+        pages=(DocumentPage(
+            1, "合并利润表", 6, 0, 0.5, 0.5, 0.9, False,
+            fragments=(
+                DocumentTextFragment("序号", 80, 700),
+                DocumentTextFragment("上期", 220, 700),
+                DocumentTextFragment("2025年12月31日 本期", 300, 700),
+                DocumentTextFragment("附注", 380, 700),
+                DocumentTextFragment("营业收入", 80, 680),
+                DocumentTextFragment("90", 220, 680),
+                DocumentTextFragment("100", 300, 680),
+            ),
+        ),),
+    )
+
+    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
+    assert not [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+
+
 def test_pdf_records_without_positioned_current_period_header_do_not_create_visualization_evidence():
     extraction = DocumentExtraction(
         report_id="600900:2025-12-31:annual", pdf_hash="e" * 64,
