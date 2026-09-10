@@ -729,3 +729,32 @@ def test_history_async_result_only_applies_to_the_report_still_selected():
         "staleCompany": False,
         "stalePeriod": False,
     }
+
+
+def test_analysis_event_reducer_merges_visualizations_ready_payload():
+    """结构图完成事件必须在终态前刷新当前渐进式报告。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const next = workflow.applyAnalysisEvent({{ lastEventId: 8, activeTab: 'cash' }}, {{
+          id: 9, type: 'visualizations.ready',
+          payload: {{ visualizations: {{ version: 1, cards: [{{ id: 'cash_flow_structure' }}] }} }}
+        }});
+        console.log(JSON.stringify(next));
+        """
+    )
+
+    assert result["lastEventId"] == 9
+    assert result["activeTab"] == "cash"
+    assert result["visualizations"] == {
+        "version": 1, "cards": [{"id": "cash_flow_structure"}],
+    }
+
+
+def test_v2_history_dimension_panels_offer_the_same_reanalysis_hint():
+    """旧 v2 维度正文也应提示重新分析，而不创建图表或自动重分析。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    render_dimension_tabs = source[source.index("function renderDimensionTabs"):source.index("function bindDimTabs")]
+    assert 'analysis-visualization-legacy-hint' in render_dimension_tabs
+    assert '重新分析后可生成结构图' in render_dimension_tabs

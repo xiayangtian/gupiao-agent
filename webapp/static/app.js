@@ -1154,6 +1154,7 @@ function renderDimensionTabs(dims) {
   var panelsHtml = dims.map(function (d, i) {
     var st = dimStyle(d.id);
     return '<div class="dim-panel ' + st.panel + (i === 0 ? ' active' : '') + '" data-index="' + i + '">'
+      + '<p class="analysis-visualization-legacy-hint">重新分析后可生成结构图</p>'
       + '<div class="dim-card">' + renderDimensionContent(d) + '</div></div>';
   }).join('');
   return '<div class="dim-tabs">' + tabsHtml + '</div>'

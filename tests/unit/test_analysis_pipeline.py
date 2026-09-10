@@ -154,6 +154,7 @@ def test_pdf_records_only_create_current_period_cell_evidence_from_positioned_he
                 DocumentTextFragment("经营活动现金流净额", 80, 680),
                 DocumentTextFragment("100", 300, 680),
                 DocumentTextFragment("90", 330, 680),
+                DocumentTextFragment("—", 330, 680),
             ),
         ),),
     )
@@ -162,6 +163,8 @@ def test_pdf_records_only_create_current_period_cell_evidence_from_positioned_he
     assert len(cells) == 1
     assert "100" in cells[0].text
     assert "90" not in cells[0].text  # 上期列绝不进入本期单元格证据上下文。
+    assert "—" not in cells[0].text
+    assert "经营活动现金流净额" in cells[0].text
     assert cells[0].source_locator.bbox is not None
     rejected = validate_visualization_payload(
         {"cards": [{
@@ -226,14 +229,17 @@ def test_document_catalog_persists_stable_evidence_display_metadata(tmp_path):
 
 
 class FakeStructureVisualizer:
-    def __init__(self, *, fail=False):
+    def __init__(self, *, fail=False, result=None):
         self.fail = fail
+        self.result = result
         self.calls = []
 
     def analyze(self, records, period, topic_ids):
         self.calls.append((records, period, topic_ids))
         if self.fail:
             raise RuntimeError("visualization failed")
+        if self.result is not None:
+            return self.result
         topic_id = topic_ids["cash_flow_structure"]
         return VisualizationBundle(version=1, cards=(VisualizationCard(
             id="cash_flow_structure",
@@ -309,6 +315,22 @@ def test_pipeline_persists_visualizations_and_emits_ready_event(tmp_path):
         section.section_id for section in result.sections
     }
     assert load_analysis_document(tmp_path / "analysis-1.json").schema_version == 4
+
+
+def test_pipeline_does_not_upgrade_or_emit_for_unavailable_visualizations(tmp_path):
+    unavailable = VisualizationBundle(version=1, cards=(VisualizationCard(
+        id="cash_flow_structure", topic_id="cash-risk", title="现金流结构",
+        kind="cash_flow", status="unavailable", unavailable_reason="披露不足", rows=(),
+    ),))
+    pipeline, _ = _pipeline(tmp_path, structure_visualizer=FakeStructureVisualizer(result=unavailable))
+    events = []
+
+    result = pipeline.run(_request(), lambda kind, data: events.append((kind, data)), Event())
+
+    assert result.schema_version == 3
+    assert result.visualizations is None
+    assert not any(name == "visualizations.ready" for name, _payload in events)
+    assert load_analysis_document(tmp_path / "analysis-1.json").schema_version == 3
 
 
 def test_visualization_failure_does_not_interrupt_analysis(tmp_path):

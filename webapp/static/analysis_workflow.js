@@ -153,6 +153,8 @@
     } else if ((type === 'section.ready' || type === 'section.updated') && payload.section) {
       next.sections = upsertById(next.sections, payload.section, 'section_id');
       next.hasNewFindings = next.activeTab !== payload.section.section_id;
+    } else if (type === 'visualizations.ready' && payload.visualizations) {
+      next.visualizations = payload.visualizations;
     } else if (type === 'job.stage_changed' && payload.stage) {
       next.stage = payload.stage;
     } else if (type === 'extraction.page_started' || type === 'extraction.page_completed') {
@@ -233,7 +235,7 @@
   var ANALYSIS_EVENT_TYPES = [
     'job.stage_changed', 'extraction.page_started', 'extraction.page_completed',
     'quick.ready', 'quick.corrected', 'theme.started', 'theme.filtered',
-    'section.ready', 'section.updated', 'job.completed', 'job.partial',
+    'section.ready', 'section.updated', 'visualizations.ready', 'job.completed', 'job.partial',
     'job.failed', 'job.cancelled'
   ];
 

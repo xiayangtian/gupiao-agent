@@ -26,7 +26,11 @@ CHROME = next(
     None,
 )
 
-pytestmark = pytest.mark.skipif(CHROME is None, reason="财务结构可视化浏览器回归测试需要 Chrome/Chromium")
+RUN_BROWSER_INTEGRATION = os.environ.get("RUN_BROWSER_INTEGRATION") == "1"
+pytestmark = pytest.mark.skipif(
+    not RUN_BROWSER_INTEGRATION or CHROME is None,
+    reason="真实 Chrome 集成测试需显式设置 RUN_BROWSER_INTEGRATION=1 且安装 Chrome/Chromium；默认由 agent-browser 验收",
+)
 
 
 def _terminate_timed_out_process(process: subprocess.Popen[str]) -> tuple[str, str]:

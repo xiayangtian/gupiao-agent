@@ -23,6 +23,8 @@ def test_financial_structure_browser_timeout_fails_after_process_group_cleanup()
     """Chrome 超时是测试失败，不得伪装成宿主 skip；清理必须确认退出。"""
     source = STRUCTURE_BROWSER_TEST.read_text(encoding="utf-8")
 
+    assert "RUN_BROWSER_INTEGRATION = os.environ.get(\"RUN_BROWSER_INTEGRATION\") == \"1\"" in source
+    assert "not RUN_BROWSER_INTEGRATION or CHROME is None" in source
     assert "def _terminate_timed_out_process" in source
     assert source.count("_terminate_timed_out_process(process)") == 2
     assert source.count('pytest.fail("Chrome --dump-dom 在 15 秒内未退出")') == 2

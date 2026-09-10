@@ -227,12 +227,13 @@ class ProgressiveAnalysisPipeline:
                 ]
                 if not any(_NUMERIC_CELL_PATTERN.search(fragment.text) for fragment in cells):
                     continue
-                # 证据摘录仅保留行名与本期列单元格；同一行上期列绝不进入模型上下文。
-                selected_ids = {id(fragment) for fragment in cells}
+                # 证据摘录仅保留明确在本期列左侧的行名和本期列单元格。
+                # 不能保留整行的非数值片段：上期列常以“—/未披露”表达，
+                # 它们和数值一样会污染模型的本期上下文。
                 line_text = " ".join(
                     fragment.text for fragment in sorted(line, key=lambda item: item.x)
-                    if id(fragment) in selected_ids
-                    or not _NUMERIC_CELL_PATTERN.search(fragment.text)
+                    if float(fragment.x) < left_boundary
+                    or left_boundary < float(fragment.x) < right_boundary
                 )
                 evidence_text = f"本期表头：{header.text}\n数据行：{line_text}"
                 digest = hashlib.sha256(
@@ -541,7 +542,7 @@ class ProgressiveAnalysisPipeline:
                     "deep_processing", None, "visualization_failed", str(exc), True
                 ))
             else:
-                if visualizations.cards:
+                if any(card.status in {"complete", "partial"} for card in visualizations.cards):
                     document.schema_version = 4
                     document.visualizations = visualizations
                     self._save(document, request)
