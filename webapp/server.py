@@ -1054,7 +1054,9 @@ def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, An
             interests=tuple(interests),
         )
         document = _get_progressive_pipeline().run(request, emit, stop_event)
-        _retire_superseded_analysis(analysis_id, code, p)
+        if document.stage in ("completed", "partial"):
+            # 只有真正产出可读结果时才清理旧产物；取消/中断不得删除用户仍需保留的报告
+            _retire_superseded_analysis(analysis_id, code, p)
         _auto_ingest_report(path)
         return document
 

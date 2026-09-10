@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import webapp.server as server
+from financial_report_fetcher.analysis_pipeline import analysis_output_stem
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
 from financial_report_fetcher.rag.ingest import IngestResult
 
@@ -296,6 +297,21 @@ class TestAnalyze:
         )
         legacy_md.write_text("# 旧分析", encoding="utf-8")
 
+        # 替身必须像真实流水线一样先落盘新产物，再返回文档，否则清理顺序错误也会假绿
+        def analyze_and_save(request, emit, stop_event):
+            stem = analysis_output_stem(request.analysis_id)
+            (analysis_dir / f"{stem}.json").write_text(
+                json.dumps(
+                    {"meta": {"company": "长江电力", "period": "2025-12-31"}, "dimensions": []},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (analysis_dir / f"{stem}.md").write_text("# 新分析", encoding="utf-8")
+            return _FakeV3Document()
+
+        env["fake_pipeline"].side_effect = analyze_and_save
+
         r = client.post(
             "/api/reports/600900/2025-12-31/analyze",
             json={"dimensions": ["financial_summary"]},
@@ -303,8 +319,44 @@ class TestAnalyze:
         task = self._poll_until_done(client, r.json()["task_id"])
 
         assert task["status"] == "done"
+        assert (analysis_dir / "长江电力_600900_2025-12-31_分析报告.json").exists()
         assert not legacy_json.exists()
         assert not legacy_md.exists()
+
+    def test_cancelled_analysis_keeps_legacy_year_form_products(
+        self, client, env, monkeypatch, tmp_path
+    ):
+        """分析被取消时不得清理同报告期旧产物，否则用户会丢失仍可读的旧报告。"""
+        analysis_dir = tmp_path / "analysis"
+        analysis_dir.mkdir()
+        monkeypatch.setattr(server, "ANALYSIS_DIR", str(analysis_dir))
+        legacy_json = analysis_dir / "长江电力_600900_2025_分析报告.json"
+        legacy_md = analysis_dir / "长江电力_600900_2025_分析报告.md"
+        legacy_json.write_text(
+            json.dumps(
+                {"meta": {"company": "长江电力", "period": "2025-12-31"}, "dimensions": []},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        legacy_md.write_text("# 旧分析", encoding="utf-8")
+
+        def analyse_then_cancel(request, emit, stop_event):
+            document = _FakeV3Document(stage="cancelled")
+            emit("job.cancelled", {"analysis": document.to_dict()})
+            return document
+
+        env["fake_pipeline"].side_effect = analyse_then_cancel
+
+        r = client.post(
+            "/api/reports/600900/2025-12-31/analyze",
+            json={"dimensions": ["financial_summary"]},
+        )
+        task = self._poll_until_done(client, r.json()["task_id"])
+
+        assert task["status"] in ("cancelled", "done")
+        assert legacy_json.exists()
+        assert legacy_md.exists()
 
     def test_legacy_cleanup_failure_does_not_fail_completed_analysis(
         self, client, env, monkeypatch, tmp_path
