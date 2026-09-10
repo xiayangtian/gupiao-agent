@@ -425,8 +425,8 @@
       .replace(/[\s，,；;：:、。．（）()【】\[\]“”"'’%％为是约近达共]/g, '');
   }
 
-  // 判断一段 key_data 是否已被结论覆盖：数字全部命中，且指标用词也基本重合。
-  // 只比对数字会把“本期净利润12.5亿元”与“同比增长12.5%”误当成重复而丢数据。
+  // 判断一段 key_data 是否已被结论覆盖：数字全部命中，且不含结论里没出现过的用词字符。
+  // 只要还引入了新字符（如“成本”相对“收入”），即使数值相同也视为新信息，不得删除。
   function coveredByClaim(part, claim) {
     var text = String(part == null ? '' : part);
     var haystack = String(claim == null ? '' : claim);
@@ -434,10 +434,9 @@
     if (!numbers.every(function (number) { return haystack.indexOf(number) >= 0; })) return false;
     var words = text.replace(/[\d.\s，,；;：:、。．（）()【】\[\]“”"'’%％]/g, '');
     if (!words.length) return true;
-    var hits = words.split('').filter(function (character) {
+    return words.split('').every(function (character) {
       return haystack.indexOf(character) >= 0;
-    }).length;
-    return hits / words.length >= 0.5;
+    });
   }
 
   function keyDataCovered(part, claim) {

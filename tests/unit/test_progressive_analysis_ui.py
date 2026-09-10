@@ -284,6 +284,28 @@ def test_compact_conclusion_only_appends_the_missing_key_data_parts():
     assert result == {"compact": True, "card": False, "kept": True, "repeated": 1}
 
 
+def test_compact_conclusion_keeps_key_data_for_a_different_metric_with_same_value():
+    """数值相同但指标不同的 key_data 不能被当成重述删除（营收 100 亿 vs 成本 100 亿）。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{
+            claim: '营业收入为100亿元。',
+            key_data: '营业成本为100亿元'
+          }}] }}
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          kept: html.includes('营业成本为100亿元')
+        }}));
+        """
+    )
+
+    assert result == {"compact": True, "kept": True}
+
+
 def test_compact_conclusion_drops_key_data_restated_in_different_words():
     """key_data 只是换个说法重述同一批数字时，不要产生重复补充句。"""
     result = _run_node(
