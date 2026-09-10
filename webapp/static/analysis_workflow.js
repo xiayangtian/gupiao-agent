@@ -530,6 +530,9 @@
     var anchor = evidenceAnchor(options);
     var quickItems = conclusions.length ? conclusions : observations;
     var completedWithoutQuick = current.stage === 'completed' || current.stage === 'partial';
+    var visualizer = typeof globalThis !== 'undefined' ? globalThis.AnalysisVisualizations : null;
+    var shouldRenderVisualizations = visualizer && typeof visualizer.renderSlots === 'function'
+      && (current.visualizations || completedWithoutQuick);
     var tabs = sections.map(function (section, index) {
       var selected = active === section.section_id;
       return '<button type="button" class="analysis-result-tab' + (selected ? ' active' : '')
@@ -560,7 +563,9 @@
     } else {
       body = sections.filter(function (section) { return section.section_id === active; })
         .map(function (section) {
-          return '<section class="analysis-report-body">'
+          var visualizationHtml = shouldRenderVisualizations
+            ? visualizer.renderSlots(current.visualizations || null, [section], catalog) : '';
+          return '<section class="analysis-report-body">' + visualizationHtml
             + section.findings.map(function (item, index) {
               return renderReportFinding(item, index, catalog);
             }).join('') + '</section>';
