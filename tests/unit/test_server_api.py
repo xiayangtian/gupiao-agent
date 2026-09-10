@@ -312,6 +312,21 @@ class TestAnalyze:
 
         env["fake_pipeline"].side_effect = analyze_and_save
 
+        # 清理必须发生在新产物落盘之后：调用清理时新 JSON/MD 应已存在，旧产物尚未被删
+        real_retire = server.retire_superseded_analysis_files
+        observed = {}
+
+        def spy_retire(analysis_dir, *, code, period, keep_filename):
+            stem = keep_filename[: -len(".json")]
+            observed["new_json"] = (analysis_dir / f"{stem}.json").is_file()
+            observed["new_md"] = (analysis_dir / f"{stem}.md").is_file()
+            observed["legacy_alive"] = legacy_json.is_file()
+            return real_retire(
+                analysis_dir, code=code, period=period, keep_filename=keep_filename
+            )
+
+        monkeypatch.setattr(server, "retire_superseded_analysis_files", spy_retire)
+
         r = client.post(
             "/api/reports/600900/2025-12-31/analyze",
             json={"dimensions": ["financial_summary"]},
@@ -319,6 +334,7 @@ class TestAnalyze:
         task = self._poll_until_done(client, r.json()["task_id"])
 
         assert task["status"] == "done"
+        assert observed == {"new_json": True, "new_md": True, "legacy_alive": True}
         assert (analysis_dir / "长江电力_600900_2025-12-31_分析报告.json").exists()
         assert not legacy_json.exists()
         assert not legacy_md.exists()
