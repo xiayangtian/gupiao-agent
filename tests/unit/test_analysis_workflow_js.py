@@ -65,6 +65,100 @@ def test_topic_tab_row_wraps_instead_of_clipping():
     assert "flex-wrap: wrap" in _css_rule(css, ".analysis-result-tabs")
 
 
+def test_analysis_tab_label_helpers_prefer_short_label_and_order_by_score():
+    """短标签、相对重要度和排序必须统一处理且不修改输入。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const score = (value) => ({{
+          evidence_sufficiency: value,
+          source_reliability: 0,
+          materiality: 0,
+          clarity: 0,
+          interest_relevance: 0,
+        }});
+        const sections = [
+          {{ section_id: 'cash', title: '经营现金流净流入显著改善', tab_label: '',
+             findings: [{{}}, {{}}], score: score(50) }},
+          {{ section_id: 'profit', title: '盈利质量保持稳健', tab_label: '盈利结构',
+             findings: [{{}}], score: score(45) }},
+          {{ section_id: 'other', title: '陌生主题的长期变化，仍需观察', tab_label: '无效！',
+             findings: [{{}}], score: score(40) }},
+          {{ section_id: 'invalid', title: '研发投入持续增长', tab_label: '', findings: [{{}}],
+             score: {{ evidence_sufficiency: Infinity, source_reliability: 1,
+                       materiality: 1, clarity: 1, interest_relevance: 1 }} }},
+        ];
+        const original = JSON.stringify(sections);
+        console.log(JSON.stringify({{
+          labels: sections.map(workflow.analysisTabLabel),
+          ordered: workflow.orderAnalysisSections(sections).map(x => x.section_id),
+          importance: workflow.analysisSectionImportance(sections),
+          unmodified: JSON.stringify(sections) === original,
+        }}));
+        """
+    )
+
+    assert result == {
+        "labels": ["现金流", "盈利结构", "陌生主题的长…", "研发投入"],
+        "ordered": ["cash", "profit", "other", "invalid"],
+        "importance": {
+            "cash": "high", "profit": "medium", "other": "normal", "invalid": "normal"
+        },
+        "unmodified": True,
+    }
+
+
+def test_analysis_tab_priority_keeps_equal_scores_stable_and_renders_accessible_details():
+    """同分按发现数和 ID 排序；无效 active 回退快速结论且保留完整主题信息。"""
+    result = _run_node(
+        rf"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const score = {{ evidence_sufficiency: 10, source_reliability: 10, materiality: 10,
+                        clarity: 10, interest_relevance: 10 }};
+        const sections = [
+          {{ section_id: 'z', title: '治理结构持续优化', tab_label: '治理', findings: [{{}}], score }},
+          {{ section_id: 'a', title: '资产负债保持稳健', tab_label: '', findings: [{{}}, {{}}], score }},
+          {{ section_id: 'b', title: '成本费用得到控制', tab_label: '', findings: [{{}}, {{}}], score }},
+        ];
+        const rendered = workflow.renderProgressiveAnalysis({{
+          activeTab: 'missing', stage: 'completed', quick: {{ conclusions: [{{ claim: '快速结论' }}] }},
+          sections,
+        }});
+        const selected = workflow.renderProgressiveAnalysis({{
+          activeTab: 'a', stage: 'completed', quick: {{ conclusions: [] }},
+          sections: [Object.assign({{}}, sections[1], {{ summary: '资产结构保持健康。' }})],
+        }});
+        console.log(JSON.stringify({{
+          ordered: workflow.orderAnalysisSections(sections).map(item => item.section_id),
+          quickFallback: /data-analysis-tab="quick"[^>]*aria-selected="true"/.test(rendered)
+            && !/data-analysis-tab="z"[^>]*aria-selected="true"/.test(rendered),
+          titleAndAria: /title="资产负债保持稳健"/.test(rendered)
+            && /aria-label="资产负债保持稳健，重要程度：高，发现 2 条"/.test(rendered),
+          importance: /data-importance="high"/.test(rendered) && />高<\/span>/.test(rendered),
+          detail: /<h3>资产负债保持稳健<\/h3>/.test(selected)
+            && /<p class="analysis-section-summary">资产结构保持健康。<\/p>/.test(selected),
+        }}));
+        """
+    )
+
+    assert result == {
+        "ordered": ["a", "b", "z"],
+        "quickFallback": True,
+        "titleAndAria": True,
+        "importance": True,
+        "detail": True,
+    }
+
+
+def test_analysis_tab_priority_styles_are_touch_sized_and_wrap_on_mobile():
+    """主题 Tab 需要 44px 点击区、可见焦点和小屏自然换行。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    assert "min-height: 44px" in _css_rule(css, ".analysis-result-tab")
+    assert "outline:" in _css_rule(css, ".analysis-result-tab:focus-visible")
+    assert ".analysis-result-tab { min-height: 44px; white-space: normal;" in css
+
+
 def test_v4_history_report_uses_progressive_renderer_and_mounts_visualizations():
     """v4 结果必须沿用渐进式正文，并在重渲染时管理可视化图表实例。"""
     source = APP_JS.read_text(encoding="utf-8")

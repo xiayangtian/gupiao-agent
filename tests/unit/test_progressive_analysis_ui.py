@@ -378,14 +378,14 @@ def test_progressive_renderer_keeps_machine_metadata_out_of_short_conclusions():
     }
 
 
-def test_progressive_renderer_does_not_split_findings_for_internal_sentiment_levels():
-    """positive/negative/neutral 也是内部等级，不能使现金流条目变成卡片。"""
+def test_progressive_renderer_keeps_internal_sentiment_findings_compact_and_renders_summary():
+    """内部等级不拆卡片；主题正文必须显示非空摘要。"""
     result = _run_node(
         f"""
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
         const html = workflow.renderProgressiveAnalysis({{
           activeTab: 'cash', stage: 'completed', sections: [{{
-            section_id: 'cash', title: '现金流量与流动性分析', summary: '不显示',
+            section_id: 'cash', title: '现金流量与流动性分析', summary: '现金流摘要',
             findings: [{{ claim: '经营活动现金流净额为正。', significance: 'positive' }},
                        {{ claim: '投资活动现金净流出。', significance: 'negative' }}]
           }}]
@@ -393,12 +393,12 @@ def test_progressive_renderer_does_not_split_findings_for_internal_sentiment_lev
         console.log(JSON.stringify({{
           compact: (html.match(/analysis-compact-finding/g) || []).length,
           cards: html.includes('analysis-report-finding'),
-          summary: html.includes('不显示')
+          summary: html.includes('现金流摘要')
         }}));
         """
     )
 
-    assert result == {"compact": 2, "cards": False, "summary": False}
+    assert result == {"compact": 2, "cards": False, "summary": True}
 
 
 def test_progressive_renderer_keeps_only_direct_pdf_and_web_evidence_links():
