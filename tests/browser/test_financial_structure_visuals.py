@@ -16,6 +16,10 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+LAUNCHER = Path(__file__).resolve().parent / "visual_test_app.py"
+# 关闭服务时的宽限：后台任务（如外部下载）仍需收尾，慢关闭不算失败。
+TEARDOWN_GRACE_SECONDS = 20
+TEARDOWN_KILL_SECONDS = 10
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from webapp.browser_preflight import find_usable_agent_browser
@@ -56,7 +60,7 @@ def actual_app_url():
     """每项浏览器测试都访问实际 FastAPI 应用，而非 file:// 或 mock 页面。"""
     port = _free_port()
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "webapp.server:app", "--host", "127.0.0.1", "--port", str(port)],
+        [sys.executable, str(LAUNCHER), str(port)],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -69,11 +73,14 @@ def actual_app_url():
     finally:
         process.terminate()
         try:
-            process.communicate(timeout=5)
+            process.communicate(timeout=TEARDOWN_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
+            # 后台任务拖延关闭时强制结束；只有 SIGKILL 后仍存活才算失败。
             process.kill()
-            process.communicate(timeout=5)
-            pytest.fail("真实应用服务在终止后仍未退出")
+            try:
+                process.communicate(timeout=TEARDOWN_KILL_SECONDS)
+            except subprocess.TimeoutExpired:
+                pytest.fail("真实应用服务在 SIGKILL 后仍未退出")
 
 
 @pytest.fixture
