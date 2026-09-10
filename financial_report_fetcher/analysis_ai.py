@@ -9,8 +9,9 @@ from typing import Any, Mapping, Sequence
 from .analysis_config import AnalysisConfig
 from .analysis_pipeline import ProgressiveAnalysisPipeline
 from .analysis_result import QuickConclusion, QuickResult
+from .visualizations import CARD_SPECS, VisualizationBundle, validate_visualization_payload
 from .evidence.document import DocumentExtractor
-from .evidence.models import EvidenceRecord, SourceType, VerificationState
+from .evidence.models import EntityScope, EvidenceRecord, SourceType, VerificationState
 from .evidence.ocr import PaddleStructureEngine
 from .evidence.resolver import EvidenceResolver
 from .evidence.structured import build_structured_gateway
@@ -31,6 +32,14 @@ TEXT_EVIDENCE_LIMIT = 40
 TEXT_EVIDENCE_CHARS = 240
 STRUCTURED_TEXT_CHARS = 300
 MAX_PLANNER_CANDIDATES = 8
+STRUCTURE_VISUALIZATION_PROMPT = (
+    "你是财报结构数据抽取器。仅根据输入的 PDF 原文页证据输出 JSON；"
+    "禁止计算、估算、补全或使用未输入证据。每行必须是本报告期合并口径的原始披露，"
+    "金额统一为亿元。仅输出获允许的卡片和指标，引用输入 evidence_id；"
+    "未披露或无法确认时省略该行。cards 中每项包含 id、kind、rows；"
+    "rows 每项包含 metric_id、label、value、unit、direction、evidence_ids、period、"
+    "entity_scope、page、excerpt。"
+)
 
 
 def _page_order(record) -> int:
@@ -157,6 +166,97 @@ def _ask_json(ai_client, *, system: str, prompt: dict[str, Any], max_tokens: int
     raise ValueError(
         "AI 连续两次未返回有效 JSON，请稍后重试或更换模型"
     ) from last_error
+
+
+def _visualization_pdf_evidence(
+    records: Sequence[EvidenceRecord], period: str
+) -> list[EvidenceRecord]:
+    """只保留当前期、合并口径且可由 PDF 页码定位的原文证据。"""
+    return [
+        record for record in records
+        if record.source_type is SourceType.PDF_TEXT
+        and record.entity_scope is EntityScope.CONSOLIDATED
+        and record.period == period
+        and isinstance(record.source_locator.page, int)
+        and not isinstance(record.source_locator.page, bool)
+        and record.source_locator.page > 0
+    ]
+
+
+class AiStructureVisualizer:
+    """从当前期合并 PDF 页证据提取受白名单约束的结构可视化数据。"""
+
+    def __init__(self, ai_client):
+        self.ai_client = ai_client
+
+    def analyze(
+        self,
+        records: Sequence[EvidenceRecord],
+        period: str,
+        topic_ids: Mapping[str, str],
+    ) -> VisualizationBundle:
+        selected_topics = {
+            card_id: topic_id.strip()
+            for card_id, topic_id in topic_ids.items()
+            if card_id in CARD_SPECS and isinstance(topic_id, str) and topic_id.strip()
+        }
+        if not selected_topics:
+            return VisualizationBundle(version=1, cards=())
+
+        pdf_records = _visualization_pdf_evidence(records, period)
+        allowed_evidence = {record.stable_id: record for record in pdf_records}
+        if not allowed_evidence:
+            return VisualizationBundle(version=1, cards=())
+
+        try:
+            data = _ask_json(
+                self.ai_client,
+                system=STRUCTURE_VISUALIZATION_PROMPT,
+                prompt={
+                    "report_period": period,
+                    "cards": [
+                        {
+                            "id": card_id,
+                            "kind": CARD_SPECS[card_id]["kind"],
+                            "topic_id": topic_id,
+                            "allowed_metric_ids": sorted(
+                                CARD_SPECS[card_id]["core"] | CARD_SPECS[card_id]["optional"]
+                            ),
+                        }
+                        for card_id, topic_id in selected_topics.items()
+                    ],
+                    "evidence": [
+                        {
+                            "evidence_id": record.stable_id,
+                            "page": record.source_locator.page,
+                            "period": record.period,
+                            "text": (record.text or "")[:TEXT_EVIDENCE_CHARS],
+                        }
+                        for record in pdf_records
+                    ],
+                },
+                max_tokens=2400,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return VisualizationBundle(version=1, cards=())
+
+        raw_cards = data.get("cards", ())
+        if not isinstance(raw_cards, Sequence) or isinstance(raw_cards, (str, bytes)):
+            return VisualizationBundle(version=1, cards=())
+        cards = []
+        for raw_card in raw_cards:
+            if not isinstance(raw_card, Mapping):
+                continue
+            card_id = raw_card.get("id")
+            if not isinstance(card_id, str) or card_id not in selected_topics:
+                continue
+            card = dict(raw_card)
+            # topic_id 由主题规划决定，模型无权重新绑定卡片到其他主题。
+            card["topic_id"] = selected_topics[card_id]
+            cards.append(card)
+        return validate_visualization_payload(
+            {"cards": cards}, period=period, allowed_pdf_evidence=allowed_evidence
+        )
 
 
 class AiQuickAnalyzer:
