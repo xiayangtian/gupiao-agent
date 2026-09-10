@@ -1454,6 +1454,7 @@ def _render_index() -> HTMLResponse:
     versioned_assets = (
         os.path.join(STATIC_DIR, "app.js"),
         os.path.join(STATIC_DIR, "analysis_workflow.js"),
+        os.path.join(STATIC_DIR, "analysis_visualizations.js"),
         os.path.join(STATIC_DIR, "style.css"),
     )
     with open(index_path, encoding="utf-8") as f:

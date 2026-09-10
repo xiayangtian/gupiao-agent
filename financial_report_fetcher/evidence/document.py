@@ -11,6 +11,15 @@ from typing import Any, Callable
 
 
 @dataclass(frozen=True)
+class DocumentTextFragment:
+    """PDF 原生文本片段及其页内起点，用于审计表格列归属。"""
+
+    text: str
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
 class DocumentPage:
     page_number: int
     text: str
@@ -20,6 +29,7 @@ class DocumentPage:
     visual_area_ratio: float
     quality_score: float
     needs_ocr: bool
+    fragments: tuple[DocumentTextFragment, ...] = ()
 
     def __post_init__(self) -> None:
         if self.page_number < 1:
@@ -147,16 +157,27 @@ class DocumentExtractor:
 
         return PdfReader(pdf_path)
 
+    @staticmethod
+    def _page_text_and_fragments(page: Any) -> tuple[str, tuple[DocumentTextFragment, ...]]:
+        fragments: list[DocumentTextFragment] = []
+
+        def visitor(text: str, _cm: Any, tm: Any, _font: Any, _size: Any) -> None:
+            if not text or not text.strip() or not isinstance(tm, (list, tuple)) or len(tm) < 6:
+                return
+            fragments.append(DocumentTextFragment(text.strip(), float(tm[4]), float(tm[5])))
+
+        try:
+            text = page.extract_text(visitor_text=visitor) or ""
+        except TypeError:
+            # 旧版 pypdf 不提供 visitor_text；没有坐标即不能生成结构图证据。
+            return page.extract_text() or "", ()
+        return text, tuple(fragments)
+
     def extract(self, pdf_path: str, report_id: str) -> DocumentExtraction:
         path = Path(pdf_path)
         reader = self._reader(str(path))
         pages = tuple(
-            score_page(
-                page_number=index,
-                text=page.extract_text() or "",
-                visual_area_ratio=self._visual_ratio_estimator(page),
-                min_chars=self._min_chars,
-            )
+            self._scored_page(index, page)
             for index, page in enumerate(reader.pages, start=1)
         )
         return DocumentExtraction(
@@ -164,4 +185,24 @@ class DocumentExtractor:
             pdf_hash=_sha256_file(str(path)),
             pages=pages,
             parser_version=self.parser_version,
+        )
+
+    def _scored_page(self, page_number: int, page: Any) -> DocumentPage:
+        text, fragments = self._page_text_and_fragments(page)
+        scored = score_page(
+            page_number=page_number,
+            text=text,
+            visual_area_ratio=self._visual_ratio_estimator(page),
+            min_chars=self._min_chars,
+        )
+        return DocumentPage(
+            page_number=scored.page_number,
+            text=scored.text,
+            char_count=scored.char_count,
+            abnormal_char_ratio=scored.abnormal_char_ratio,
+            table_alignment_score=scored.table_alignment_score,
+            visual_area_ratio=scored.visual_area_ratio,
+            quality_score=scored.quality_score,
+            needs_ocr=scored.needs_ocr,
+            fragments=fragments,
         )

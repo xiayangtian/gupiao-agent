@@ -2417,3 +2417,58 @@ details.citation-card .citation-snippet { margin-top: 6px; }
   }
 
 }
+
+/* 财务结构可视化：图表仅为表格的辅助读法，数值和证据始终可直接读取。 */
+.analysis-visualization-slot { margin: 0 0 var(--space-md); }
+.analysis-visualization-card {
+  display: grid;
+  gap: var(--space-sm);
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.analysis-visualization-card > h3 { margin: 0; font-size: 16px; }
+.analysis-visualization-status,
+.analysis-visualization-legacy-hint,
+.analysis-visualization-unavailable > p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.analysis-visualization-status { color: var(--warning, #a16207); }
+.analysis-visualization-chart { position: relative; min-height: 220px; aspect-ratio: 16 / 8; }
+.analysis-visualization-chart canvas { width: 100% !important; height: 100% !important; }
+.analysis-visualization-chart-unavailable {
+  display: grid;
+  min-height: inherit;
+  place-items: center;
+  margin: 0;
+  padding: 16px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.analysis-visualization-table-wrap { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.analysis-visualization-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.analysis-visualization-table th,
+.analysis-visualization-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.analysis-visualization-table thead { background: var(--surface-muted); color: var(--text-secondary); }
+.analysis-visualization-table tbody tr:last-child th,
+.analysis-visualization-table tbody tr:last-child td { border-bottom: 0; }
+.analysis-visualization-amount { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.analysis-visualization-evidence { margin: 0; white-space: nowrap; }
+.analysis-visualization-evidence:focus-visible { outline: 3px solid rgb(59 130 246 / 35%); outline-offset: 2px; }
+.analysis-visualization-no-evidence { color: var(--text-secondary); }
+
+@media (max-width: 560px) {
+  .analysis-visualization-card { padding: 12px; }
+  .analysis-visualization-chart { min-height: 190px; aspect-ratio: 1 / 1; }
+  .analysis-visualization-table { font-size: 12px; table-layout: fixed; }
+  .analysis-visualization-table th,
+  .analysis-visualization-table td { padding: 8px 6px; overflow-wrap: anywhere; }
+  .analysis-visualization-table th:nth-child(1) { width: 32%; }
+  .analysis-visualization-table th:nth-child(2) { width: 20%; }
+  .analysis-visualization-table th:nth-child(3) { width: 16%; }
+  .analysis-visualization-table th:nth-child(4) { width: 32%; }
+}

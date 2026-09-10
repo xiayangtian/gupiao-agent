@@ -153,6 +153,8 @@
     } else if ((type === 'section.ready' || type === 'section.updated') && payload.section) {
       next.sections = upsertById(next.sections, payload.section, 'section_id');
       next.hasNewFindings = next.activeTab !== payload.section.section_id;
+    } else if (type === 'visualizations.ready' && payload.visualizations) {
+      next.visualizations = payload.visualizations;
     } else if (type === 'job.stage_changed' && payload.stage) {
       next.stage = payload.stage;
     } else if (type === 'extraction.page_started' || type === 'extraction.page_completed') {
@@ -233,7 +235,7 @@
   var ANALYSIS_EVENT_TYPES = [
     'job.stage_changed', 'extraction.page_started', 'extraction.page_completed',
     'quick.ready', 'quick.corrected', 'theme.started', 'theme.filtered',
-    'section.ready', 'section.updated', 'job.completed', 'job.partial',
+    'section.ready', 'section.updated', 'visualizations.ready', 'job.completed', 'job.partial',
     'job.failed', 'job.cancelled'
   ];
 
@@ -530,6 +532,9 @@
     var anchor = evidenceAnchor(options);
     var quickItems = conclusions.length ? conclusions : observations;
     var completedWithoutQuick = current.stage === 'completed' || current.stage === 'partial';
+    var visualizer = typeof globalThis !== 'undefined' ? globalThis.AnalysisVisualizations : null;
+    var shouldRenderVisualizations = visualizer && typeof visualizer.renderSlots === 'function'
+      && (current.visualizations || completedWithoutQuick);
     var tabs = sections.map(function (section, index) {
       var selected = active === section.section_id;
       return '<button type="button" class="analysis-result-tab' + (selected ? ' active' : '')
@@ -560,7 +565,9 @@
     } else {
       body = sections.filter(function (section) { return section.section_id === active; })
         .map(function (section) {
-          return '<section class="analysis-report-body">'
+          var visualizationHtml = shouldRenderVisualizations
+            ? visualizer.renderSlots(current.visualizations || null, [section], catalog) : '';
+          return '<section class="analysis-report-body">' + visualizationHtml
             + section.findings.map(function (item, index) {
               return renderReportFinding(item, index, catalog);
             }).join('') + '</section>';

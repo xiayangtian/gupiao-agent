@@ -624,3 +624,27 @@ def test_table_cleanup_drops_missing_rows_and_the_whole_empty_table():
     )
 
     assert result == {"mixed": [["营业收入", "100 亿元"]], "empty": []}
+
+
+def test_progressive_renderer_places_visualization_slot_before_topic_findings():
+    result = _run_node(
+        f"""
+        global.AnalysisVisualizations = require({json.dumps(str(ROOT / 'webapp' / 'static' / 'analysis_visualizations.js'))});
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'cash', stage: 'completed',
+          sections: [{{ section_id: 'cash', title: '现金流', findings: [{{ claim: '正文结论' }}] }}],
+          visualizations: {{ version: 1, cards: [{{
+            id: 'cash_flow_structure', topic_id: 'cash', title: '现金流结构', kind: 'cash_flow', status: 'partial',
+            rows: [{{ metric_id: 'operating_cash_flow', label: '经营现金流', value: 1, unit: '亿元', direction: 'inflow', evidence_ids: ['pdf'] }},
+                   {{ metric_id: 'investing_cash_flow', label: '投资现金流', value: -1, unit: '亿元', direction: 'outflow', evidence_ids: ['pdf'] }}]
+          }}] }},
+          evidence_catalog: {{ pdf: {{ source_type: 'pdf_text', source_locator: {{ page: 9 }} }} }}
+        }});
+        console.log(JSON.stringify({{
+          slotBeforeFinding: html.indexOf('analysis-visualization-slot') < html.indexOf('正文结论'),
+          pdfPage: html.includes('data-evidence-page="9"')
+        }}));
+        """
+    )
+    assert result == {"slotBeforeFinding": True, "pdfPage": True}

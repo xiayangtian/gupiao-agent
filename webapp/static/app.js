@@ -53,7 +53,7 @@ const STATE = {
   chatFocusReport: null,        // {code, period, company} 历史记录跳转：聚焦该报告（提升 RAG 权重）
 
   // Chart instances
-  charts: { revenue: null, ratio: null },
+  charts: { revenue: null, ratio: null, visualizations: null },
 
   // Request dedup
   reqIds: { reports: 0, analyze: 0, qa: 0, suggestions: 0 },
@@ -107,15 +107,15 @@ function handleRoute() {
     link.classList.toggle('active', link.getAttribute('href') === hash);
   });
 
+  // 图表实例挂在页面容器内，离开前先回收，返回时由页面初始化重新渲染并挂载。
+  destroyAllCharts();
+
   // Page init
   if (page === 'home') initHomePage();
   if (page === 'analysis') initAnalysisPage();
   if (page === 'history') initHistoryPage();
   if (page === 'rag') initRagPage();
   if (page === 'chat') initChatPage();
-
-  // Cleanup charts on leave
-  destroyAllCharts();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -261,6 +261,9 @@ async function initAnalysisPage() {
       STATE.analysisRestoreStarted = true;
       await restoreAnalysisSelection(active[active.length - 1]);
     }
+  } else if (STATE.selected && STATE.selectedReport) {
+    // 切页已销毁图表实例，返回时必须按当前选择重新渲染并重新挂载。
+    renderAnalysisPanel(analysisKey(STATE.selected.code, STATE.selectedReport.period));
   }
 }
 
@@ -649,9 +652,10 @@ function isCurrentAnalysis(code, period) {
 function renderAnalysisPanel(key) {
   var ar = $('#analyze-result');
   if (!ar) return;
+  clearAnalysisVisualizations();
   var st = STATE.analysisCache[key];
   if (!st) { ar.innerHTML = ''; updateBackgroundAnalysisStatus(null); return; }
-  var progressive = st.data && (st.data.schema_version === 3 || st.data.quick
+  var progressive = st.data && (Number(st.data.schema_version) >= 3 || st.data.quick
     || Array.isArray(st.data.sections) || st.data.stage);
   updateBackgroundAnalysisStatus(st);
   if ((st.status === 'pending' || st.status === 'running') && progressive) {
@@ -660,6 +664,7 @@ function renderAnalysisPanel(key) {
     ) + '<p class="hint analysis-deep-hint">快速结论会先展示；详细主题仍在后台分析，完成后会自动补充。</p>'
       + '<button id="stop-analyze-btn" class="btn danger full-btn">⏹ 停止分析</button>';
     bindProgressiveTabs(ar, key);
+    mountAnalysisVisualizations(ar, st.data, false);
     var stopBtn = $('#stop-analyze-btn');
     if (stopBtn) stopBtn.addEventListener('click', function () { stopAnalysis(key, st.taskId); });
   } else if (st.status === 'pending' || st.status === 'running') {
@@ -680,6 +685,7 @@ function renderAnalysisPanel(key) {
         st.data || {}, { evidenceAnchor: 'analysis-evidence-main' }
       );
       bindProgressiveTabs(ar, key);
+      mountAnalysisVisualizations(ar, st.data, false);
     } else {
       ar.innerHTML = renderReport(st.data || {});
       bindDimTabs(ar);
@@ -725,6 +731,38 @@ function openHistoryEvidencePdfPage(page) {
     + '?jump=' + encodeURIComponent(Date.now()) + '#page=' + page;
   if (frame.focus) frame.focus();
   return true;
+}
+
+function clearAnalysisVisualizations() {
+  var charts = STATE.charts.visualizations;
+  if (!charts) return;
+  var visualizer = window.AnalysisVisualizations;
+  if (visualizer && typeof visualizer.destroy === 'function') {
+    window.AnalysisVisualizations.destroy(charts);
+  } else if (typeof charts.forEach === 'function') {
+    charts.forEach(function (chart) {
+      if (chart && typeof chart.destroy === 'function') chart.destroy();
+    });
+    if (typeof charts.clear === 'function') charts.clear();
+  }
+  STATE.charts.visualizations = null;
+}
+
+function mountAnalysisVisualizations(container, data, isHistory) {
+  var visualizer = window.AnalysisVisualizations;
+  clearAnalysisVisualizations();
+  if (!visualizer || typeof visualizer.mount !== 'function') return;
+  STATE.charts.visualizations = window.AnalysisVisualizations.mount(container, data && data.visualizations, {
+    onEvidencePage: function (page) {
+      if (isHistory) {
+        openHistoryEvidencePdfPage(page);
+      } else if (container) {
+        container.dispatchEvent(new CustomEvent('analysis:evidence-page', {
+          bubbles: true, detail: { page: page }
+        }));
+      }
+    }
+  });
 }
 
 function bindProgressiveTabs(container, key) {
@@ -906,6 +944,7 @@ async function stopAnalysis(key, taskId) {
   } catch (_) { /* 忽略网络错误，轮询会揭示终态 */ }
   var ar = $('#analyze-result');
   if (ar) {
+    clearAnalysisVisualizations();
     ar.innerHTML = '<div class="hint">正在停止分析…（当前步骤完成后生效）</div>';
   }
 }
@@ -1118,6 +1157,7 @@ function renderDimensionTabs(dims) {
   var panelsHtml = dims.map(function (d, i) {
     var st = dimStyle(d.id);
     return '<div class="dim-panel ' + st.panel + (i === 0 ? ' active' : '') + '" data-index="' + i + '">'
+      + '<p class="analysis-visualization-legacy-hint">重新分析后可生成结构图</p>'
       + '<div class="dim-card">' + renderDimensionContent(d) + '</div></div>';
   }).join('');
   return '<div class="dim-tabs">' + tabsHtml + '</div>'
@@ -1199,7 +1239,16 @@ async function initHistoryPage() {
   if (list) list.innerHTML = '<p class="hint">正在读取本地数据…</p>';
   await loadHistoryItems();
   bindHistoryFilters();
-  await window.AnalysisWorkflow.openPendingHistoryReport(STATE, selectHistoryItem);
+  var opened = await window.AnalysisWorkflow.openPendingHistoryReport(STATE, selectHistoryItem);
+  if (!opened) reRenderSelectedHistoryDetail();
+}
+
+// 切页会销毁图表实例，返回历史页时按当前选中项重建详情与图表。
+function reRenderSelectedHistoryDetail() {
+  var item = STATE.historySelected;
+  if (!item) return;
+  if (renderHistoryAnalysisState(item)) return;
+  if (!item.has_analysis) showHistoryNoAnalysis(item);
 }
 
 async function loadHistoryItems() {
@@ -1417,6 +1466,7 @@ function renderHistoryAnalysisState(item) {
   var cached = STATE.analysisCache[analysisKey(item.code, item.period)];
   var detail = $('#history-detail');
   if (!cached || !detail) return false;
+  clearAnalysisVisualizations();
   detail.classList.remove('hint');
   var badge = $('#history-detail-badge');
   if (badge) {
@@ -1425,7 +1475,7 @@ function renderHistoryAnalysisState(item) {
     badge.className = badgeModel.className;
   }
   if (cached && (cached.status === 'pending' || cached.status === 'running')) {
-    if (cached.data && (cached.data.schema_version === 3 || cached.data.quick
+    if (cached.data && (Number(cached.data.schema_version) >= 3 || cached.data.quick
         || Array.isArray(cached.data.sections) || cached.data.stage)) {
       detail.innerHTML = '<div class="analysis-background-status inline" role="status" aria-live="polite">'
         + '<span class="analysis-background-dot" aria-hidden="true"></span><span><strong>'
@@ -1436,6 +1486,7 @@ function renderHistoryAnalysisState(item) {
           evidenceAnchor: 'analysis-evidence-history'
         });
       bindProgressiveTabs(detail, analysisKey(item.code, item.period));
+      mountAnalysisVisualizations(detail, cached.data, true);
     } else {
       detail.innerHTML = renderAnalysisProgress(cached);
     }
@@ -1453,7 +1504,7 @@ function renderHistoryAnalysisState(item) {
     return true;
   }
   if (cached && cached.status === 'done' && cached.data) {
-    if (cached.data.schema_version === 3) {
+    if (Number(cached.data.schema_version) >= 3) {
       renderAnalysisInDetail(item.company, item.code, item.period, item.year,
         cached.data, '来源：reports/analysis/' + (item.analysis_filename || ''));
     } else {
@@ -1510,6 +1561,7 @@ if (historyViewTabs) {
 function showHistoryNoAnalysis(item) {
   var detail = $('#history-detail');
   if (!detail) return;
+  clearAnalysisVisualizations();
   detail.innerHTML = ''
     + '<div class="history-detail-empty">'
     + '<div class="empty-icon">📄</div>'
@@ -1537,12 +1589,14 @@ async function loadAndShowAnalysis(filename, callback, isCurrent) {
     } else {
       var detail = $('#history-detail');
       if (detail && (!isCurrent || isCurrent())) {
+        clearAnalysisVisualizations();
         detail.innerHTML = '<p class="hint">无法读取分析文件</p>';
       }
     }
   } catch (_) {
     var detail2 = $('#history-detail');
     if (detail2 && (!isCurrent || isCurrent())) {
+      clearAnalysisVisualizations();
       detail2.innerHTML = '<p class="hint">读取分析文件失败</p>';
     }
   }
@@ -1551,9 +1605,10 @@ async function loadAndShowAnalysis(filename, callback, isCurrent) {
 function renderAnalysisInDetail(company, code, period, year, content, source) {
   var detail = $('#history-detail');
   if (!detail) return;
+  clearAnalysisVisualizations();
   detail.classList.remove('hint');
 
-  var isProgressive = Number(content.schema_version) === 3;
+  var isProgressive = Number(content.schema_version) >= 3;
   if (isProgressive && !STATE.analysisCache[analysisKey(code, period)]) {
     STATE.analysisCache[analysisKey(code, period)] = { status: 'done', data: content };
   }
@@ -1601,8 +1656,10 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   detail.innerHTML = html;
 
   // 维度 Tab 切换（事件委托，容器常驻只绑定一次）
-  if (isProgressive) bindProgressiveTabs(detail, analysisKey(code, period));
-  else bindDimTabs(detail);
+  if (isProgressive) {
+    bindProgressiveTabs(detail, analysisKey(code, period));
+    mountAnalysisVisualizations(detail, content, true);
+  } else bindDimTabs(detail);
 
   // 跳转到智能问答（聚焦本报告，提升 RAG 检索权重）
   var hQaGoto = $('#h-qa-goto-btn');
@@ -1800,6 +1857,7 @@ async function sendHistoryQA(code, period) {
 function destroyAllCharts() {
   if (STATE.charts.revenue) { STATE.charts.revenue.destroy(); STATE.charts.revenue = null; }
   if (STATE.charts.ratio)   { STATE.charts.ratio.destroy();   STATE.charts.ratio = null; }
+  clearAnalysisVisualizations();
 }
 
 // ═══════════════════════════════════════════════════════════════

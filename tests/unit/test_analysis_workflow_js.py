@@ -65,6 +65,54 @@ def test_topic_tab_row_wraps_instead_of_clipping():
     assert "flex-wrap: wrap" in _css_rule(css, ".analysis-result-tabs")
 
 
+def test_v4_history_report_uses_progressive_renderer_and_mounts_visualizations():
+    """v4 结果必须沿用渐进式正文，并在重渲染时管理可视化图表实例。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "Number(content.schema_version) >= 3" in source
+    assert "AnalysisVisualizations.mount" in source
+    assert "AnalysisVisualizations.destroy" in source
+
+
+def test_visualization_lifecycle_clears_before_all_replaced_analysis_containers():
+    """v4 图表切到旧/空内容时，容器替换前必须销毁并清空实例映射。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "function clearAnalysisVisualizations()" in source
+    assert "clearAnalysisVisualizations();\n  var st = STATE.analysisCache[key];" in source
+    assert "clearAnalysisVisualizations();\n  detail.classList.remove('hint');" in source
+    assert "function showHistoryNoAnalysis(item)" in source
+    assert "clearAnalysisVisualizations();\n  detail.innerHTML" in source
+    assert "clearAnalysisVisualizations();\n        detail.innerHTML = '<p class=\"hint\">无法读取分析文件</p>'" in source
+    assert "clearAnalysisVisualizations();\n      detail2.innerHTML = '<p class=\"hint\">读取分析文件失败</p>'" in source
+    assert "clearAnalysisVisualizations();\n}" in source[source.index("function destroyAllCharts()"):]
+
+
+def test_stop_analysis_clears_visualizations_before_replacing_result_container():
+    """用户停止分析时也必须销毁 Chart 实例，不能留下复用容器中的旧图。"""
+    source = APP_JS.read_text(encoding="utf-8")
+    stop = source[source.index("async function stopAnalysis"):source.index("async function startAnalysis")]
+    clear = source[source.index("function clearAnalysisVisualizations()"):source.index("function mountAnalysisVisualizations")]
+    visualizations = (ROOT / "webapp" / "static" / "analysis_visualizations.js").read_text(encoding="utf-8")
+
+    assert stop.index("clearAnalysisVisualizations();") < stop.index(
+        "ar.innerHTML = '<div class=\"hint\">正在停止分析"
+    )
+    assert "AnalysisVisualizations.destroy(charts)" in clear
+    assert "STATE.charts.visualizations = null" in clear
+    assert "charts.clear();" in visualizations
+
+
+def test_visualization_chartjs_fallback_keeps_table_and_removes_canvas():
+    """缺失 Chart.js 时不能留下空画布，必须保留数据表并告知用户。"""
+    source = (ROOT / "webapp" / "static" / "analysis_visualizations.js").read_text(encoding="utf-8")
+
+    assert "function chartUnavailable(slot, canvas)" in source
+    assert "图表组件不可用，已展示数据表" in source
+    assert "chartBox.innerHTML = message" in source
+    assert "if (!ChartClass)" in source
+
+
 def test_topic_tab_binding_always_uses_the_current_report_key():
     """同一容器复用时必须刷新 key，否则切换报告后主题 Tab 会串到上一份报告。"""
     source = APP_JS.read_text(encoding="utf-8")
@@ -681,3 +729,49 @@ def test_history_async_result_only_applies_to_the_report_still_selected():
         "staleCompany": False,
         "stalePeriod": False,
     }
+
+
+def test_analysis_event_reducer_merges_visualizations_ready_payload():
+    """结构图完成事件必须在终态前刷新当前渐进式报告。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const next = workflow.applyAnalysisEvent({{ lastEventId: 8, activeTab: 'cash' }}, {{
+          id: 9, type: 'visualizations.ready',
+          payload: {{ visualizations: {{ version: 1, cards: [{{ id: 'cash_flow_structure' }}] }} }}
+        }});
+        console.log(JSON.stringify(next));
+        """
+    )
+
+    assert result["lastEventId"] == 9
+    assert result["activeTab"] == "cash"
+    assert result["visualizations"] == {
+        "version": 1, "cards": [{"id": "cash_flow_structure"}],
+    }
+
+
+def test_route_change_remounts_visualizations_instead_of_leaving_dead_canvases():
+    """切页会销毁图表实例，因此返回分析/历史页必须重新渲染并重新挂载。"""
+    source = APP_JS.read_text(encoding="utf-8")
+    route = source[source.index("function handleRoute()"):source.index("async function loadHealth")]
+    analysis = source[
+        source.index("async function initAnalysisPage()"):source.index("async function restoreAnalysisSelection")
+    ]
+    history = source[
+        source.index("async function initHistoryPage()"):source.index("async function loadHistoryItems")
+    ]
+
+    assert route.index("destroyAllCharts();") < route.index("if (page === 'analysis') initAnalysisPage();")
+    assert "renderAnalysisPanel(analysisKey(STATE.selected.code, STATE.selectedReport.period));" in analysis
+    assert "reRenderSelectedHistoryDetail()" in history
+    assert "if (renderHistoryAnalysisState(item)) return;" in source
+
+
+def test_v2_history_dimension_panels_offer_the_same_reanalysis_hint():
+    """旧 v2 维度正文也应提示重新分析，而不创建图表或自动重分析。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    render_dimension_tabs = source[source.index("function renderDimensionTabs"):source.index("function bindDimTabs")]
+    assert 'analysis-visualization-legacy-hint' in render_dimension_tabs
+    assert '重新分析后可生成结构图' in render_dimension_tabs

@@ -7,6 +7,7 @@ from financial_report_fetcher.analysis_ai import (
     TEXT_EVIDENCE_LIMIT,
     AiInsightAnalyzer,
     AiQuickAnalyzer,
+    AiStructureVisualizer,
     AiTopicGenerator,
     _evidence_payload,
     _parse_json,
@@ -42,24 +43,38 @@ class SequenceAi:
         return next(self.responses)
 
 
-def _record(record_id, state=VerificationState.VERIFIED, *, source_type=SourceType.STRUCTURED, page=None, text=None):
+def _record(
+    record_id,
+    state=VerificationState.VERIFIED,
+    *,
+    source_type=SourceType.STRUCTURED,
+    page=None,
+    text=None,
+    period="2025-12-31",
+    entity_scope=EntityScope.CONSOLIDATED,
+    current_period_cell=None,
+):
+    is_current_cell = source_type is SourceType.PDF_TEXT if current_period_cell is None else current_period_cell
     return EvidenceRecord(
         report_id="r1",
-        entity_scope=EntityScope.CONSOLIDATED,
+        entity_scope=entity_scope,
         fact_name="revenue",
         value=Decimal("100"),
         unit="元",
         currency="CNY",
-        period="2025-12-31",
+        period=period,
         source_type=source_type,
         source_locator=SourceLocator(
-            provider="fake", page=page, record_id=record_id
+            provider="fake", page=page,
+            bbox=(1, 1, 2, 2) if is_current_cell and page is not None else None,
+            record_id=record_id,
         ),
         extraction_confidence=0.9,
         verification_state=state,
         content_hash=record_id,
         parser_version="1",
         text=text,
+        raw_field_name="current_period_pdf_cell" if is_current_cell else None,
     )
 
 
@@ -177,6 +192,108 @@ def test_topic_generator_returns_only_candidates_with_known_evidence():
     candidates = generator({record.stable_id: record}, ("cash_flow",))
 
     assert [item["candidate_id"] for item in candidates] == ["cash"]
+
+
+def test_structure_visualizer_uses_only_pdf_records_and_validates_evidence():
+    pdf_record = _record(
+        "pdf", source_type=SourceType.PDF_TEXT, page=12, text="现金流量表披露。"
+    )
+    web_record = _record("web", source_type=SourceType.STRUCTURED, text="网页结构化数据。")
+    ai = FakeAi({"cards": [{
+        "id": "cash_flow_structure", "topic_id": "cash", "kind": "cash_flow",
+        "rows": [
+            {"metric_id": "operating_cash_flow", "label": "经营活动现金流净额", "value": 12,
+             "unit": "亿元", "direction": "inflow", "evidence_ids": [pdf_record.stable_id]},
+            {"metric_id": "investing_cash_flow", "label": "投资活动现金流净额", "value": -3,
+             "unit": "亿元", "direction": "outflow", "evidence_ids": [pdf_record.stable_id]},
+        ],
+    }]})
+
+    result = AiStructureVisualizer(ai).analyze(
+        [pdf_record, web_record], "2025-12-31", {"cash_flow_structure": "cash"}
+    )
+
+    assert result.cards[0].status == "partial"
+    assert result.cards[0].rows[0].evidence_ids == (pdf_record.stable_id,)
+    assert web_record.stable_id not in ai.last_prompt
+    prompt = json.loads(ai.last_prompt)
+    assert prompt["evidence"] == [{
+        "evidence_id": pdf_record.stable_id,
+        "page": 12,
+        "period": "2025-12-31",
+        "text": "现金流量表披露。",
+    }]
+
+
+def test_structure_visualizer_excludes_wrong_scope_period_and_unlocatable_pdf_records():
+    valid = _record("valid", source_type=SourceType.PDF_TEXT, page=8, text="有效页")
+    invalid_records = [
+        _record("parent", source_type=SourceType.PDF_TEXT, page=9, text="母公司页", entity_scope=EntityScope.PARENT),
+        _record("prior", source_type=SourceType.PDF_TEXT, page=10, text="上期页", period="2024-12-31"),
+        _record("unlocated", source_type=SourceType.PDF_TEXT, page=None, text="无页码"),
+    ]
+    ai = FakeAi({"cards": []})
+
+    AiStructureVisualizer(ai).analyze(
+        [valid, *invalid_records], "2025-12-31", {"cash_flow_structure": "cash"}
+    )
+
+    prompt = json.loads(ai.last_prompt)
+    assert [item["evidence_id"] for item in prompt["evidence"]] == [valid.stable_id]
+
+
+@pytest.mark.parametrize("payload, topic_ids", [
+    ({"cards": [{
+        "id": "cash_flow_structure", "topic_id": "cash", "kind": "cash_flow",
+        "rows": [{"metric_id": "operating_cash_flow", "label": "经营活动现金流净额",
+                  "value": 12, "unit": "亿元", "direction": "inflow",
+                  "evidence_ids": ["missing"]}],
+    }]}, {"cash_flow_structure": "cash"}),
+    ({"cards": "not-an-array"}, {"cash_flow_structure": "cash"}),
+    ({"cards": []}, {}),
+])
+def test_structure_visualizer_safely_degrades_invalid_evidence_or_missing_topic(payload, topic_ids):
+    pdf_record = _record("pdf", source_type=SourceType.PDF_TEXT, page=12, text="现金流量表披露。")
+    result = AiStructureVisualizer(FakeAi(payload)).analyze(
+        [pdf_record], "2025-12-31", topic_ids
+    )
+    assert not result.cards or result.cards[0].status == "unavailable"
+
+
+def test_structure_visualizer_downgrades_when_pdf_has_no_provable_current_period_cell():
+    ai = SequenceAi(["{}"])
+    page_record = _record(
+        "same-page", source_type=SourceType.PDF_TEXT, page=12,
+        text="本期 100 上期 90", current_period_cell=False,
+    )
+    result = AiStructureVisualizer(ai).analyze(
+        [page_record], "2025-12-31", {"cash_flow_structure": "cash"}
+    )
+    assert result.cards == ()
+    assert ai.calls == 0
+
+
+def test_structure_visualizer_safely_degrades_invalid_json():
+    pdf_record = _record("pdf", source_type=SourceType.PDF_TEXT, page=12, text="现金流量表披露。")
+    result = AiStructureVisualizer(SequenceAi(["not json", "still not json"])).analyze(
+        [pdf_record], "2025-12-31", {"cash_flow_structure": "cash"}
+    )
+    assert result.cards == ()
+
+
+@pytest.mark.parametrize("error", [RuntimeError("AI HTTP 失败"), TimeoutError("AI 超时")])
+def test_structure_visualizer_safely_degrades_service_errors(error):
+    class RaisingAi:
+        def ask(self, *_args, **_kwargs):
+            raise error
+
+    pdf_record = _record("pdf", source_type=SourceType.PDF_TEXT, page=12, text="现金流量表披露。")
+
+    result = AiStructureVisualizer(RaisingAi()).analyze(
+        [pdf_record], "2025-12-31", {"cash_flow_structure": "cash"}
+    )
+
+    assert result.cards == ()
 
 
 def test_insight_analyzer_limits_highlight_and_risk_to_verified_evidence():
