@@ -237,7 +237,8 @@ class AiStructureVisualizer:
                 },
                 max_tokens=2400,
             )
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except Exception:
+            # 结构图是正文分析的可选增强；任意 AI 服务/解析失败均安全降级。
             return VisualizationBundle(version=1, cards=())
 
         raw_cards = data.get("cards", ())

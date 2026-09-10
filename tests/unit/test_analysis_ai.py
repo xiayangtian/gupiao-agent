@@ -263,6 +263,21 @@ def test_structure_visualizer_safely_degrades_invalid_json():
     assert result.cards == ()
 
 
+@pytest.mark.parametrize("error", [RuntimeError("AI HTTP 失败"), TimeoutError("AI 超时")])
+def test_structure_visualizer_safely_degrades_service_errors(error):
+    class RaisingAi:
+        def ask(self, *_args, **_kwargs):
+            raise error
+
+    pdf_record = _record("pdf", source_type=SourceType.PDF_TEXT, page=12, text="现金流量表披露。")
+
+    result = AiStructureVisualizer(RaisingAi()).analyze(
+        [pdf_record], "2025-12-31", {"cash_flow_structure": "cash"}
+    )
+
+    assert result.cards == ()
+
+
 def test_insight_analyzer_limits_highlight_and_risk_to_verified_evidence():
     record = _record("e1", VerificationState.SINGLE_SOURCE)
     candidate = InsightCandidate(
