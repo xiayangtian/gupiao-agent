@@ -65,6 +65,15 @@ def test_topic_tab_row_wraps_instead_of_clipping():
     assert "flex-wrap: wrap" in _css_rule(css, ".analysis-result-tabs")
 
 
+def test_v4_history_report_uses_progressive_renderer_and_mounts_visualizations():
+    """v4 结果必须沿用渐进式正文，并在重渲染时管理可视化图表实例。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "Number(content.schema_version) >= 3" in source
+    assert "AnalysisVisualizations.mount" in source
+    assert "AnalysisVisualizations.destroy" in source
+
+
 def test_topic_tab_binding_always_uses_the_current_report_key():
     """同一容器复用时必须刷新 key，否则切换报告后主题 Tab 会串到上一份报告。"""
     source = APP_JS.read_text(encoding="utf-8")

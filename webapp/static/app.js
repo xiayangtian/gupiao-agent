@@ -53,7 +53,7 @@ const STATE = {
   chatFocusReport: null,        // {code, period, company} 历史记录跳转：聚焦该报告（提升 RAG 权重）
 
   // Chart instances
-  charts: { revenue: null, ratio: null },
+  charts: { revenue: null, ratio: null, visualizations: null },
 
   // Request dedup
   reqIds: { reports: 0, analyze: 0, qa: 0, suggestions: 0 },
@@ -651,7 +651,7 @@ function renderAnalysisPanel(key) {
   if (!ar) return;
   var st = STATE.analysisCache[key];
   if (!st) { ar.innerHTML = ''; updateBackgroundAnalysisStatus(null); return; }
-  var progressive = st.data && (st.data.schema_version === 3 || st.data.quick
+  var progressive = st.data && (Number(st.data.schema_version) >= 3 || st.data.quick
     || Array.isArray(st.data.sections) || st.data.stage);
   updateBackgroundAnalysisStatus(st);
   if ((st.status === 'pending' || st.status === 'running') && progressive) {
@@ -660,6 +660,7 @@ function renderAnalysisPanel(key) {
     ) + '<p class="hint analysis-deep-hint">快速结论会先展示；详细主题仍在后台分析，完成后会自动补充。</p>'
       + '<button id="stop-analyze-btn" class="btn danger full-btn">⏹ 停止分析</button>';
     bindProgressiveTabs(ar, key);
+    mountAnalysisVisualizations(ar, st.data, false);
     var stopBtn = $('#stop-analyze-btn');
     if (stopBtn) stopBtn.addEventListener('click', function () { stopAnalysis(key, st.taskId); });
   } else if (st.status === 'pending' || st.status === 'running') {
@@ -680,6 +681,7 @@ function renderAnalysisPanel(key) {
         st.data || {}, { evidenceAnchor: 'analysis-evidence-main' }
       );
       bindProgressiveTabs(ar, key);
+      mountAnalysisVisualizations(ar, st.data, false);
     } else {
       ar.innerHTML = renderReport(st.data || {});
       bindDimTabs(ar);
@@ -725,6 +727,25 @@ function openHistoryEvidencePdfPage(page) {
     + '?jump=' + encodeURIComponent(Date.now()) + '#page=' + page;
   if (frame.focus) frame.focus();
   return true;
+}
+
+function mountAnalysisVisualizations(container, data, isHistory) {
+  var visualizer = window.AnalysisVisualizations;
+  if (!visualizer || typeof visualizer.mount !== 'function') return;
+  if (STATE.charts.visualizations && typeof visualizer.destroy === 'function') {
+    visualizer.destroy(STATE.charts.visualizations);
+  }
+  STATE.charts.visualizations = window.AnalysisVisualizations.mount(container, data && data.visualizations, {
+    onEvidencePage: function (page) {
+      if (isHistory) {
+        openHistoryEvidencePdfPage(page);
+      } else if (container) {
+        container.dispatchEvent(new CustomEvent('analysis:evidence-page', {
+          bubbles: true, detail: { page: page }
+        }));
+      }
+    }
+  });
 }
 
 function bindProgressiveTabs(container, key) {
@@ -1425,7 +1446,7 @@ function renderHistoryAnalysisState(item) {
     badge.className = badgeModel.className;
   }
   if (cached && (cached.status === 'pending' || cached.status === 'running')) {
-    if (cached.data && (cached.data.schema_version === 3 || cached.data.quick
+    if (cached.data && (Number(cached.data.schema_version) >= 3 || cached.data.quick
         || Array.isArray(cached.data.sections) || cached.data.stage)) {
       detail.innerHTML = '<div class="analysis-background-status inline" role="status" aria-live="polite">'
         + '<span class="analysis-background-dot" aria-hidden="true"></span><span><strong>'
@@ -1436,6 +1457,7 @@ function renderHistoryAnalysisState(item) {
           evidenceAnchor: 'analysis-evidence-history'
         });
       bindProgressiveTabs(detail, analysisKey(item.code, item.period));
+      mountAnalysisVisualizations(detail, cached.data, true);
     } else {
       detail.innerHTML = renderAnalysisProgress(cached);
     }
@@ -1453,7 +1475,7 @@ function renderHistoryAnalysisState(item) {
     return true;
   }
   if (cached && cached.status === 'done' && cached.data) {
-    if (cached.data.schema_version === 3) {
+    if (Number(cached.data.schema_version) >= 3) {
       renderAnalysisInDetail(item.company, item.code, item.period, item.year,
         cached.data, '来源：reports/analysis/' + (item.analysis_filename || ''));
     } else {
@@ -1553,7 +1575,7 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   if (!detail) return;
   detail.classList.remove('hint');
 
-  var isProgressive = Number(content.schema_version) === 3;
+  var isProgressive = Number(content.schema_version) >= 3;
   if (isProgressive && !STATE.analysisCache[analysisKey(code, period)]) {
     STATE.analysisCache[analysisKey(code, period)] = { status: 'done', data: content };
   }
@@ -1601,8 +1623,10 @@ function renderAnalysisInDetail(company, code, period, year, content, source) {
   detail.innerHTML = html;
 
   // 维度 Tab 切换（事件委托，容器常驻只绑定一次）
-  if (isProgressive) bindProgressiveTabs(detail, analysisKey(code, period));
-  else bindDimTabs(detail);
+  if (isProgressive) {
+    bindProgressiveTabs(detail, analysisKey(code, period));
+    mountAnalysisVisualizations(detail, content, true);
+  } else bindDimTabs(detail);
 
   // 跳转到智能问答（聚焦本报告，提升 RAG 检索权重）
   var hQaGoto = $('#h-qa-goto-btn');
@@ -1800,6 +1824,13 @@ async function sendHistoryQA(code, period) {
 function destroyAllCharts() {
   if (STATE.charts.revenue) { STATE.charts.revenue.destroy(); STATE.charts.revenue = null; }
   if (STATE.charts.ratio)   { STATE.charts.ratio.destroy();   STATE.charts.ratio = null; }
+  if (STATE.charts.visualizations) {
+    var visualizer = window.AnalysisVisualizations;
+    if (visualizer && typeof visualizer.destroy === 'function') {
+      window.AnalysisVisualizations.destroy(STATE.charts.visualizations);
+    }
+    STATE.charts.visualizations = null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -89,10 +89,11 @@ def test_structure_visualization_mounts_charts_and_binds_pdf_buttons():
             {{ label: '投资', value: -1, unit: '亿元', direction: 'outflow' }}
           ]
         }}] }}, {{ onEvidencePage: value => page = value }});
-        evidenceButton.listener();
+        let propagationStopped = false;
+        evidenceButton.listener({{ stopPropagation: () => propagationStopped = true }});
         const created = charts.size;
         visuals.destroy(charts);
-        console.log(JSON.stringify({{ created, cleared: charts.size, page, destroyed }}));
+        console.log(JSON.stringify({{ created, cleared: charts.size, page, destroyed, propagationStopped }}));
         """
     )
-    assert result == {"created": 1, "cleared": 0, "page": 18, "destroyed": 1}
+    assert result == {"created": 1, "cleared": 0, "page": 18, "destroyed": 1, "propagationStopped": True}

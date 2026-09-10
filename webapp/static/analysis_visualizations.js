@@ -140,7 +140,10 @@
     });
     if (options && typeof options.onEvidencePage === 'function') {
       container.querySelectorAll('.analysis-visualization-evidence[data-evidence-page]').forEach(function (button) {
-        button.addEventListener('click', function () { options.onEvidencePage(Number(button.dataset.evidencePage)); });
+        button.addEventListener('click', function (event) {
+          if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+          options.onEvidencePage(Number(button.dataset.evidencePage));
+        });
       });
     }
     return charts;
