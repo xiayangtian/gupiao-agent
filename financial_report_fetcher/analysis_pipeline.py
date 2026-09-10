@@ -105,6 +105,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def analysis_output_stem(analysis_id: str) -> str:
+    """把 analysis_id 转为可用的输出文件名（不含扩展名）。"""
+    safe_id = "".join(
+        character if character.isalnum() or character in "-_" else "_"
+        for character in analysis_id
+    ).strip("_")
+    if not safe_id:
+        raise ValueError("analysis_id 不能生成空文件名")
+    return safe_id
+
+
 def _timed_call(call, *args):
     started = perf_counter()
     return call(*args), round((perf_counter() - started) * 1000, 3)
@@ -148,12 +159,7 @@ class ProgressiveAnalysisPipeline:
         )
 
     def _paths(self, request: AnalysisPipelineRequest) -> tuple[Path, Path]:
-        safe_id = "".join(
-            character if character.isalnum() or character in "-_" else "_"
-            for character in request.analysis_id
-        ).strip("_")
-        if not safe_id:
-            raise ValueError("analysis_id 不能生成空文件名")
+        safe_id = analysis_output_stem(request.analysis_id)
         return self.output_dir / f"{safe_id}.json", self.output_dir / f"{safe_id}.md"
 
     def _save(self, document: AnalysisDocument, request: AnalysisPipelineRequest) -> None:

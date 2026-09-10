@@ -373,6 +373,7 @@
   }
 
   function findingTone(item) {
+    // 只有明确的风险/观察/重点判定才挂标签；无判定时按一般结论呈现，不显示兜底标签。
     if (item && (item.risk_state === 'verified_risk' || item.style === 'verified_risk')) {
       return { key: 'risk', label: '风险' };
     }
@@ -380,7 +381,7 @@
     if (item && (item.risk_state === 'neutral' || item.style === 'highlight')) {
       return { key: 'highlight', label: '重点' };
     }
-    return { key: 'pending', label: '待核验' };
+    return null;
   }
 
   function evidenceAnchor(options) {
@@ -447,8 +448,9 @@
         + (citations ? ' <span class="analysis-inline-citations">' + citations + '</span>' : '') + '</p>';
     }
     var tone = findingTone(finding);
-    return '<article class="analysis-report-finding analysis-tone-' + tone.key + '">'
-      + '<span class="analysis-finding-label">' + tone.label + '</span>'
+    return '<article class="analysis-report-finding'
+      + (tone ? ' analysis-tone-' + tone.key : '') + '">'
+      + (tone ? '<span class="analysis-finding-label">' + tone.label + '</span>' : '')
       + (finding.title ? '<h3>' + escapeMarkup(finding.title) + '</h3>' : '')
       + '<p>' + emphasizedText(claim, finding.highlight_spans) + '</p>'
       + (keyData ? '<p class="analysis-key-data">' + escapeMarkup(keyData) + '</p>' : '')
@@ -464,8 +466,9 @@
       var claim = finding.claim || finding.text || finding.summary || '';
       if (!claim) return '';
       var tone = findingTone(finding);
-      return '<article class="summary-item summary-tone-' + tone.key + '">'
-        + '<span class="analysis-finding-label">' + tone.label + '</span>'
+      return '<article class="summary-item'
+        + (tone ? ' summary-tone-' + tone.key : '') + '">'
+        + (tone ? '<span class="analysis-finding-label">' + tone.label + '</span>' : '')
         + '<p>' + escapeMarkup(claim) + '</p>'
         + (finding.key_data ? '<strong>' + escapeMarkup(finding.key_data) + '</strong>' : '')
         + '</article>';

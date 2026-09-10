@@ -648,3 +648,76 @@ def test_progressive_renderer_places_visualization_slot_before_topic_findings():
         """
     )
     assert result == {"slotBeforeFinding": True, "pdfPage": True}
+
+
+def test_conclusion_card_without_tone_verdict_renders_without_any_label():
+    """没有重点/风险/观察判定时，结论卡片不显示标签（含旧的待核验兜底）。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{
+            claim: '客户存款是主要资金来源，贷款与金融投资构成主要资产。',
+            key_data: '资产负债率约93.5%',
+            significance: '资本充足率与流动性覆盖率显示资本与流动性缓冲尚可，需持续关注负债成本变化。',
+            evidence_ids: ['pdf-1']
+          }}] }},
+          evidence_catalog: {{ 'pdf-1': {{ label: '合并资产负债表', source_type: 'pdf_text',
+            source_locator: {{ page: 20 }} }} }}
+        }});
+        console.log(JSON.stringify({{
+          label: html.includes('analysis-finding-label'),
+          pendingTone: html.includes('analysis-tone-pending'),
+          card: html.includes('analysis-report-finding'),
+          claim: html.includes('客户存款是主要资金来源'),
+          keyData: html.includes('analysis-key-data'),
+          significance: html.includes('资本充足率与流动性覆盖率'),
+          citation: html.includes('data-evidence-page="20"')
+        }}));
+        """
+    )
+
+    assert result == {
+        "label": False,
+        "pendingTone": False,
+        "card": True,
+        "claim": True,
+        "keyData": True,
+        "significance": True,
+        "citation": True,
+    }
+
+
+def test_tone_labels_render_only_for_risk_observation_and_highlight():
+    """只有明确的风险/观察/重点判定才显示标签，其余按一般结论呈现。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const section = {{
+          section_id: 's1', title: '盈利质量',
+          findings: [
+            {{ claim: '减值计提大幅上升。', significance: '需关注资产质量。',
+               evidence_ids: ['e1'], risk_state: 'verified_risk' }},
+            {{ claim: '利息净收入保持稳定。', significance: '收入结构未变。',
+               evidence_ids: ['e1'], risk_state: 'neutral' }},
+            {{ claim: '同业负债占比偏高。', significance: '证据不足，仅作观察。',
+               evidence_ids: ['e1'], style: 'observation' }},
+            {{ claim: '管理层未披露分红计划。', significance: '披露缺失。',
+               evidence_ids: ['e1'] }}
+          ]
+        }};
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 's1', stage: 'completed', sections: [section],
+          evidence_catalog: {{ e1: {{ label: '利润表', source_type: 'pdf_text',
+            source_locator: {{ page: 9 }} }} }}
+        }});
+        const labels = Array.from(html.matchAll(/analysis-finding-label">([^<]+)</g)).map(function (m) {{ return m[1]; }});
+        console.log(JSON.stringify({{
+          labels: labels,
+          pending: html.includes('待核验')
+        }}));
+        """
+    )
+
+    assert result == {"labels": ["风险", "重点", "观察"], "pending": False}
