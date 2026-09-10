@@ -5,8 +5,12 @@
 
 文件命名约定（与 downloader.build_filename / AnalysisReport.save 对齐）：
     PDF:   {公司}_{代码}_{年报|半年报|季报}_{年份}.pdf
-    分析:  {公司}_{代码}_{年份}_分析报告.json   （Web，safe_company 含 6 位代码）
+    分析:  {公司}_{代码}_{期次}_分析报告.json   （Web，期次为 YYYY-MM-DD）
+           {公司}_{代码}_{年份}_分析报告.json   （旧格式，年份形式）
            {公司}_{年份}_分析报告.json          （旧 CLI，无代码）
+
+同一报告期只保留一份分析：重新分析后旧命名（年份形式）会被清理，
+见 retire_superseded_analysis_files。
 """
 
 import json
@@ -147,7 +151,7 @@ def build_flat_history(analysis_dir: str, reports_dir: str) -> List[Dict[str, An
                 mtime = 0.0
             key = f"{code}:{period}"
             company = meta.get("company", parsed.get("company_label", code)) if isinstance(meta, dict) else code
-            analyzed[key] = {
+            entry = {
                 "code": code,
                 "company": _strip_ticker(company) if isinstance(company, str) else str(company),
                 "year": year,
@@ -159,6 +163,11 @@ def build_flat_history(analysis_dir: str, reports_dir: str) -> List[Dict[str, An
                 "analysis_mtime": mtime,
                 "pdf_mtime": 0.0,
             }
+            previous = analyzed.get(key)
+            if previous is not None and _analysis_rank(previous) > _analysis_rank(entry):
+                # 同一报告期存在多份产物时以最新一份为准；旧年份命名不得盖过新期次结果
+                continue
+            analyzed[key] = entry
 
     # 2) 收集已下载的 PDF
     items: Dict[str, Dict[str, Any]] = dict(analyzed)  # 已分析项优先
@@ -206,6 +215,53 @@ def build_flat_history(analysis_dir: str, reports_dir: str) -> List[Dict[str, An
 def _strip_ticker(text: str) -> str:
     """去掉公司名中的股票代码括号，如 '长江电力（600900）' → '长江电力'"""
     return re.sub(r"[（(]?\d{6}[)）]?$", "", text).strip()
+
+
+def _analysis_rank(entry: Dict[str, Any]) -> tuple:
+    """同一报告期多份产物的优先级：先生成时间，再标准期次命名。"""
+    canonical = 1 if re.search(r"_\d{4}-\d{2}-\d{2}_分析报告\.json$", entry["analysis_filename"]) else 0
+    return (float(entry.get("analysis_mtime") or 0.0), canonical)
+
+
+def retire_superseded_analysis_files(
+    analysis_dir: str, *, code: str, period: str, keep_filename: str
+) -> List[str]:
+    """清理同一报告期被取代的分析产物，返回被删除的文件名。
+
+    仅当文件名可解析且 meta 指向同一 (code, period) 时删除，并连带删除同名 .md；
+    身份无法确认（解析失败/文件损坏）一律保留，避免误删其他期次。
+    """
+    removed: List[str] = []
+    if not os.path.isdir(analysis_dir):
+        return removed
+    keep_stem = keep_filename[: -len(".json")] if keep_filename.endswith(".json") else keep_filename
+    for fname in sorted(os.listdir(analysis_dir)):
+        if not fname.endswith(ANALYSIS_SUFFIX):
+            continue
+        stem = fname[: -len(".json")]
+        if stem == keep_stem:
+            continue
+        content = _read_analysis(os.path.join(analysis_dir, fname))
+        if content is None or not parse_analysis_filename(fname):
+            continue
+        meta = content.get("meta", {}) if isinstance(content, dict) else {}
+        report_id = derive_analysis_report_id(fname, meta)
+        if report_id is None:
+            continue
+        report_code, report_period, _report_type = report_id.split(":")
+        if report_code != code or report_period != period:
+            continue
+        for candidate in (fname, f"{stem}.md"):
+            path = os.path.join(analysis_dir, candidate)
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                logger.warning("清理旧分析产物失败：%s", path)
+                continue
+            removed.append(candidate)
+    return removed
 
 
 def get_analysis_detail(analysis_dir: str, filename: str) -> Optional[Dict[str, Any]]:

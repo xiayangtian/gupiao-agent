@@ -50,12 +50,14 @@ def test_conclusion_emphasis_uses_readable_red_instead_of_browser_yellow():
         assert "yellow" not in rule
 
 
-def test_unverified_conclusion_card_uses_a_neutral_label():
-    """待核验不是告警，不应使用橙黄色危险标识。"""
+def test_conclusions_without_tone_verdict_never_show_a_pending_label():
+    """没有重点/风险/观察判定时按一般结论呈现，不再输出“待核验”兜底标签与样式。"""
+    source = WORKFLOW_JS.read_text(encoding="utf-8")
     css = STYLE_CSS.read_text(encoding="utf-8")
 
-    assert "var(--warning)" not in _css_rule(css, ".analysis-tone-pending")
-    assert "var(--warning" not in _css_rule(css, ".analysis-tone-pending .analysis-finding-label")
+    assert "待核验" not in source
+    assert ".analysis-tone-pending" not in css
+    assert ".summary-tone-pending" not in css
 
 
 def test_topic_tab_row_wraps_instead_of_clipping():
@@ -131,7 +133,7 @@ def test_analysis_report_styles_define_semantic_tones_and_visible_focus():
     for selector in (
         ".analysis-report-body", ".analysis-report-finding",
         ".analysis-tone-risk", ".analysis-tone-highlight",
-        ".analysis-tone-observation", ".analysis-tone-pending", ".analysis-evidence-section",
+        ".analysis-tone-observation", ".analysis-evidence-section",
         ".analysis-evidence-page:focus-visible", ".analysis-result-tab.active",
     ):
         assert selector in css

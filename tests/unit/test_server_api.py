@@ -278,6 +278,55 @@ class TestAnalyze:
         assert result["quick"]["conclusions"]
         assert result["sections"][0]["section_id"] == "financial-overview"
 
+    def test_reanalyze_retires_legacy_year_form_analysis_products(
+        self, client, env, monkeypatch, tmp_path
+    ):
+        """重新分析同一报告期后，旧年份命名的分析产物必须被替换，避免历史出现两份。"""
+        analysis_dir = tmp_path / "analysis"
+        analysis_dir.mkdir()
+        monkeypatch.setattr(server, "ANALYSIS_DIR", str(analysis_dir))
+        legacy_json = analysis_dir / "长江电力_600900_2025_分析报告.json"
+        legacy_md = analysis_dir / "长江电力_600900_2025_分析报告.md"
+        legacy_json.write_text(
+            json.dumps(
+                {"meta": {"company": "长江电力", "period": "2025-12-31"}, "dimensions": []},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        legacy_md.write_text("# 旧分析", encoding="utf-8")
+
+        r = client.post(
+            "/api/reports/600900/2025-12-31/analyze",
+            json={"dimensions": ["financial_summary"]},
+        )
+        task = self._poll_until_done(client, r.json()["task_id"])
+
+        assert task["status"] == "done"
+        assert not legacy_json.exists()
+        assert not legacy_md.exists()
+
+    def test_legacy_cleanup_failure_does_not_fail_completed_analysis(
+        self, client, env, monkeypatch, tmp_path
+    ):
+        """旧产物清理是尽力而为：失败不得把已成功保存的分析任务变成 failed。"""
+        analysis_dir = tmp_path / "analysis"
+        analysis_dir.mkdir()
+        monkeypatch.setattr(server, "ANALYSIS_DIR", str(analysis_dir))
+
+        def boom(*args, **kwargs):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(server, "retire_superseded_analysis_files", boom)
+
+        r = client.post(
+            "/api/reports/600900/2025-12-31/analyze",
+            json={"dimensions": ["financial_summary"]},
+        )
+        task = self._poll_until_done(client, r.json()["task_id"])
+
+        assert task["status"] == "done"
+
     def test_analyze_returns_json_503_when_report_source_times_out(self, client, env):
         """上游财报源超时应转为可供前端消费的 HTTP 异常。"""
         env["fake_ds"].fetch_reports.side_effect = requests.exceptions.ReadTimeout(

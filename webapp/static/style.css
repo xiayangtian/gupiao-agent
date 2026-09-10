@@ -1277,8 +1277,7 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .summary-item p { margin: 0; font-size: 14px; }
 .summary-item strong { color: var(--text-primary); font-size: 13px; font-variant-numeric: tabular-nums; }
 .summary-tone-risk { border-left-color: var(--danger); }
-.summary-tone-observation,
-.summary-tone-pending { border-left-color: var(--warning); }
+.summary-tone-observation { border-left-color: var(--warning); }
 
 .analysis-report-body {
   display: grid;
@@ -1323,13 +1322,7 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .analysis-tone-risk .analysis-finding-label { background: var(--danger-light); color: var(--danger); }
 .analysis-tone-highlight { border-left: 3px solid var(--accent); padding-left: 14px; }
 .analysis-tone-observation { border-left: 3px solid var(--warning); padding-left: 14px; }
-.analysis-tone-pending { border-left: 3px solid var(--border-hover); padding-left: 14px; }
 .analysis-tone-observation .analysis-finding-label { background: var(--warning-light); color: var(--warning); }
-.analysis-tone-pending .analysis-finding-label {
-  border: 1px solid var(--border);
-  background: var(--surface-alt);
-  color: var(--text-secondary);
-}
 
 .analysis-key-data {
   color: var(--text-primary);

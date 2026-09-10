@@ -1,12 +1,14 @@
 """webapp.history 单元测试"""
 
 import json
+import os
 
 from webapp.history import (
     analyzed_periods_for_code,
     build_flat_history,
     get_analysis_detail,
     parse_pdf_filename,
+    retire_superseded_analysis_files,
 )
 
 
@@ -134,3 +136,75 @@ def test_history_reads_v3_analysis_and_uses_report_identity(tmp_path):
     assert [(item["code"], item["period"], item["company"]) for item in items] == [
         ("600900", "2025-12-31", "长江电力")
     ]
+
+
+def test_history_prefers_newest_analysis_when_same_period_has_legacy_and_canonical_names(
+    tmp_path,
+):
+    """同一报告期同时存在旧年份命名与新期次命名时，历史必须展示较新的一份。"""
+    legacy = tmp_path / "长江电力_600900_2025_分析报告.json"
+    canonical = tmp_path / "长江电力_600900_2025-12-31_分析报告.json"
+    _write_analysis(tmp_path, legacy.name, period="2025-12-31")
+    _write_analysis(tmp_path, canonical.name, period="2025-12-31")
+    # 新期次文件更晚生成（重新分析的结果）
+    os.utime(legacy, (1_700_000_000, 1_700_000_000))
+    os.utime(canonical, (1_700_000_500, 1_700_000_500))
+
+    items = build_flat_history(str(tmp_path), str(tmp_path / "reports"))
+
+    assert [(item["period"], item["analysis_filename"]) for item in items] == [
+        ("2025-12-31", canonical.name),
+    ]
+
+
+def test_history_prefers_canonical_name_when_same_period_mtimes_tie(tmp_path):
+    """时间戳相同时，优先采用带精确期次的标准命名，而不是旧的年份形式。"""
+    legacy = tmp_path / "长江电力_600900_2025_分析报告.json"
+    canonical = tmp_path / "长江电力_600900_2025-12-31_分析报告.json"
+    _write_analysis(tmp_path, legacy.name, period="2025-12-31")
+    _write_analysis(tmp_path, canonical.name, period="2025-12-31")
+    os.utime(legacy, (1_700_000_000, 1_700_000_000))
+    os.utime(canonical, (1_700_000_000, 1_700_000_000))
+
+    items = build_flat_history(str(tmp_path), str(tmp_path / "reports"))
+
+    assert [item["analysis_filename"] for item in items] == [canonical.name]
+
+
+def test_retire_superseded_analysis_files_removes_only_same_period_legacy_products(
+    tmp_path,
+):
+    """重新分析后应清理同报告期的旧年份产物（json 与 md），不触碰其他期次。"""
+    keep = "长江电力_600900_2025-12-31_分析报告.json"
+    legacy_json = "长江电力_600900_2025_分析报告.json"
+    legacy_md = "长江电力_600900_2025_分析报告.md"
+    other_period = "长江电力_600900_2024_分析报告.json"
+    for name in (keep, legacy_json):
+        _write_analysis(tmp_path, name, period="2025-12-31")
+    _write_analysis(tmp_path, other_period, period="2024-12-31")
+    (tmp_path / legacy_md).write_text("# 旧报告", encoding="utf-8")
+
+    removed = retire_superseded_analysis_files(
+        str(tmp_path), code="600900", period="2025-12-31", keep_filename=keep
+    )
+
+    assert sorted(removed) == sorted([legacy_json, legacy_md])
+    assert (tmp_path / keep).exists()
+    assert (tmp_path / other_period).exists()
+    assert not (tmp_path / legacy_json).exists()
+    assert not (tmp_path / legacy_md).exists()
+
+
+def test_retire_superseded_analysis_files_keeps_unreadable_files(tmp_path):
+    """身份无法确认的文件不得删除，避免误删他期或损坏产物。"""
+    keep = "长江电力_600900_2025-12-31_分析报告.json"
+    broken = "长江电力_600900_2025_分析报告.json"
+    _write_analysis(tmp_path, keep, period="2025-12-31")
+    (tmp_path / broken).write_text("{ 不是 JSON", encoding="utf-8")
+
+    removed = retire_superseded_analysis_files(
+        str(tmp_path), code="600900", period="2025-12-31", keep_filename=keep
+    )
+
+    assert removed == []
+    assert (tmp_path / broken).exists()

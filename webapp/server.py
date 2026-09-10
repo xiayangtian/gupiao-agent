@@ -33,7 +33,10 @@ from pydantic import BaseModel, Field
 
 from financial_report_fetcher.ai_client import AIClient
 from financial_report_fetcher.analysis_ai import build_progressive_pipeline
-from financial_report_fetcher.analysis_pipeline import AnalysisPipelineRequest
+from financial_report_fetcher.analysis_pipeline import (
+    AnalysisPipelineRequest,
+    analysis_output_stem,
+)
 from financial_report_fetcher.analyzer import (
     ANALYSIS_TEMPLATES,
     ReportAnalyzer,
@@ -61,7 +64,12 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 from .autocomplete import StockIndex
 from .chat_store import ChatStore
 from .mcp_guard import McpCircuitBreaker
-from .history import analyzed_periods_for_code, build_flat_history, get_analysis_detail
+from .history import (
+    analyzed_periods_for_code,
+    build_flat_history,
+    get_analysis_detail,
+    retire_superseded_analysis_files,
+)
 from .tasks import TaskManager
 
 logger = logging.getLogger(__name__)
@@ -1006,6 +1014,23 @@ def _analysis_progress_value(event: Dict[str, Any]) -> float:
     return 0.18
 
 
+def _retire_superseded_analysis(analysis_id: str, code: str, period: dt.date) -> None:
+    """清理同报告期被取代的旧命名分析产物（一期一份），尽力而为且不阻断分析。"""
+    try:
+        keep_filename = f"{analysis_output_stem(analysis_id)}.json"
+        removed = retire_superseded_analysis_files(
+            ANALYSIS_DIR,
+            code=code,
+            period=period.isoformat(),
+            keep_filename=keep_filename,
+        )
+    except (OSError, ValueError):
+        logger.exception("清理同报告期旧分析产物失败：%s", analysis_id)
+        return
+    if removed:
+        logger.info("已清理同报告期旧分析产物：%s", "、".join(removed))
+
+
 @app.post("/api/reports/{code}/{period}/analyze")
 def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, Any]:
     _require_ai()
@@ -1029,6 +1054,7 @@ def analyze_report(code: str, period: str, body: AnalyzeRequest) -> Dict[str, An
             interests=tuple(interests),
         )
         document = _get_progressive_pipeline().run(request, emit, stop_event)
+        _retire_superseded_analysis(analysis_id, code, p)
         _auto_ingest_report(path)
         return document
 
