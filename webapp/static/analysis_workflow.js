@@ -518,6 +518,88 @@
     });
   }
 
+  var ANALYSIS_SCORE_FIELDS = [
+    'evidence_sufficiency', 'source_reliability', 'materiality', 'clarity',
+    'interest_relevance'
+  ];
+
+  function analysisSectionScore(section) {
+    var score = section && section.score;
+    if (!score || typeof score !== 'object') return null;
+    var total = 0;
+    for (var index = 0; index < ANALYSIS_SCORE_FIELDS.length; index += 1) {
+      var value = score[ANALYSIS_SCORE_FIELDS[index]];
+      if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+      total += value;
+    }
+    return Number.isFinite(total) ? total : null;
+  }
+
+  function analysisTabLabel(section) {
+    var item = section || {};
+    var tabLabel = typeof item.tab_label === 'string' ? item.tab_label : '';
+    if (/^[A-Za-z0-9\u4e00-\u9fff]{1,6}$/.test(tabLabel)) return tabLabel;
+
+    var title = String(item.title || '').trim();
+    var keywordLabels = [
+      ['现金流', ['现金流', '经营现金', '净现金']],
+      ['资产负债', ['资产负债', '偿债', '负债率', '资产质量']],
+      ['盈利结构', ['盈利', '利润', '毛利', '收益质量']],
+      ['成本费用', ['成本', '费用', '费率']],
+      ['股东回报', ['股东回报', '分红', '回购', '每股收益']],
+      ['股权治理', ['股权', '治理', '董事', '控制人']],
+      ['风险事项', ['风险', '不确定', '减值', '诉讼']],
+      ['研发投入', ['研发', '技术', '专利']],
+      ['运营效率', ['运营', '周转', '产能', '订单']],
+    ];
+    for (var index = 0; index < keywordLabels.length; index += 1) {
+      if (keywordLabels[index][1].some(function (keyword) {
+        return title.indexOf(keyword) >= 0;
+      })) return keywordLabels[index][0];
+    }
+    var firstClause = title.split(/[，。；：、！？,.!?:;\n]/)[0].trim() || '主题';
+    return firstClause.slice(0, 6) + '…';
+  }
+
+  function analysisSectionImportance(sections) {
+    var items = Array.isArray(sections) ? sections : [];
+    var scores = items.map(analysisSectionScore).filter(function (score) { return score !== null; });
+    var maximum = scores.length ? Math.max.apply(Math, scores) : null;
+    return items.reduce(function (importance, section) {
+      var score = analysisSectionScore(section);
+      var level = 'normal';
+      if (score !== null && maximum !== null) {
+        if (score >= maximum - 3) level = 'high';
+        else if (score >= maximum - 8) level = 'medium';
+      }
+      importance[String((section || {}).section_id || '')] = level;
+      return importance;
+    }, {});
+  }
+
+  function orderAnalysisSections(sections) {
+    var items = Array.isArray(sections) ? sections : [];
+    return items.map(function (section, index) {
+      return {
+        section: section,
+        index: index,
+        score: analysisSectionScore(section),
+        findings: Array.isArray(section && section.findings) ? section.findings.length : 0,
+        sectionId: String((section || {}).section_id || ''),
+      };
+    }).sort(function (left, right) {
+      if (left.score !== right.score) {
+        if (left.score === null) return 1;
+        if (right.score === null) return -1;
+        return right.score - left.score;
+      }
+      if (left.findings !== right.findings) return right.findings - left.findings;
+      if (left.sectionId < right.sectionId) return -1;
+      if (left.sectionId > right.sectionId) return 1;
+      return left.index - right.index;
+    }).map(function (item) { return item.section; });
+  }
+
   function renderProgressiveAnalysis(state, options) {
     var current = state || {};
     var catalog = current.evidence_catalog || {};
@@ -528,10 +610,14 @@
     }).map(function (item) {
       return Object.assign({}, item, { style: item.style || 'observation' });
     });
-    var sections = (current.sections || []).filter(function (section) {
+    var sections = orderAnalysisSections((current.sections || []).filter(function (section) {
       return Array.isArray(section.findings) && section.findings.length > 0;
-    });
+    }));
     var active = current.activeTab || 'quick';
+    if (active !== 'quick' && !sections.some(function (section) {
+      return String(section.section_id) === String(active);
+    })) active = 'quick';
+    var importance = analysisSectionImportance(sections);
     var anchor = evidenceAnchor(options);
     var quickItems = conclusions.length ? conclusions : observations;
     var completedWithoutQuick = current.stage === 'completed' || current.stage === 'partial';
@@ -539,11 +625,18 @@
     var shouldRenderVisualizations = visualizer && typeof visualizer.renderSlots === 'function'
       && (current.visualizations || completedWithoutQuick);
     var tabs = sections.map(function (section, index) {
-      var selected = active === section.section_id;
+      var selected = String(active) === String(section.section_id);
+      var level = importance[String(section.section_id || '')] || 'normal';
+      var importanceLabel = level === 'high' ? '高' : (level === 'medium' ? '中' : '一般');
+      var importanceShortLabel = level === 'high' ? '高' : (level === 'medium' ? '中' : '常');
+      var title = String(section.title || '主题');
       return '<button type="button" class="analysis-result-tab' + (selected ? ' active' : '')
-        + '" data-analysis-tab="' + escapeMarkup(section.section_id) + '" role="tab" aria-selected="'
-        + (selected ? 'true' : 'false') + '">0' + (index + 2) + ' '
-        + escapeMarkup(section.title) + '（' + section.findings.length + '）</button>';
+        + '" data-analysis-tab="' + escapeMarkup(section.section_id) + '" data-importance="' + level
+        + '" role="tab" aria-selected="' + (selected ? 'true' : 'false') + '" title="'
+        + escapeMarkup(title) + '" aria-label="' + escapeMarkup(title) + '，重要程度：'
+        + importanceLabel + '，发现 ' + section.findings.length + ' 条">0' + (index + 2) + ' '
+        + escapeMarkup(analysisTabLabel(section)) + '（' + section.findings.length + '）'
+        + '<span class="analysis-tab-importance">' + importanceShortLabel + '</span></button>';
     }).join('');
     var correctionHtml = (quick.corrections || []).map(function (item) {
       return '<div class="analysis-correction"><strong>快速结论已校正</strong><p>'
@@ -566,15 +659,19 @@
         body = '<section class="analysis-report-body"><p class="hint">快速结论生成中…</p></section>';
       }
     } else {
-      body = sections.filter(function (section) { return section.section_id === active; })
-        .map(function (section) {
-          var visualizationHtml = shouldRenderVisualizations
-            ? visualizer.renderSlots(current.visualizations || null, [section], catalog) : '';
-          return '<section class="analysis-report-body">' + visualizationHtml
-            + section.findings.map(function (item, index) {
-              return renderReportFinding(item, index, catalog);
-            }).join('') + '</section>';
-        }).join('');
+      body = sections.filter(function (section) {
+        return String(section.section_id) === String(active);
+      }).map(function (section) {
+        var visualizationHtml = shouldRenderVisualizations
+          ? visualizer.renderSlots(current.visualizations || null, [section], catalog) : '';
+        var title = String(section.title || '主题');
+        var summary = String(section.summary || '').trim();
+        return '<section class="analysis-report-body"><h3>' + escapeMarkup(title) + '</h3>'
+          + (summary ? '<p class="analysis-section-summary">' + escapeMarkup(summary) + '</p>' : '')
+          + visualizationHtml + section.findings.map(function (item, index) {
+            return renderReportFinding(item, index, catalog);
+          }).join('') + '</section>';
+      }).join('');
     }
     return '<div class="analysis-result-tabs" role="tablist">'
       + '<button type="button" class="analysis-result-tab' + (active === 'quick' ? ' active' : '')
@@ -716,6 +813,8 @@
   return {
     applyAnalysisEvent: applyAnalysisEvent,
     analysisErrorMessage: analysisErrorMessage,
+    analysisSectionImportance: analysisSectionImportance,
+    analysisTabLabel: analysisTabLabel,
     cleanTableRows: cleanTableRows,
     analysisTerminalBadge: analysisTerminalBadge,
     analysisProgressModel: analysisProgressModel,
@@ -730,6 +829,7 @@
     historySelectionIsCurrent: historySelectionIsCurrent,
     mergeSnapshot: mergeSnapshot,
     openPendingHistoryReport: openPendingHistoryReport,
+    orderAnalysisSections: orderAnalysisSections,
     pdfDownloadFallbackUrl: pdfDownloadFallbackUrl,
     reconcileAnalysisTerminal: reconcileAnalysisTerminal,
     renderProgressiveAnalysis: renderProgressiveAnalysis,

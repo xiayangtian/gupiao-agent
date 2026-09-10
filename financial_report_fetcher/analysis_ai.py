@@ -345,7 +345,8 @@ class AiTopicGenerator:
             system=(
                 "你是财报主题规划器。不要使用固定主题模板；根据本次证据动态提出候选。"
                 "输出 candidates 数组，每项包含 candidate_id、title、summary、interest_tags、"
-                "evidence_ids、materiality_score(0-20)、clarity_score(0-15)。"
+                "evidence_ids、tab_label(最多 6 个汉字，不含编号与标点)、"
+                "materiality_score(0-20)、clarity_score(0-15)。"
             ),
             prompt={
                 "interests": list(interests),
@@ -445,6 +446,7 @@ class AiInsightAnalyzer:
             findings=tuple(findings),
             score=self.scorer.score(candidate, evidence, interests),
             verification_state=_section_state(cited_records),
+            tab_label=candidate.tab_label,
         )
 
 

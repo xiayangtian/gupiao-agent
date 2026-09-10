@@ -1206,7 +1206,8 @@ input, select, button { font-family: inherit; font-size: inherit; }
 
 .analysis-result-tab {
   flex: none;
-  min-height: 36px;
+  min-height: 44px;
+  max-width: 100%;
   padding: 8px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -1216,11 +1217,44 @@ input, select, button { font-family: inherit; font-size: inherit; }
   font-size: 12px;
   font-weight: 650;
   line-height: 1.35;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
 
 .analysis-result-tab:hover { border-color: var(--accent); color: var(--accent); }
+
+.analysis-tab-importance {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.analysis-result-tab[data-importance="high"] .analysis-tab-importance {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.analysis-result-tab[data-importance="medium"] .analysis-tab-importance {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.analysis-result-tab[data-importance="normal"] .analysis-tab-importance {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.analysis-result-tab.active .analysis-tab-importance {
+  background: #fff;
+  color: var(--text-primary);
+}
 
 .analysis-result-tab:focus-visible {
   outline: 3px solid rgb(59 130 246 / 30%);
@@ -1455,8 +1489,8 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .analysis-deep-hint { margin: 10px 0; color: var(--text-secondary); text-align: left; }
 
 @media (max-width: 560px) {
-  .analysis-result-tabs { gap: 6px; margin-right: -4px; }
-  .analysis-result-tab { min-height: 36px; white-space: nowrap; }
+  .analysis-result-tabs { gap: 6px; margin-right: 0; max-width: 100%; }
+  .analysis-result-tab { min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
   .analysis-evidence-item { grid-template-columns: minmax(0, 1fr); }
   .analysis-evidence-page,
   .analysis-evidence-source { grid-column: 1; justify-self: start; }

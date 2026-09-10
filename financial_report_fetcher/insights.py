@@ -12,6 +12,21 @@ def _bounded(value: int, upper: int) -> int:
     return max(0, min(int(value), upper))
 
 
+def _sanitize_tab_label(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(
+        character
+        for character in value
+        if (
+            "\u4e00" <= character <= "\u9fff"
+            or "A" <= character <= "Z"
+            or "a" <= character <= "z"
+            or "0" <= character <= "9"
+        )
+    )[:6]
+
+
 @dataclass(frozen=True)
 class InsightCandidate:
     candidate_id: str
@@ -21,12 +36,14 @@ class InsightCandidate:
     evidence_ids: tuple[str, ...]
     materiality_score: int
     clarity_score: int
+    tab_label: str = ""
 
     def __post_init__(self) -> None:
         if not self.candidate_id.strip() or not self.title.strip():
             raise ValueError("candidate_id 和 title 不能为空")
         object.__setattr__(self, "materiality_score", _bounded(self.materiality_score, 20))
         object.__setattr__(self, "clarity_score", _bounded(self.clarity_score, 15))
+        object.__setattr__(self, "tab_label", _sanitize_tab_label(self.tab_label))
 
 
 @dataclass(frozen=True)
@@ -79,6 +96,10 @@ class InsightSection:
     findings: tuple[InsightFinding, ...]
     score: InsightScore
     verification_state: VerificationState
+    tab_label: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tab_label", _sanitize_tab_label(self.tab_label))
 
     @property
     def is_detailed_eligible(self) -> bool:
@@ -127,6 +148,7 @@ class InsightPlanner:
                 evidence_ids=known_ids,
                 materiality_score=int(raw.get("materiality_score", 0)),
                 clarity_score=int(raw.get("clarity_score", 0)),
+                tab_label=_sanitize_tab_label(raw.get("tab_label", "")),
             ))
             seen.add(candidate_id)
         return tuple(candidates)
