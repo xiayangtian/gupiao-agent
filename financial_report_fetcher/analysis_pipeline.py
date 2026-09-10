@@ -49,7 +49,7 @@ _CURRENT_PERIOD_CELL_FIELD = "current_period_pdf_cell"
 _NUMERIC_CELL_PATTERN = re.compile(r"[-−]?\d[\d,，]*(?:\.\d+)?")
 # 只有这些明确的报表表头才可定义行名列。没有可识别的标签列时宁可不生成
 # 结构图证据，也不能把本期列左侧的上期/附注列误传给模型。
-_ROW_LABEL_HEADERS = frozenset({"项目", "项目名称", "科目", "行次"})
+_ROW_LABEL_HEADERS = frozenset({"项目", "项目名称", "科目"})
 
 _TOPIC_STRONG_KEYWORDS = {
     "profit_structure": ("营业收入", "营业成本", "净利润", "利润总额", "毛利"),

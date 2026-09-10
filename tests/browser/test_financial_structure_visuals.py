@@ -16,15 +16,15 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from webapp.browser_preflight import find_usable_agent_browser
 _AGENT_BROWSER_CANDIDATES = (
     os.environ.get("AGENT_BROWSER"),
     shutil.which("agent-browser"),
     str(Path.home() / ".pi/agent/npm/node_modules/.bin/agent-browser"),
 )
-AGENT_BROWSER = next(
-    (candidate for candidate in _AGENT_BROWSER_CANDIDATES if candidate and Path(candidate).is_file()),
-    None,
-)
+AGENT_BROWSER = find_usable_agent_browser(_AGENT_BROWSER_CANDIDATES)
 pytestmark = pytest.mark.skipif(
     AGENT_BROWSER is None,
     reason="agent-browser CLI 不可用，无法执行真实应用浏览器回归",

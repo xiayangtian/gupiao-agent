@@ -235,6 +235,30 @@ def test_current_period_evidence_is_not_created_without_recognized_row_label_geo
     assert not [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
 
 
+def test_current_period_evidence_rejects_row_number_as_financial_label():
+    """“行次”只标识行号，不能替代已验证的财务项目名称列。"""
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual",
+        pdf_hash="2" * 64,
+        pages=(DocumentPage(
+            1, "合并利润表", 6, 0, 0.5, 0.5, 0.9, False,
+            fragments=(
+                DocumentTextFragment("行次", 80, 700),
+                DocumentTextFragment("上期", 220, 700),
+                DocumentTextFragment("2025年12月31日 本期", 300, 700),
+                DocumentTextFragment("附注", 380, 700),
+                DocumentTextFragment("1", 80, 680),
+                DocumentTextFragment("90", 220, 680),
+                DocumentTextFragment("100", 300, 680),
+                DocumentTextFragment("—", 380, 680),
+            ),
+        ),),
+    )
+
+    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
+    assert not [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+
+
 def test_pdf_records_without_positioned_current_period_header_do_not_create_visualization_evidence():
     extraction = DocumentExtraction(
         report_id="600900:2025-12-31:annual", pdf_hash="e" * 64,
