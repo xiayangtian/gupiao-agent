@@ -316,13 +316,13 @@ class TestAnalyze:
         real_retire = server.retire_superseded_analysis_files
         observed = {}
 
-        def spy_retire(analysis_dir, *, code, period, keep_filename):
+        def spy_retire(target_dir, *, code, period, keep_filename):
             stem = keep_filename[: -len(".json")]
             observed["new_json"] = (analysis_dir / f"{stem}.json").is_file()
             observed["new_md"] = (analysis_dir / f"{stem}.md").is_file()
             observed["legacy_alive"] = legacy_json.is_file()
             return real_retire(
-                analysis_dir, code=code, period=period, keep_filename=keep_filename
+                target_dir, code=code, period=period, keep_filename=keep_filename
             )
 
         monkeypatch.setattr(server, "retire_superseded_analysis_files", spy_retire)
