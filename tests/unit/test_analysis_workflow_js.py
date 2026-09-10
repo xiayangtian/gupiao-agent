@@ -1,6 +1,7 @@
 """前端财报分析任务联动的回归测试。"""
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,6 +18,13 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="前端工作流回归测试需要 Node.js")
 
 
+def _css_rule(css: str, selector: str) -> str:
+    """返回单条 CSS 规则体，缺少规则时直接失败。"""
+    match = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert match, f"缺少样式规则：{selector}"
+    return match.group(1)
+
+
 def _run_node(source: str) -> dict:
     completed = subprocess.run(
         [NODE, "-e", source],
@@ -26,6 +34,46 @@ def _run_node(source: str) -> dict:
         text=True,
     )
     return json.loads(completed.stdout)
+
+
+def test_conclusion_emphasis_uses_readable_red_instead_of_browser_yellow():
+    """关键信息强调必须是可读的深红色，紧凑段落与分层次段落保持一致。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    assert "--key-emphasis: #b91c1c;" in css
+    assert "--key-emphasis-light: #fef2f2;" in css
+    for selector in (".analysis-report-finding mark", ".analysis-compact-finding mark"):
+        rule = _css_rule(css, selector)
+        assert "var(--key-emphasis)" in rule
+        assert "var(--key-emphasis-light)" in rule
+        assert "var(--accent-light)" not in rule
+        assert "yellow" not in rule
+
+
+def test_unverified_conclusion_card_uses_a_neutral_label():
+    """待核验不是告警，不应使用橙黄色危险标识。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    assert "var(--warning)" not in _css_rule(css, ".analysis-tone-pending")
+    assert "var(--warning" not in _css_rule(css, ".analysis-tone-pending .analysis-finding-label")
+
+
+def test_topic_tab_row_wraps_instead_of_clipping():
+    """主题 Tab 行必须换行展示，不能靠横向滚动截断最后一个主题。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    assert "flex-wrap: wrap" in _css_rule(css, ".analysis-result-tabs")
+
+
+def test_topic_tab_binding_always_uses_the_current_report_key():
+    """同一容器复用时必须刷新 key，否则切换报告后主题 Tab 会串到上一份报告。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "container.dataset.progressiveKey = key" in source
+    assert "var currentKey = container.dataset.progressiveKey" in source
+    assert source.index("container.dataset.progressiveKey = key") < source.index(
+        "container.dataset.progressiveTabsBound"
+    )
 
 
 def test_analysis_report_styles_define_semantic_tones_and_visible_focus():

@@ -129,7 +129,7 @@ def test_progressive_renderer_uses_inline_citations_not_folded_evidence():
 
     assert result == {
         "hasDetails": False,
-        "hasRisk": False,
+        "hasRisk": True,
         "citation": True,
         "highlights": 2,
         "emptyTopic": False,
@@ -186,7 +186,7 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
         "summaryCount": False,
         "reportBody": True,
         "legacyCards": False,
-        "riskLabel": False,
+        "riskLabel": True,
         "quickTabCount": True,
         "sectionTabCount": True,
         "evidenceHeading": False,
@@ -196,6 +196,134 @@ def test_progressive_renderer_uses_report_layout_and_deduplicates_evidence():
         "structuredHasButton": False,
         "bodyHasDetails": False,
     }
+
+
+def test_readable_duplicate_key_data_keeps_quick_conclusion_compact():
+    """可读但重复的 key_data 不能把一句结论拆成卡片或重复同一批数字。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{
+            claim: '2026年上半年，公司营业收入为4108.71亿元，净利润为1480.62亿元。',
+            key_data: '营业收入4108.71亿元，净利润1480.62亿元',
+            significance: 'high', highlight_spans: ['4108.71亿元'],
+            evidence_ids: ['pdf']
+          }}] }},
+          evidence_catalog: {{ pdf: {{ source_type: 'pdf_text',
+            source_locator: {{ page: 8 }} }} }}
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          card: html.includes('analysis-report-finding'),
+          label: html.includes('analysis-finding-label'),
+          keyDataLine: html.includes('analysis-key-data'),
+          highlight: html.includes('<mark>4108.71亿元</mark>'),
+          numberRepeats: html.split('1480.62亿元').length - 1,
+          pdf: html.includes('data-evidence-page="8"')
+        }}));
+        """
+    )
+
+    assert result == {
+        "compact": True,
+        "card": False,
+        "label": False,
+        "keyDataLine": False,
+        "highlight": True,
+        "numberRepeats": 1,
+        "pdf": True,
+    }
+
+
+def test_non_redundant_key_data_stays_inside_the_same_paragraph():
+    """key_data 携带结论里没有的数据时必须保留，但不能因此变成独立模块。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'risk', stage: 'completed', sections: [{{
+            section_id: 'risk', title: '信用风险',
+            findings: [{{ claim: '资产质量总体保持稳定。',
+                         key_data: '不良贷款率 1.05 1.13' }}]
+          }}]
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          card: html.includes('analysis-report-finding'),
+          inlineSupplement: html.includes('不良贷款率 1.05 1.13')
+        }}));
+        """
+    )
+
+    assert result == {"compact": True, "card": False, "inlineSupplement": True}
+
+
+def test_compact_conclusion_only_appends_the_missing_key_data_parts():
+    """补充数据只接上结论里缺失的部分，不能把 key_data 整句重复一遍。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{
+            claim: '信用减值损失为1106.2亿元，同比增加，需关注资产质量风险。',
+            key_data: '信用减值损失1106.2亿元，同比增加12.9%'
+          }}] }}
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          card: html.includes('analysis-report-finding'),
+          kept: html.includes('同比增加12.9%'),
+          repeated: (html.split('信用减值损失').length - 1)
+        }}));
+        """
+    )
+
+    assert result == {"compact": True, "card": False, "kept": True, "repeated": 1}
+
+
+def test_compact_conclusion_keeps_plain_text_supplement():
+    """非数字补充信息（如待复核）不能因为压平而丢失。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'quick', stage: 'completed',
+          quick: {{ conclusions: [{{ text: '旧缓存结论', key_data: '待复核' }}] }}
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          kept: html.includes('待复核'),
+          label: html.includes('analysis-finding-label')
+        }}));
+        """
+    )
+
+    assert result == {"compact": True, "kept": True, "label": False}
+
+
+def test_risk_finding_keeps_its_layered_risk_label():
+    """风险类结论必须保留红色标签，不能被压平成普通段落。"""
+    result = _run_node(
+        f"""
+        const workflow = require({json.dumps(str(WORKFLOW_JS))});
+        const html = workflow.renderProgressiveAnalysis({{
+          activeTab: 'risk', stage: 'completed', sections: [{{
+            section_id: 'risk', title: '信用风险',
+            findings: [{{ claim: '不良率上升，需关注资产质量。', risk_state: 'verified_risk' }}]
+          }}]
+        }});
+        console.log(JSON.stringify({{
+          compact: html.includes('analysis-compact-finding'),
+          tone: html.includes('analysis-tone-risk'),
+          label: html.includes('>风险<')
+        }}));
+        """
+    )
+
+    assert result == {"compact": False, "tone": True, "label": True}
 
 
 def test_progressive_renderer_keeps_short_quick_conclusions_in_one_compact_flow():
@@ -371,8 +499,8 @@ def test_progressive_renderer_uses_real_document_catalog_display_metadata():
     assert result == {"label": True, "excerpt": False, "opaqueId": False}
 
 
-def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
-    """同时渲染主/历史详情时，引用必须命中各自证据区，旧缓存显示待核验。"""
+def test_progressive_renderer_uses_unique_evidence_anchors_and_inline_notes():
+    """同时渲染主/历史详情时，引用必须命中各自证据区，普通结论不再挂待核验标签。"""
     result = _run_node(
         f"""
         const workflow = require({json.dumps(str(WORKFLOW_JS))});
@@ -396,7 +524,8 @@ def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
           historyTarget: history.includes('data-evidence-page="12"'),
           duplicateAnchor: (main + history).match(/data-evidence-page="12"/g)?.length || 0,
           pendingTone: main.includes('analysis-tone-pending'),
-          pendingLabel: main.includes('>待核验<')
+          pendingLabel: main.includes('>待核验<'),
+          inlineNote: main.includes('待复核')
         }}));
         """
     )
@@ -405,8 +534,9 @@ def test_progressive_renderer_uses_unique_evidence_anchors_and_pending_tone():
         "mainTarget": True,
         "historyTarget": True,
         "duplicateAnchor": 2,
-        "pendingTone": True,
-        "pendingLabel": True,
+        "pendingTone": False,
+        "pendingLabel": False,
+        "inlineNote": True,
     }
 
 

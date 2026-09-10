@@ -419,9 +419,49 @@
       && !/^[{[]/.test(text);
   }
 
+  function numericTokens(value) {
+    return String(value == null ? '' : value).match(/\d+(?:\.\d+)?/g) || [];
+  }
+
+  function keyDataRepeatsClaim(keyData, claim) {
+    var tokens = numericTokens(keyData);
+    if (!tokens.length) return false;
+    var haystack = String(claim == null ? '' : claim);
+    return tokens.every(function (token) { return haystack.indexOf(token) >= 0; });
+  }
+
+  // key_data 常是结论的重述；只保留结论里缺失的数字片段，避免整句重复。
+  function missingKeyDataParts(keyData, claim) {
+    var haystack = String(claim == null ? '' : claim);
+    return String(keyData == null ? '' : keyData).split(/[，,；;]/).filter(function (part) {
+      var tokens = numericTokens(part);
+      return tokens.length > 0 && tokens.some(function (token) {
+        return haystack.indexOf(token) < 0;
+      });
+    });
+  }
+
+  // 结论里缺失的补充数据：优先只接上缺数字的片段，纯文字补充则原样接上。
+  function supplementaryKeyData(keyData, claim) {
+    if (!readableSupplement(keyData)) return '';
+    if (keyDataRepeatsClaim(keyData, claim)) return '';
+    var parts = missingKeyDataParts(keyData, claim);
+    if (parts.length) return parts.join('；');
+    var text = String(keyData).trim();
+    if (numericTokens(text).length) return '';
+    return String(claim == null ? '' : claim).indexOf(text) >= 0 ? '' : text;
+  }
+
+  function carriesToneLabel(finding) {
+    var state = finding.risk_state || finding.style;
+    return state === 'verified_risk' || state === 'observation';
+  }
+
   function isCompactFinding(finding, claim) {
-    return !finding.title && !readableSupplement(finding.key_data)
-      && !readableSupplement(finding.significance) && String(claim).length <= 160;
+    if (finding.title) return false;
+    if (String(claim).length > 160) return false;
+    if (readableSupplement(finding.significance)) return false;
+    return !carriesToneLabel(finding);
   }
 
   function renderReportFinding(item, index, catalog) {
@@ -432,7 +472,10 @@
     var keyData = readableSupplement(finding.key_data) ? finding.key_data : '';
     var significance = readableSupplement(finding.significance) ? finding.significance : '';
     if (isCompactFinding(finding, claim)) {
+      var extra = supplementaryKeyData(keyData, claim);
       return '<p class="analysis-compact-finding">' + emphasizedText(claim, finding.highlight_spans)
+        + (extra ? ' <span class="analysis-key-data-inline">'
+          + escapeMarkup(extra) + '</span>' : '')
         + (citations ? ' <span class="analysis-inline-citations">' + citations + '</span>' : '') + '</p>';
     }
     var tone = findingTone(finding);

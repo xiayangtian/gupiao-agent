@@ -23,6 +23,9 @@
   --warning-light: #fef3c7;
   --danger: #dc2626;
   --danger-light: #fef2f2;
+  /* 关键数据强调：结论里的关键数字/事实，与风险红区分开 */
+  --key-emphasis: #b91c1c;
+  --key-emphasis-light: #fef2f2;
   --purple: #7c3aed;
   --purple-light: #ede9fe;
 
@@ -1193,11 +1196,10 @@ input, select, button { font-family: inherit; font-size: inherit; }
 
 .analysis-result-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-sm);
   margin: var(--space-md) 0 var(--space-lg);
-  overflow-x: auto;
   padding-bottom: 2px;
-  scrollbar-width: thin;
 }
 
 .analysis-dynamic-tabs { display: contents; }
@@ -1320,10 +1322,14 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .analysis-tone-risk { border-left: 3px solid var(--danger); padding-left: 14px; }
 .analysis-tone-risk .analysis-finding-label { background: var(--danger-light); color: var(--danger); }
 .analysis-tone-highlight { border-left: 3px solid var(--accent); padding-left: 14px; }
-.analysis-tone-observation,
-.analysis-tone-pending { border-left: 3px solid var(--warning); padding-left: 14px; }
-.analysis-tone-observation .analysis-finding-label,
-.analysis-tone-pending .analysis-finding-label { background: var(--warning-light); color: var(--warning); }
+.analysis-tone-observation { border-left: 3px solid var(--warning); padding-left: 14px; }
+.analysis-tone-pending { border-left: 3px solid var(--border-hover); padding-left: 14px; }
+.analysis-tone-observation .analysis-finding-label { background: var(--warning-light); color: var(--warning); }
+.analysis-tone-pending .analysis-finding-label {
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-secondary);
+}
 
 .analysis-key-data {
   color: var(--text-primary);
@@ -1337,8 +1343,18 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .analysis-report-finding mark {
   padding: 1px 4px;
   border-radius: 4px;
-  background: var(--accent-light);
-  color: var(--text-primary);
+  background: var(--key-emphasis-light);
+  color: var(--key-emphasis);
+  font-weight: 700;
+}
+
+.analysis-key-data-inline { color: var(--text-secondary); }
+
+.analysis-compact-finding mark {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--key-emphasis-light);
+  color: var(--key-emphasis);
   font-weight: 700;
 }
 

@@ -728,9 +728,14 @@ function openHistoryEvidencePdfPage(page) {
 }
 
 function bindProgressiveTabs(container, key) {
-  if (!container || container.dataset.progressiveTabsBound) return;
+  if (!container) return;
+  // 容器常驻只绑定一次监听，但当前报告 key 必须每次渲染刷新，
+  // 否则切换报告后 Tab 会继续操作上一份报告的状态。
+  container.dataset.progressiveKey = key;
+  if (container.dataset.progressiveTabsBound) return;
   container.dataset.progressiveTabsBound = '1';
   container.addEventListener('click', function (event) {
+    var currentKey = container.dataset.progressiveKey;
     var citation = event.target && event.target.closest
       ? event.target.closest('.analysis-evidence-link') : null;
     if (citation) {
@@ -769,13 +774,13 @@ function bindProgressiveTabs(container, key) {
     }
     var tab = event.target && event.target.closest
       ? event.target.closest('[data-analysis-tab]') : null;
-    if (!tab || !STATE.analysisCache[key] || !STATE.analysisCache[key].data) return;
-    STATE.analysisCache[key].data.activeTab = tab.dataset.analysisTab;
-    STATE.analysisCache[key].data.hasNewFindings = false;
-    renderAnalysisPanel(key);
+    if (!tab || !STATE.analysisCache[currentKey] || !STATE.analysisCache[currentKey].data) return;
+    STATE.analysisCache[currentKey].data.activeTab = tab.dataset.analysisTab;
+    STATE.analysisCache[currentKey].data.hasNewFindings = false;
+    renderAnalysisPanel(currentKey);
     if (STATE.historySelected && analysisKey(
       STATE.historySelected.code, STATE.historySelected.period
-    ) === key) renderHistoryAnalysisState(STATE.historySelected);
+    ) === currentKey) renderHistoryAnalysisState(STATE.historySelected);
   });
 }
 
