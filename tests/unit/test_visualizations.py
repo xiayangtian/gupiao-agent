@@ -23,18 +23,21 @@ def pdf_record() -> EvidenceRecord:
     return EvidenceRecord(
         report_id="r1",
         entity_scope=EntityScope.CONSOLIDATED,
-        fact_name="pdf_page_12",
+        fact_name="pdf_current_period_cell_12_1",
         value=None,
         unit=None,
         currency=None,
         period="2026-06-30",
         source_type=SourceType.PDF_TEXT,
-        source_locator=SourceLocator(provider="pdf", page=12, record_id="page-12"),
+        source_locator=SourceLocator(
+            provider="pdf", page=12, bbox=(100, 500, 120, 700), record_id="current-period-cell-12-1"
+        ),
         extraction_confidence=0.99,
         verification_state=VerificationState.UNKNOWN_SCOPE,
         content_hash="page-12-content",
         parser_version="pdf-v1",
-        text="合并现金流量表",
+        text="本期表头：2026年6月30日\n数据行：经营活动产生的现金流量净额 12.5",
+        raw_field_name="current_period_pdf_cell",
     )
 
 
@@ -145,6 +148,26 @@ def test_validator_rejects_evidence_outside_pdf_current_consolidated_scope(pdf_r
 
     assert bundle.cards[0].status == "unavailable"
     assert bundle.cards[0].rows == ()
+
+
+def test_validator_rejects_same_page_prior_period_cell_even_if_model_declares_current(pdf_record):
+    prior_cell = replace(
+        pdf_record,
+        fact_name="pdf_page_12",
+        raw_field_name=None,
+        source_locator=SourceLocator(provider="pdf", page=12, record_id="page-12"),
+        text="上期表头：2025年6月30日\\n数据行：经营活动产生的现金流量净额 9.0",
+    )
+    card = validate_visualization_payload(
+        _cash_payload(
+            _cash_row("operating_cash_flow", 9.0, prior_cell.stable_id),
+            _cash_row("investing_cash_flow", -3.0, prior_cell.stable_id),
+        ),
+        period="2026-06-30",
+        allowed_pdf_evidence={prior_cell.stable_id: prior_cell},
+    ).cards[0]
+    assert card.status == "unavailable"
+    assert card.rows == ()
 
 
 def test_validator_requires_two_core_rows_to_draw(pdf_record):

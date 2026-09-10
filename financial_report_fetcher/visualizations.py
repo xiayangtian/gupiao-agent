@@ -43,6 +43,7 @@ CARD_TITLES = {
 }
 
 _VALID_DIRECTIONS = frozenset({"inflow", "outflow", "neutral"})
+CURRENT_PERIOD_CELL_FIELD = "current_period_pdf_cell"
 
 
 @dataclass(frozen=True)
@@ -298,6 +299,8 @@ def _is_valid_pdf_evidence(record: EvidenceRecord | None, period: str) -> bool:
         and record.source_type is SourceType.PDF_TEXT
         and record.entity_scope is EntityScope.CONSOLIDATED
         and record.period == period
+        and record.raw_field_name == CURRENT_PERIOD_CELL_FIELD
+        and record.source_locator.bbox is not None
         and isinstance(record.source_locator.page, int)
         and not isinstance(record.source_locator.page, bool)
         and record.source_locator.page > 0

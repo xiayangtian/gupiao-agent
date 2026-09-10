@@ -9,7 +9,12 @@ from typing import Any, Mapping, Sequence
 from .analysis_config import AnalysisConfig
 from .analysis_pipeline import ProgressiveAnalysisPipeline
 from .analysis_result import QuickConclusion, QuickResult
-from .visualizations import CARD_SPECS, VisualizationBundle, validate_visualization_payload
+from .visualizations import (
+    CARD_SPECS,
+    CURRENT_PERIOD_CELL_FIELD,
+    VisualizationBundle,
+    validate_visualization_payload,
+)
 from .evidence.document import DocumentExtractor
 from .evidence.models import EntityScope, EvidenceRecord, SourceType, VerificationState
 from .evidence.ocr import PaddleStructureEngine
@@ -177,6 +182,8 @@ def _visualization_pdf_evidence(
         if record.source_type is SourceType.PDF_TEXT
         and record.entity_scope is EntityScope.CONSOLIDATED
         and record.period == period
+        and record.raw_field_name == CURRENT_PERIOD_CELL_FIELD
+        and record.source_locator.bbox is not None
         and isinstance(record.source_locator.page, int)
         and not isinstance(record.source_locator.page, bool)
         and record.source_locator.page > 0

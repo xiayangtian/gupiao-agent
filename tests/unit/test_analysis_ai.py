@@ -52,7 +52,9 @@ def _record(
     text=None,
     period="2025-12-31",
     entity_scope=EntityScope.CONSOLIDATED,
+    current_period_cell=None,
 ):
+    is_current_cell = source_type is SourceType.PDF_TEXT if current_period_cell is None else current_period_cell
     return EvidenceRecord(
         report_id="r1",
         entity_scope=entity_scope,
@@ -63,13 +65,16 @@ def _record(
         period=period,
         source_type=source_type,
         source_locator=SourceLocator(
-            provider="fake", page=page, record_id=record_id
+            provider="fake", page=page,
+            bbox=(1, 1, 2, 2) if is_current_cell and page is not None else None,
+            record_id=record_id,
         ),
         extraction_confidence=0.9,
         verification_state=state,
         content_hash=record_id,
         parser_version="1",
         text=text,
+        raw_field_name="current_period_pdf_cell" if is_current_cell else None,
     )
 
 
@@ -253,6 +258,19 @@ def test_structure_visualizer_safely_degrades_invalid_evidence_or_missing_topic(
         [pdf_record], "2025-12-31", topic_ids
     )
     assert not result.cards or result.cards[0].status == "unavailable"
+
+
+def test_structure_visualizer_downgrades_when_pdf_has_no_provable_current_period_cell():
+    ai = SequenceAi(["{}"])
+    page_record = _record(
+        "same-page", source_type=SourceType.PDF_TEXT, page=12,
+        text="本期 100 上期 90", current_period_cell=False,
+    )
+    result = AiStructureVisualizer(ai).analyze(
+        [page_record], "2025-12-31", {"cash_flow_structure": "cash"}
+    )
+    assert result.cards == ()
+    assert ai.calls == 0
 
 
 def test_structure_visualizer_safely_degrades_invalid_json():

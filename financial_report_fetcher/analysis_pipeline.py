@@ -45,6 +45,8 @@ EventEmitter = Callable[[str, dict[str, Any]], None]
 _PARENT_SHEET_PATTERN = re.compile(
     r"母公司\s*(资产负债表|利润表|现金流量表|所有者权益变动表)"
 )
+_CURRENT_PERIOD_CELL_FIELD = "current_period_pdf_cell"
+_NUMERIC_CELL_PATTERN = re.compile(r"[-−]?\d[\d,，]*(?:\.\d+)?")
 
 _TOPIC_STRONG_KEYWORDS = {
     "profit_structure": ("营业收入", "营业成本", "净利润", "利润总额", "毛利"),
@@ -164,6 +166,75 @@ class ProgressiveAnalysisPipeline:
                 parser_version=extracted.parser_version,
                 text=text,
             ))
+            if scope is EntityScope.CONSOLIDATED:
+                records.extend(ProgressiveAnalysisPipeline._current_period_cell_records(
+                    extracted, page, period
+                ))
+        return records
+
+    @staticmethod
+    def _current_period_cell_records(extracted, page, period: str) -> list[EvidenceRecord]:
+        """把有坐标表头明确标记为本期的同列数值转为独立 PDF 证据。"""
+        fragments = tuple(getattr(page, "fragments", ()) or ())
+        if not fragments:
+            return []
+        target = re.sub(r"\D", "", period)
+        lines: dict[int, list[Any]] = {}
+        for fragment in fragments:
+            text = getattr(fragment, "text", "")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            lines.setdefault(round(float(getattr(fragment, "y", 0.0)) / 2), []).append(fragment)
+        headers = [
+            fragment for line in lines.values() for fragment in line
+            if ("本期" in fragment.text or target in re.sub(r"\D", "", fragment.text))
+        ]
+        if not headers:
+            return []
+        records: list[EvidenceRecord] = []
+        for header in headers:
+            header_y = float(header.y)
+            for line_y, line in lines.items():
+                # PDF 坐标向上增长：表头下方的数据行 y 必须更小，且限制在合理距离内。
+                y = line_y * 2
+                if not 0 < header_y - y <= 500:
+                    continue
+                cells = [fragment for fragment in line if abs(float(fragment.x) - float(header.x)) <= 36]
+                if not any(_NUMERIC_CELL_PATTERN.search(fragment.text) for fragment in cells):
+                    continue
+                # 证据摘录仅保留行名与本期列单元格；同一行上期列绝不进入模型上下文。
+                selected_ids = {id(fragment) for fragment in cells}
+                line_text = " ".join(
+                    fragment.text for fragment in sorted(line, key=lambda item: item.x)
+                    if id(fragment) in selected_ids
+                    or not _NUMERIC_CELL_PATTERN.search(fragment.text)
+                )
+                evidence_text = f"本期表头：{header.text}\n数据行：{line_text}"
+                digest = hashlib.sha256(
+                    f"{extracted.pdf_hash}:{page.page_number}:{header.x}:{header.y}:{line_text}".encode("utf-8")
+                ).hexdigest()
+                cell_index = len(records) + 1
+                records.append(EvidenceRecord(
+                    report_id=extracted.report_id,
+                    entity_scope=EntityScope.CONSOLIDATED,
+                    fact_name=f"pdf_current_period_cell_{page.page_number}_{cell_index}",
+                    value=None,
+                    unit=None,
+                    currency=None,
+                    period=period,
+                    source_type=SourceType.PDF_TEXT,
+                    source_locator=SourceLocator(
+                        provider="pdf", page=page.page_number,
+                        bbox=(float(header.x), float(y), float(header.x), float(header_y)),
+                        record_id=f"current-period-cell-{page.page_number}-{cell_index}",
+                    ),
+                    extraction_confidence=page.quality_score,
+                    verification_state=VerificationState.UNKNOWN_SCOPE,
+                    content_hash=digest,
+                    parser_version=f"{extracted.parser_version}-current-period-cell-v1",
+                    text=evidence_text,
+                    raw_field_name=_CURRENT_PERIOD_CELL_FIELD,
+                ))
         return records
 
     @staticmethod

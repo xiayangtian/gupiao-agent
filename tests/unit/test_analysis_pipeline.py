@@ -13,7 +13,11 @@ from financial_report_fetcher.analysis_result import (
     QuickResult,
     load_analysis_document,
 )
-from financial_report_fetcher.evidence.document import DocumentExtraction, DocumentPage
+from financial_report_fetcher.evidence.document import (
+    DocumentExtraction,
+    DocumentPage,
+    DocumentTextFragment,
+)
 from financial_report_fetcher.evidence.models import (
     EntityScope,
     EvidenceRecord,
@@ -134,6 +138,38 @@ def test_pdf_records_assign_entity_scope_from_statement_page_title():
         EntityScope.PARENT,
         EntityScope.CONSOLIDATED,
     ]
+
+
+def test_pdf_records_only_create_current_period_cell_evidence_from_positioned_header():
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual",
+        pdf_hash="d" * 64,
+        pages=(DocumentPage(
+            1, "合并现金流量表", 7, 0, 0.5, 0.5, 0.9, False,
+            fragments=(
+                DocumentTextFragment("2025年12月31日 本期", 300, 700),
+                DocumentTextFragment("2024年12月31日 上期", 420, 700),
+                DocumentTextFragment("经营活动现金流净额", 80, 680),
+                DocumentTextFragment("100", 300, 680),
+                DocumentTextFragment("90", 420, 680),
+            ),
+        ),),
+    )
+    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
+    cells = [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
+    assert len(cells) == 1
+    assert "100" in cells[0].text
+    assert "90" not in cells[0].text  # 上期列绝不进入本期单元格证据上下文。
+    assert cells[0].source_locator.bbox is not None
+
+
+def test_pdf_records_without_positioned_current_period_header_do_not_create_visualization_evidence():
+    extraction = DocumentExtraction(
+        report_id="600900:2025-12-31:annual", pdf_hash="e" * 64,
+        pages=(DocumentPage(1, "合并现金流量表\\n本期 100 上期 90", 20, 0, 0.5, 0.5, 0.9, False),),
+    )
+    records = ProgressiveAnalysisPipeline.pdf_records(extraction, "2025-12-31")
+    assert not [record for record in records if record.raw_field_name == "current_period_pdf_cell"]
 
 
 def test_pdf_records_resolve_to_single_source_when_scope_is_known():
