@@ -88,6 +88,21 @@ def test_visualization_lifecycle_clears_before_all_replaced_analysis_containers(
     assert "clearAnalysisVisualizations();\n}" in source[source.index("function destroyAllCharts()"):]
 
 
+def test_stop_analysis_clears_visualizations_before_replacing_result_container():
+    """用户停止分析时也必须销毁 Chart 实例，不能留下复用容器中的旧图。"""
+    source = APP_JS.read_text(encoding="utf-8")
+    stop = source[source.index("async function stopAnalysis"):source.index("async function startAnalysis")]
+    clear = source[source.index("function clearAnalysisVisualizations()"):source.index("function mountAnalysisVisualizations")]
+    visualizations = (ROOT / "webapp" / "static" / "analysis_visualizations.js").read_text(encoding="utf-8")
+
+    assert stop.index("clearAnalysisVisualizations();") < stop.index(
+        "ar.innerHTML = '<div class=\"hint\">正在停止分析"
+    )
+    assert "AnalysisVisualizations.destroy(charts)" in clear
+    assert "STATE.charts.visualizations = null" in clear
+    assert "charts.clear();" in visualizations
+
+
 def test_visualization_chartjs_fallback_keeps_table_and_removes_canvas():
     """缺失 Chart.js 时不能留下空画布，必须保留数据表并告知用户。"""
     source = (ROOT / "webapp" / "static" / "analysis_visualizations.js").read_text(encoding="utf-8")

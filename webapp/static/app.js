@@ -941,6 +941,7 @@ async function stopAnalysis(key, taskId) {
   } catch (_) { /* 忽略网络错误，轮询会揭示终态 */ }
   var ar = $('#analyze-result');
   if (ar) {
+    clearAnalysisVisualizations();
     ar.innerHTML = '<div class="hint">正在停止分析…（当前步骤完成后生效）</div>';
   }
 }

@@ -29,6 +29,28 @@ CHROME = next(
 pytestmark = pytest.mark.skipif(CHROME is None, reason="财务结构可视化浏览器回归测试需要 Chrome/Chromium")
 
 
+def _terminate_timed_out_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """终止超时的 Chrome 进程组；无法确认退出时直接失败。"""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        return process.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            pytest.fail("Chrome 进程组在 SIGKILL 后仍未退出")
+        if process.poll() is None:
+            pytest.fail("Chrome 进程组清理后仍在运行")
+        return stdout, stderr
+
+
 def _dump_fixture(tmp_path: Path, viewport: tuple[int, int]) -> dict:
     """在 15 秒超时与进程组清理保护下执行真实渲染脚本。"""
     html_path = tmp_path / "financial-structure-visuals.html"
@@ -102,22 +124,8 @@ document.body.dataset.result = JSON.stringify({{
     try:
         stdout, stderr = process.communicate(timeout=15)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.communicate(timeout=3)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                process.communicate(timeout=3)
-            except subprocess.TimeoutExpired:
-                pytest.fail("Chrome 进程组在 SIGKILL 后仍未退出")
-        pytest.skip("当前宿主的 Chrome --dump-dom 在 15 秒内未退出")
+        _terminate_timed_out_process(process)
+        pytest.fail("Chrome --dump-dom 在 15 秒内未退出")
     if process.returncode == -signal.SIGABRT:
         pytest.skip("当前宿主的 Chrome headless 进程不可用")
     if process.returncode:
@@ -183,18 +191,8 @@ document.body.dataset.result = JSON.stringify({{
     try:
         stdout, stderr = process.communicate(timeout=15)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.communicate(timeout=3)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        pytest.skip("当前宿主的 Chrome --dump-dom 在 15 秒内未退出")
+        _terminate_timed_out_process(process)
+        pytest.fail("Chrome --dump-dom 在 15 秒内未退出")
     if process.returncode == -signal.SIGABRT:
         pytest.skip("当前宿主的 Chrome headless 进程不可用")
     if process.returncode:
