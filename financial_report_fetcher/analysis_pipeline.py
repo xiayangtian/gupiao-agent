@@ -186,20 +186,45 @@ class ProgressiveAnalysisPipeline:
                 continue
             lines.setdefault(round(float(getattr(fragment, "y", 0.0)) / 2), []).append(fragment)
         headers = [
-            fragment for line in lines.values() for fragment in line
+            (fragment, sorted(line, key=lambda item: float(item.x)))
+            for line in lines.values() for fragment in line
             if ("本期" in fragment.text or target in re.sub(r"\D", "", fragment.text))
         ]
         if not headers:
             return []
         records: list[EvidenceRecord] = []
-        for header in headers:
+        for header, header_line in headers:
+            # 两个相邻表头的中点才是可审计的列边界。没有左右边界（例如
+            # PDF 只提取到一个日期表头）或表头坐标重叠时，绝不猜测列宽。
+            try:
+                header_index = next(
+                    index for index, item in enumerate(header_line) if item is header
+                )
+            except StopIteration:
+                continue
+            if header_index == 0 or header_index == len(header_line) - 1:
+                continue
+            left_header = header_line[header_index - 1]
+            right_header = header_line[header_index + 1]
+            left_x = float(left_header.x)
+            header_x = float(header.x)
+            right_x = float(right_header.x)
+            if not left_x < header_x < right_x:
+                continue
+            left_boundary = (left_x + header_x) / 2
+            right_boundary = (header_x + right_x) / 2
+            if not left_boundary < header_x < right_boundary:
+                continue
             header_y = float(header.y)
             for line_y, line in lines.items():
                 # PDF 坐标向上增长：表头下方的数据行 y 必须更小，且限制在合理距离内。
                 y = line_y * 2
                 if not 0 < header_y - y <= 500:
                     continue
-                cells = [fragment for fragment in line if abs(float(fragment.x) - float(header.x)) <= 36]
+                cells = [
+                    fragment for fragment in line
+                    if left_boundary < float(fragment.x) < right_boundary
+                ]
                 if not any(_NUMERIC_CELL_PATTERN.search(fragment.text) for fragment in cells):
                     continue
                 # 证据摘录仅保留行名与本期列单元格；同一行上期列绝不进入模型上下文。
@@ -225,7 +250,7 @@ class ProgressiveAnalysisPipeline:
                     source_type=SourceType.PDF_TEXT,
                     source_locator=SourceLocator(
                         provider="pdf", page=page.page_number,
-                        bbox=(float(header.x), float(y), float(header.x), float(header_y)),
+                        bbox=(left_boundary, float(y), right_boundary, float(header_y)),
                         record_id=f"current-period-cell-{page.page_number}-{cell_index}",
                     ),
                     extraction_confidence=page.quality_score,

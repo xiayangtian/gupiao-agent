@@ -31,6 +31,7 @@ from financial_report_fetcher.visualizations import (
     VisualizationBundle,
     VisualizationCard,
     VisualizationRow,
+    validate_visualization_payload,
 )
 from financial_report_fetcher.insights import (
     InsightCandidate,
@@ -147,11 +148,12 @@ def test_pdf_records_only_create_current_period_cell_evidence_from_positioned_he
         pages=(DocumentPage(
             1, "合并现金流量表", 7, 0, 0.5, 0.5, 0.9, False,
             fragments=(
+                DocumentTextFragment("项目", 80, 700),
                 DocumentTextFragment("2025年12月31日 本期", 300, 700),
-                DocumentTextFragment("2024年12月31日 上期", 420, 700),
+                DocumentTextFragment("2024年12月31日 上期", 330, 700),
                 DocumentTextFragment("经营活动现金流净额", 80, 680),
                 DocumentTextFragment("100", 300, 680),
-                DocumentTextFragment("90", 420, 680),
+                DocumentTextFragment("90", 330, 680),
             ),
         ),),
     )
@@ -161,6 +163,21 @@ def test_pdf_records_only_create_current_period_cell_evidence_from_positioned_he
     assert "100" in cells[0].text
     assert "90" not in cells[0].text  # 上期列绝不进入本期单元格证据上下文。
     assert cells[0].source_locator.bbox is not None
+    rejected = validate_visualization_payload(
+        {"cards": [{
+            "id": "cash_flow_structure", "topic_id": "cash", "title": "现金流结构",
+            "kind": "cash_flow", "rows": [
+                {"metric_id": "operating_cash_flow", "label": "经营活动现金流净额",
+                 "value": 1, "unit": "亿元", "direction": "inflow",
+                 "evidence_ids": [records[0].stable_id]},
+                {"metric_id": "investing_cash_flow", "label": "投资活动现金流净额",
+                 "value": -1, "unit": "亿元", "direction": "outflow",
+                 "evidence_ids": [records[0].stable_id]},
+            ],
+        }]},
+        period="2025-12-31", allowed_pdf_evidence={record.stable_id: record for record in records},
+    )
+    assert rejected.cards[0].status == "unavailable"
 
 
 def test_pdf_records_without_positioned_current_period_header_do_not_create_visualization_evidence():
