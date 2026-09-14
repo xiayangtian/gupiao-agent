@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_JS = ROOT / "webapp" / "static" / "analysis_workflow.js"
 APP_JS = ROOT / "webapp" / "static" / "app.js"
 STYLE_CSS = ROOT / "webapp" / "static" / "style.css"
+INDEX_HTML = ROOT / "webapp" / "static" / "index.html"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="前端工作流回归测试需要 Node.js")
@@ -871,3 +872,68 @@ def test_v2_history_dimension_panels_offer_the_same_reanalysis_hint():
     render_dimension_tabs = source[source.index("function renderDimensionTabs"):source.index("function bindDimTabs")]
     assert 'analysis-visualization-legacy-hint' in render_dimension_tabs
     assert '重新分析后可生成结构图' in render_dimension_tabs
+
+
+def test_chat_scope_selector_defaults_auto_and_disables_company_without_focus():
+    """范围选择提供自动/本公司/本公司+行业/全库，并随公司上下文禁用本公司选项。"""
+    index = INDEX_HTML.read_text(encoding="utf-8")
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert 'name="chat-scope-mode"' in index
+    assert 'value="auto"' in index
+    assert 'value="company_only"' in index
+    assert 'value="company_industry"' in index
+    assert 'value="whole_corpus"' in index
+    assert 'id="chat-scope-hint"' in index
+    assert "function currentScopeMode" in source
+    assert "scope_mode: currentScopeMode()" in source
+    assert "radio.value === 'company_only' || radio.value === 'company_industry'" in source
+    assert "STATE.chatFocusReport" in source
+
+
+def test_chat_stream_consumes_scope_run_and_artifact_events():
+    """SSE 前端必须消费 scope_resolved/run_started/artifact/done 并渲染可信回答。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "parsed.event === 'scope_resolved'" in source
+    assert "parsed.event === 'run_started'" in source
+    assert "parsed.event === 'artifact'" in source
+    assert "parsed.event === 'done'" in source
+    assert "ChatRendering.renderScope" in source
+    assert "renderRunArtifacts(run)" in source
+    assert "renderRunStatus(run)" in source
+    assert "data-chat-pdf-page" in source or "renderRunArtifacts" in source
+
+
+def test_chat_history_renders_persisted_run_scope_artifacts_and_status():
+    """历史会话重开必须从持久化 run 渲染同一范围、证据与状态。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "function appendAssistantRun" in source
+    assert "message.run" in source
+    assert "renderScope(run && run.scope)" in source or "renderScope(run.scope)" in source
+    assert "renderRunArtifacts(run)" in source
+    assert "renderRunStatus(run)" in source
+
+
+def test_chat_regenerate_action_rewinds_to_the_preceding_user_question():
+    """「重新生成」必须从紧邻的用户消息重新提问，且恢复占位保持禁用。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "function bindChatRunActions" in source
+    assert ".chat-run-regenerate" in source
+    assert "function chatRunQuestion" in source
+    assert "previousElementSibling" in source
+
+
+def test_chat_scope_and_pdf_page_styles_are_semantic_and_mobile_safe():
+    """范围选择与跳页按钮需要语义化、可见焦点与移动端换行。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    assert "flex-wrap: wrap" in _css_rule(css, ".chat-scope-bar")
+    assert "flex-wrap: wrap" in _css_rule(css, ".chat-scope-options")
+    assert "outline:" in _css_rule(css, ".chat-pdf-page:focus-visible")
+    assert ".chat-run-status" in css
+    assert ".chat-run-action" in css
+    assert ".chat-artifacts" in css
+    assert ".chat-scope" in css

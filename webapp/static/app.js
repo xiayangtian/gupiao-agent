@@ -2131,11 +2131,42 @@ function renderChatFocusBar() {
   var bar = $('#chat-focus-bar');
   if (!bar) return;
   var fr = STATE.chatFocusReport;
-  if (!fr || !fr.code) { bar.classList.add('hidden'); return; }
-  bar.classList.remove('hidden');
+  if (!fr || !fr.code) { bar.classList.add('hidden'); } else { bar.classList.remove('hidden'); }
   var label = $('#chat-focus-label');
   if (label) {
     label.textContent = '聚焦报告：' + (fr.company || '') + '（' + fr.code + ' · ' + fr.period + '）——检索优先本报告';
+  }
+  renderChatScopeBar();
+}
+
+function currentScopeMode() {
+  var checked = document.querySelector('input[name="chat-scope-mode"]:checked');
+  return checked ? checked.value : 'auto';
+}
+
+// 范围选择器：本公司 / 本公司+行业 需要先聚焦某家公司；无公司上下文时禁用并说明。
+function renderChatScopeBar() {
+  var hasCompany = !!(STATE.chatFocusReport && STATE.chatFocusReport.code);
+  $$('input[name="chat-scope-mode"]').forEach(function (radio) {
+    var requiresCompany = radio.value === 'company_only' || radio.value === 'company_industry';
+    if (requiresCompany && !hasCompany) {
+      radio.disabled = true;
+      if (radio.checked) radio.checked = false;
+    } else {
+      radio.disabled = false;
+    }
+  });
+  // 确保始终有一个可用且被选中的选项
+  var anyChecked = $$('input[name="chat-scope-mode"]').some(function (r) { return r.checked; });
+  if (!anyChecked) {
+    var auto = document.querySelector('input[name="chat-scope-mode"][value="auto"]');
+    if (auto) auto.checked = true;
+  }
+  var hint = $('#chat-scope-hint');
+  if (hint) {
+    hint.textContent = hasCompany
+      ? '自动：根据问题判断范围；本公司 / 本公司+行业 将聚焦当前报告的公司'
+      : '本公司 / 本公司+行业 需要先聚焦某家公司（从财报页或历史记录跳转）';
   }
 }
 
@@ -2185,6 +2216,7 @@ async function initChatPage() {
     newBtn.addEventListener('click', function () { newChatSession(); });
   }
   bindChatSessionList();
+  bindChatRunActions();
 }
 
 // ── 历史会话：列表 / 新建 / 切换 ──
@@ -2315,7 +2347,12 @@ async function openChatSession(sid) {
     if (res.ok) {
       var data = await res.json();
       (data.messages || []).forEach(function (m) {
-        if (m && m.role && m.content) appendChatMsg('#chat-history', m.role, m.content);
+        if (!m || !m.role) return;
+        if (m.role === 'user') {
+          if (m.content) appendChatMsg('#chat-history', 'user', m.content);
+        } else if (m.role === 'assistant') {
+          appendAssistantRun('#chat-history', m);
+        }
       });
     }
   } catch (_) { /* 加载失败保持空会话 */ }
@@ -2537,9 +2574,10 @@ async function submitQuestion(q, key) {
   var toolStepsEl = null;   // 工具调用步骤区块（⏳ 调用中 → ✅ 已获取）
   var stageEl = null;
   var assistantEl = null;
+  var scopeEl = null;       // scope_resolved 时首部展示的范围摘要（done 时合并进最终回答）
 
   try {
-    var body = { question: q, session_id: chatSessionId };
+    var body = { question: q, session_id: chatSessionId, scope_mode: currentScopeMode() };
     if (STATE.chatFocusReport && STATE.chatFocusReport.code && STATE.chatFocusReport.period) {
       body.focus_report = { code: STATE.chatFocusReport.code, period: STATE.chatFocusReport.period };
     }
@@ -2572,6 +2610,28 @@ async function submitQuestion(q, key) {
           chatStreams[key] = st;
           chatSessionId = newSid;
         }
+      } else if (parsed.event === 'scope_resolved') {
+        // 范围合同到达：先在回答首部展示不可变范围摘要；最终回答由持久化 run.scope 重渲染。
+        st.scope = parsed.data.scope || null;
+        if (isCurrentChatStream(key)) {
+          var scopeHtml = window.ChatRendering ? window.ChatRendering.renderScope(st.scope) : '';
+          if (scopeHtml) {
+            scopeEl = document.createElement('div');
+            scopeEl.className = 'chat-scope-wrapper';
+            scopeEl.innerHTML = scopeHtml;
+            if (thinkingEl && thinkingEl.parentNode) {
+              thinkingEl.parentNode.insertBefore(scopeEl, thinkingEl.nextSibling);
+            } else {
+              $('#chat-history').appendChild(scopeEl);
+            }
+            scrollChatToBottom();
+          }
+        }
+      } else if (parsed.event === 'run_started') {
+        st.runId = parsed.data.run_id || '';
+      } else if (parsed.event === 'artifact') {
+        // 完整证据包由 done 的 run 统一渲染；此处仅确认事件已被消费。
+        st.artifactCount = (st.artifactCount || 0) + 1;
       } else if (parsed.event === 'delta') {
         var text = parsed.data.text || '';
         if (text) {
@@ -2669,23 +2729,19 @@ async function submitQuestion(q, key) {
         if (isCurrentChatStream(key)) {
           if (assistantEl && assistantEl.parentNode) assistantEl.parentNode.removeChild(assistantEl);
           if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
+          if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
           thinkingEl = null;
-          appendChatMsg('#chat-history', 'assistant', st.answerText);
+          scopeEl = null;
+          appendAssistantRun('#chat-history', { content: st.answerText, run: parsed.data.run });
           appendChatElapsed('#chat-history', parsed.data.elapsed_seconds);
-          appendCitations('#chat-history', parsed.data.citations || []);
-          appendWebSources('#chat-history', parsed.data.web_sources || []);
+          // analysis 来源引用未进入 run.artifacts，只保留在旧 citations 字段一个版本；
+          // PDF/网页/实时工具已由 renderRunArtifacts 统一渲染。
+          appendAnalysisCitations('#chat-history', parsed.data.citations || []);
           if (parsed.data.retrieval_degraded) {
             var retrievalWarning = document.createElement('div');
             retrievalWarning.className = 'chat-retrieval-warning';
             retrievalWarning.textContent = '⚠️ 本次未能连接本地财报检索模型，回答未引用 PDF 原文';
             $('#chat-history').appendChild(retrievalWarning);
-          }
-          // MCP 工具徽章
-          if (parsed.data.tools_used && parsed.data.tools_used.length) {
-            var badge = document.createElement('div');
-            badge.className = 'chat-tools-badge';
-            badge.textContent = '🔧 已参考 MCP 实时数据';
-            $('#chat-history').appendChild(badge);
           }
           scrollChatToBottom();
         }
@@ -2714,18 +2770,16 @@ async function submitQuestion(q, key) {
     if (buffer.trim()) handleFrame(buffer.trim());
     if (!done) {
       // 未收到 done：用户主动停止或连接中断
-      var stoppedText = st.stopped ? '⏹ 已停止生成' : '⚠️ 连接中断，已显示部分内容';
       if (isCurrentChatStream(key)) {
-        if (st.hasContent && assistantEl) {
-          if (assistantEl.parentNode) assistantEl.parentNode.removeChild(assistantEl);
-          if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
-          thinkingEl = null;
-          appendChatMsg('#chat-history', 'assistant', st.answerText + '\n\n' + stoppedText);
-        } else {
-          if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
-          thinkingEl = null;
-          appendChatMsg('#chat-history', 'assistant', stoppedText);
-        }
+        if (assistantEl && assistantEl.parentNode) assistantEl.parentNode.removeChild(assistantEl);
+        if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
+        if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
+        thinkingEl = null;
+        scopeEl = null;
+        appendAssistantRun('#chat-history', {
+          content: st.answerText,
+          run: { status: st.stopped ? 'stopped' : 'failed' },
+        });
         scrollChatToBottom();
       }
       // 部分回答已由后端保存进会话历史，刷新列表
@@ -2737,8 +2791,13 @@ async function submitQuestion(q, key) {
       if (isCurrentChatStream(key)) {
         if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
         if (assistantEl && assistantEl.parentNode) assistantEl.parentNode.removeChild(assistantEl);
-        if (st.answerText) appendChatMsg('#chat-history', 'assistant', st.answerText + '\n\n⏹ 已停止生成');
-        else appendChatMsg('#chat-history', 'assistant', '⏹ 已停止');
+        if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
+        thinkingEl = null;
+        scopeEl = null;
+        appendAssistantRun('#chat-history', {
+          content: st.answerText,
+          run: { status: 'stopped' },
+        });
         scrollChatToBottom();
       }
       loadChatSessions();
@@ -2746,6 +2805,9 @@ async function submitQuestion(q, key) {
       if (isCurrentChatStream(key)) {
         if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
         if (assistantEl && assistantEl.parentNode) assistantEl.parentNode.removeChild(assistantEl);
+        if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
+        thinkingEl = null;
+        scopeEl = null;
         appendChatMsg('#chat-history', 'assistant', '⚠️ ' + err.message);
         scrollChatToBottom();
       }
@@ -2793,6 +2855,79 @@ function appendChatElapsed(sel, elapsedSeconds) {
   div.className = 'chat-elapsed';
   div.textContent = '处理耗时：' + seconds.toFixed(2) + ' 秒';
   box.appendChild(div);
+}
+
+// ── 可信回答块：范围首部 + 正文 + 证据/来源 + 运行状态，统一由 ChatRendering 渲染 ──
+
+function appendAssistantRun(sel, message) {
+  var box = $(sel);
+  if (!box) return;
+  var run = message && message.run;
+  var content = message && message.content != null
+    ? message.content
+    : (run && run.content) || '';
+  var parts = [];
+  var rendering = window.ChatRendering;
+  if (rendering) {
+    var scopeHtml = rendering.renderScope(run && run.scope);
+    if (scopeHtml) parts.push(scopeHtml);
+  }
+  var displayed = rendering ? rendering.normalizeAssistantMarkdown(content) : content;
+  parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + '</div>');
+  if (rendering) {
+    var artifactsHtml = rendering.renderRunArtifacts(run);
+    if (artifactsHtml) parts.push(artifactsHtml);
+    var statusHtml = rendering.renderRunStatus(run);
+    if (statusHtml) parts.push(statusHtml);
+  }
+  var wrapper = document.createElement('div');
+  wrapper.className = 'chat-run';
+  wrapper.innerHTML = parts.join('');
+  box.appendChild(wrapper);
+  box.scrollTop = box.scrollHeight;
+}
+
+// analysis 来源引用不在 run.artifacts 中，仅当次流式回答保留展示，避免重复渲染 PDF 证据。
+function appendAnalysisCitations(sel, citations) {
+  var box = $(sel);
+  if (!box) return;
+  var analysisCitations = (citations || []).filter(function (c) {
+    return c && c.source === 'analysis';
+  });
+  if (!analysisCitations.length) return;
+  var div = document.createElement('div');
+  div.className = 'citation-list';
+  div.innerHTML = '<div class="citation-head">📎 AI 分析报告引用</div>'
+    + renderCitationCards(analysisCitations);
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+// 「重新生成」从紧邻的用户消息重新提问；「继续研究」占位禁用，恢复状态机留到 M3。
+function bindChatRunActions() {
+  var box = $('#chat-history');
+  if (!box || box.dataset.runActionsBound) return;
+  box.dataset.runActionsBound = '1';
+  box.addEventListener('click', function (e) {
+    var regen = e.target && e.target.closest ? e.target.closest('.chat-run-regenerate') : null;
+    if (!regen) return;
+    var runBlock = regen.closest ? regen.closest('.chat-run') : null;
+    var userText = chatRunQuestion(runBlock);
+    if (userText) submitQuestion(userText, chatStreamKey());
+  });
+}
+
+function chatRunQuestion(runBlock) {
+  var prev = runBlock ? runBlock.previousElementSibling : null;
+  while (prev) {
+    if (prev.classList
+        && prev.classList.contains('chat-msg')
+        && prev.classList.contains('user')) {
+      return prev.textContent || '';
+    }
+    prev = prev.previousElementSibling;
+  }
+  return '';
 }
 
 // ── 引用卡片：智能问答页 / 分析页 / 历史页复用 ──

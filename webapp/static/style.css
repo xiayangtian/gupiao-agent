@@ -2340,6 +2340,168 @@ input, select, button { font-family: inherit; font-size: inherit; }
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
+/* ═════════ 范围选择与可信回答（Scope / 证据 / 运行状态） ═════════ */
+
+.chat-scope-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 6px 10px;
+  margin-bottom: var(--space-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.chat-scope-bar-label { font-weight: 600; flex-shrink: 0; }
+
+.chat-scope-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.chat-scope-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chat-scope-options label:has(input:disabled) {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.chat-scope-hint {
+  flex: 1 1 100%;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.chat-scope {
+  align-self: flex-start;
+  max-width: 92%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-light);
+  border-radius: var(--radius-sm);
+}
+
+.chat-scope-line { color: var(--text-primary); font-weight: 600; }
+.chat-scope-note { color: var(--text-secondary); }
+
+.chat-run {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.chat-artifacts {
+  align-self: flex-start;
+  max-width: 92%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-artifacts-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.chat-artifact {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-border);
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chat-artifact-label { font-weight: 600; color: var(--text-secondary); }
+.chat-artifact-title { color: var(--text-primary); }
+.chat-artifact-meta { color: var(--text-muted); }
+.chat-artifact-unavailable { color: var(--text-muted); }
+
+.chat-pdf-page {
+  align-self: flex-start;
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: transparent;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.chat-pdf-page:hover { background: rgba(59, 130, 246, 0.08); }
+.chat-pdf-page:focus-visible { outline: 3px solid rgb(59 130 246 / 35%); outline-offset: 2px; }
+
+.chat-web-link { color: var(--accent); overflow-wrap: anywhere; }
+
+.chat-artifact-snippet { margin-top: 2px; }
+.chat-artifact-snippet summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.chat-artifact-snippet div {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-run-status {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.chat-run-status-label { font-weight: 600; }
+.chat-run-status-completed .chat-run-status-label { color: var(--success); }
+.chat-run-status-partial .chat-run-status-label { color: var(--warning); }
+.chat-run-status-stopped .chat-run-status-label { color: var(--warning); }
+.chat-run-status-failed .chat-run-status-label { color: var(--danger); }
+.chat-run-status-legacy .chat-run-status-label { color: var(--text-muted); }
+
+.chat-run-action {
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.chat-run-regenerate { border-color: var(--accent); color: var(--accent); }
+.chat-run-regenerate:hover { background: rgba(59, 130, 246, 0.08); }
+.chat-run-action:disabled { color: var(--text-muted); cursor: not-allowed; border-color: var(--border); }
+.chat-run-action:focus-visible { outline: 3px solid rgb(59 130 246 / 35%); outline-offset: 2px; }
+
 /* ═════════ 引用卡片（智能问答 / 分析页 / 历史页复用） ═════════ */
 
 .citation-list {
@@ -2498,4 +2660,13 @@ details.citation-card .citation-snippet { margin-top: 6px; }
   .analysis-visualization-table th:nth-child(2) { width: 20%; }
   .analysis-visualization-table th:nth-child(3) { width: 16%; }
   .analysis-visualization-table th:nth-child(4) { width: 32%; }
+}
+
+/* 窄屏（390px）：范围选择、状态与证据块换行，避免横向滚动。 */
+@media (max-width: 390px) {
+  .chat-scope-bar { gap: 4px; padding: 6px 8px; }
+  .chat-scope-options { gap: 6px; }
+  .chat-scope-hint { flex-basis: 100%; }
+  .chat-run-status { gap: 6px; }
+  .chat-artifact { padding: 6px 8px; }
 }

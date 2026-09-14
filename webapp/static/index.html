@@ -283,6 +283,16 @@
       <div class="chat-main">
         <div id="chat-history" class="chat-history"></div>
         <div id="chat-draft-bar" class="chat-draft-bar hidden"></div>
+        <div class="chat-scope-bar">
+          <span class="chat-scope-bar-label">回答范围</span>
+          <fieldset class="chat-scope-options" role="radiogroup" aria-label="回答范围">
+            <label><input type="radio" name="chat-scope-mode" value="auto" checked /> 自动</label>
+            <label><input type="radio" name="chat-scope-mode" value="company_only" /> 本公司</label>
+            <label><input type="radio" name="chat-scope-mode" value="company_industry" /> 本公司+行业</label>
+            <label><input type="radio" name="chat-scope-mode" value="whole_corpus" /> 全库</label>
+          </fieldset>
+          <span id="chat-scope-hint" class="chat-scope-hint"></span>
+        </div>
         <div class="chat-input-row">
           <input id="chat-input" type="text" placeholder="输入你的问题，例如：长江电力的营收增长情况如何？" />
           <button id="chat-send-btn" class="btn primary">发送</button>
