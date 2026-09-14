@@ -22,8 +22,9 @@ import os
 import re
 import threading
 import time
+import uuid
 from dataclasses import asdict
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -62,6 +63,9 @@ from financial_report_fetcher.rag.store import RagStore
 from financial_report_fetcher.rag.web_search import TavilyWebSearch
 
 from .autocomplete import StockIndex
+from .chat_evidence import EvidenceNormalizer
+from .chat_models import AnswerRun, IndustryRef, Scope
+from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
 from .mcp_guard import McpCircuitBreaker
 from .history import (
@@ -521,6 +525,7 @@ class StreamChatRequest(BaseModel):
     session_id: Optional[str] = None  # 缺省/无效时自动新建会话
     use_mcp: bool = True             # 允许模型调用 MCP 工具获取更多信息
     focus_report: Optional[Dict[str, str]] = None  # {code, period}：提升该报告检索权重
+    scope_mode: Literal["auto", "company_only", "company_industry", "whole_corpus"] = "auto"
 
 
 class RagIngestOneRequest(BaseModel):
@@ -1210,6 +1215,73 @@ def global_chat(body: GlobalChatRequest) -> Dict[str, Any]:
 
 # ── 智能问答：流式 + 历史会话 ─────────────────────────────
 
+def _resolve_company_industry(code: str) -> Optional[IndustryRef]:
+    """通过公司基本信息工具解析行业；不可用/非 JSON/字段为空时返回 None。
+
+    仅读取结构化响应中的显式 ``industry`` / ``industry_name`` 字段，绝不从
+    模型自然语言回答推断行业；provider 与解析时间随 IndustryRef 一并记录。
+    """
+    try:
+        raw = stock_mcp.call_tool(
+            "get_stock_basic_info",
+            {"symbol": code, "output_format": "json"},
+            timeout=30,
+        )
+    except Exception:
+        logger.warning("公司基本信息工具不可用，无法解析行业：%s", code)
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    industry = ""
+    for key in ("industry", "industry_name"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            industry = value.strip()
+            break
+    if not industry:
+        return None
+    return IndustryRef(
+        name=industry,
+        provider="china-stock-mcp",
+        resolved_at=dt.datetime.now().isoformat(timespec="seconds"),
+    )
+
+
+def _build_scope_resolver() -> ScopeResolver:
+    """构造 ScopeResolver：报告身份来自本地 RAG，行业来自公司基本信息工具。"""
+    def _local_report_ids() -> List[str]:
+        if rag_store is None:
+            return []
+        try:
+            return rag_store.list_report_ids()
+        except Exception:
+            return []
+
+    return ScopeResolver(
+        report_ids_provider=_local_report_ids,
+        company_name_provider=lambda code: stock_index.company_name(code),
+        industry_provider=_resolve_company_industry,
+        cache_path=os.path.join(BASE_DIR, "data", "company_industries.json"),
+    )
+
+
+def _resolve_scope(body: StreamChatRequest) -> Scope:
+    """解析并冻结 Scope；任何解析失败回退全库，绝不向上抛出异常。"""
+    resolver = _build_scope_resolver()
+    request = ScopeRequest(body.scope_mode, body.focus_report)
+    try:
+        return resolver.resolve(body.question, request)
+    except Exception as exc:
+        logger.exception("Scope 解析失败，回退全库范围")
+        return Scope("whole_corpus", (), (), fallback_reason=f"范围解析失败：{exc}")
+
+
 def _sse(event: str, data: Dict[str, Any]) -> str:
     """SSE 帧：event: xxx\ndata: {...}\n\n"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -1217,14 +1289,23 @@ def _sse(event: str, data: Dict[str, Any]) -> str:
 
 @app.post("/api/chat/stream")
 async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingResponse:
-    """流式全局问答（SSE）。事件：session / delta / done / error。
+    """流式全局问答（SSE）。
 
-    - session: 会话 id（新建或沿用 body.session_id）
-    - delta:   模型回答内容增量 {text}；首个 delta 前前端显示「思考中」
-    - done:    完成 {answer, citations, session_id}
-    - error:   失败 {error}
-    回答后自动把 {user, assistant} 写入会话历史（多轮上下文用最近 4 轮）。
-    用户主动停止（前端断开连接）时，已生成的部分内容也会保存进历史。
+    事件：session / scope_resolved / run_started / delta / artifact /
+    tool_call / tool_result / reasoning_stage / done / error。
+
+    - session:        会话 id（新建或沿用 body.session_id）
+    - scope_resolved: 冻结的 Scope（范围合同）
+    - run_started:    本次 AnswerRun 的 id
+    - delta:          模型回答内容增量 {text}
+    - artifact:       标准化证据/工具 artifact
+    - done:           完整 AnswerRun（scope/facts/artifacts/status），同时保留
+                      answer/citations/tools_used/web_sources/retrieval_degraded
+                      旧字段一个版本
+    - error:          失败 {error}
+
+    所有 completed/partial/stopped/failed 运行都经 chat_store.append_turn()
+    原子持久化；停止（断开/取消）保存 stopped，生产异常保存 failed。
     """
     started_at = time.perf_counter()
     _require_ai()
@@ -1236,6 +1317,10 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
     history = session.get("messages", [])[-8:]  # 传给模型的最近 4 轮
+
+    # 解析并冻结 Scope（在启动生产线程之前；失败回退全库，不让线程崩溃）
+    scope = await asyncio.to_thread(_resolve_scope, body)
+
     # 外部工具：默认开启；use_mcp=false 时保持纯 RAG。
     tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
     # 聚焦报告：解析为 report_id 后提升其检索权重（历史记录跳转场景）
@@ -1246,6 +1331,9 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             priority_report_id = RagQA.build_report_id(fr["code"], fr["period"])
         except Exception:
             priority_report_id = None
+
+    run_id = uuid.uuid4().hex
+    created_at = dt.datetime.now().isoformat(timespec="seconds")
 
     async def gen():
         # 同步生成器（rag_qa.answer_stream 内部为阻塞式 requests 流）放在独立
@@ -1268,7 +1356,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             try:
                 for evt in rag_qa.answer_stream(body.question, history=history,
                                                 filters=body.filters, tools=tools,
-                                                priority_report_id=priority_report_id):
+                                                priority_report_id=priority_report_id,
+                                                scope=scope):
                     if stop_producer.is_set():
                         return
                     _safe_put(evt)
@@ -1283,10 +1372,44 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         producer = threading.Thread(target=_produce, daemon=True, name="chat-stream-producer")
         producer.start()
 
-        answer_parts = []
+        normalizer = EvidenceNormalizer()
+        answer_parts: List[str] = []
+        pending_tool_args: List[Dict[str, Any]] = []
+        tool_artifacts: List[Any] = []
+        facts: List[Any] = []
+        evidence_artifacts: List[Any] = []
+        retrieval_report_ids: List[str] = []
+        model_name = ""
+        had_external_failure = False
         saved = False
+
+        def _make_run(status: str, content: str) -> AnswerRun:
+            return AnswerRun(
+                content=content,
+                status=status,
+                scope=scope,
+                facts=tuple(facts),
+                artifacts=tuple(evidence_artifacts),
+                tool_artifacts=tuple(tool_artifacts),
+                retrieval_report_ids=tuple(retrieval_report_ids),
+                id=run_id,
+                created_at=created_at,
+                completed_at=dt.datetime.now().isoformat(timespec="seconds"),
+                elapsed_seconds=round(time.perf_counter() - started_at, 3),
+                model=model_name,
+            )
+
+        def _persist(status: str, content: str = "") -> AnswerRun:
+            nonlocal saved
+            run = _make_run(status, content)
+            chat_store.append_turn(sid, question=body.question, run=run)
+            saved = True
+            return run
+
         try:
             yield _sse("session", {"session_id": sid})
+            yield _sse("scope_resolved", {"scope": scope.to_dict()})
+            yield _sse("run_started", {"run_id": run_id})
             while True:
                 evt = await q.get()
                 if evt is SENTINEL:
@@ -1294,80 +1417,121 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 # 客户端已断开（点击「停止」）：终止生成，保留已产出部分
                 if await request.is_disconnected():
                     break
-                if evt["type"] == "delta":
+                etype = evt.get("type")
+                if etype == "delta":
                     text = evt.get("text", "")
                     if text:
                         answer_parts.append(text)
                         yield _sse("delta", {"text": text})
-                elif evt["type"] == "tool_call":
-                    # 前端展示「正在调用 MCP 工具 xxx」
+                elif etype == "tool_call":
+                    pending_tool_args.append(evt.get("arguments", {}))
                     yield _sse("tool_call", {
                         "name": evt.get("name", ""),
                         "arguments": evt.get("arguments", {}),
                     })
-                elif evt["type"] == "reasoning_stage":
+                elif etype == "reasoning_stage":
                     yield _sse("reasoning_stage", {
                         "stage": evt.get("stage", ""), "round": evt.get("round", 0),
                         "message": evt.get("message", ""),
                     })
-                elif evt["type"] == "tool_result":
+                elif etype == "tool_result":
+                    name = evt.get("name", "")
+                    summary = evt.get("summary", "")
+                    ok = bool(evt.get("ok", True))
+                    args = pending_tool_args.pop(0) if pending_tool_args else {}
+                    provider = "web_search" if name == "web_search" else "stock-data-mcp"
+                    as_of = dt.datetime.now().isoformat(timespec="seconds")
+                    try:
+                        artifact = normalizer.normalize_tool_event(
+                            name, args, summary, provider=provider, as_of=as_of, ok=ok,
+                        )
+                    except Exception:
+                        had_external_failure = True
+                    else:
+                        tool_artifacts.append(artifact)
+                        if not ok:
+                            had_external_failure = True
+                        try:
+                            new_facts = normalizer.facts_from_structured_tool_payload(
+                                summary, artifact
+                            )
+                        except ValueError:
+                            # 非有限数值等受控字段异常：降级为 partial，不向上抛
+                            had_external_failure = True
+                            new_facts = ()
+                        facts.extend(new_facts)
+                        yield _sse("artifact", {"artifact": artifact.to_dict()})
                     yield _sse("tool_result", {
-                        "name": evt.get("name", ""),
-                        "summary": evt.get("summary", ""),
-                        "ok": evt.get("ok", True),
+                        "name": name, "summary": summary, "ok": ok,
                     })
-                elif evt["type"] == "empty":
+                elif etype == "empty":
                     default = "知识库中未检索到相关内容，请补充更多报告或更换问法。"
-                    chat_store.append_messages(sid, [
-                        {"role": "user", "content": body.question},
-                        {"role": "assistant", "content": default},
-                    ])
-                    saved = True
+                    run = _persist("completed", default)
                     yield _sse("done", {
                         "answer": default,
                         "citations": [],
                         "session_id": sid,
+                        "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
                     return
-                elif evt["type"] == "error":
+                elif etype == "error":
+                    run = _persist("failed", "".join(answer_parts).strip())
                     yield _sse("error", {
                         "error": evt.get("error", "未知错误"),
+                        "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
-                elif evt["type"] == "done":
+                    return
+                elif etype == "done":
                     answer = evt.get("answer") or ""
-                    chat_store.append_messages(sid, [
-                        {"role": "user", "content": body.question},
-                        {"role": "assistant", "content": answer},
-                    ])
-                    saved = True
+                    legacy_citations = evt.get("citations", []) or []
+                    legacy_web_sources = evt.get("web_sources", []) or []
+                    legacy_tools_used = evt.get("tools_used", []) or []
+                    retrieval_report_ids.extend(evt.get("retrieval_report_ids", []) or [])
+                    retrieval_degraded = bool(evt.get("retrieval_degraded", False))
+                    model_name = evt.get("model") or ""
+
+                    # 标准化 PDF/网页证据（analysis 引用只保留在旧 citations 字段一个版本）
+                    evidence_artifacts.extend(normalizer.normalize_rag_citations(
+                        legacy_citations,
+                        analysis_dir=ANALYSIS_DIR,
+                        reports_dir=REPORTS_DIR,
+                        jump_version=int(time.time() * 1000),
+                    ))
+                    evidence_artifacts.extend(normalizer.normalize_web_sources(
+                        legacy_web_sources,
+                        fetched_at=dt.datetime.now().isoformat(timespec="seconds"),
+                    ))
+                    for artifact in evidence_artifacts:
+                        yield _sse("artifact", {"artifact": artifact.to_dict()})
+
+                    status = "partial" if (had_external_failure or retrieval_degraded) else "completed"
+                    run = _persist(status, answer)
                     yield _sse("done", {
                         "answer": answer,
-                        "citations": evt.get("citations", []),
+                        "citations": legacy_citations,
                         "session_id": sid,
-                        "tools_used": evt.get("tools_used", []),
-                        "web_sources": evt.get("web_sources", []),
-                        "retrieval_degraded": evt.get("retrieval_degraded", False),
+                        "tools_used": legacy_tools_used,
+                        "web_sources": legacy_web_sources,
+                        "retrieval_degraded": retrieval_degraded,
+                        "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
                     return
         except Exception as exc:
             logger.exception("流式问答失败")
+            if not saved:
+                _persist("failed", "".join(answer_parts).strip())
             yield _sse("error", {
                 "error": f"流式问答失败：{exc}",
                 "elapsed_seconds": round(time.perf_counter() - started_at, 3),
             })
         finally:
             stop_producer.set()
-            # 未正常完成（停止/断开/异常）：把已生成的部分内容保存进历史
+            # 未正常完成（停止/断开/没有 done）：保存为 stopped，不伪装完整
             if not saved:
-                partial = "".join(answer_parts).strip()
-                if partial:
-                    chat_store.append_messages(sid, [
-                        {"role": "user", "content": body.question},
-                        {"role": "assistant", "content": partial},
-                    ])
+                _persist("stopped", "".join(answer_parts).strip())
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -1483,6 +1647,7 @@ def _render_index() -> HTMLResponse:
         os.path.join(STATIC_DIR, "app.js"),
         os.path.join(STATIC_DIR, "analysis_workflow.js"),
         os.path.join(STATIC_DIR, "analysis_visualizations.js"),
+        os.path.join(STATIC_DIR, "chat_rendering.js"),
         os.path.join(STATIC_DIR, "style.css"),
     )
     with open(index_path, encoding="utf-8") as f:

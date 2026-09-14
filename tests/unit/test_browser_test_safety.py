@@ -8,6 +8,7 @@ from webapp.browser_preflight import find_usable_agent_browser
 ROOT = Path(__file__).resolve().parents[2]
 BROWSER_TEST = ROOT / "tests" / "browser" / "test_analysis_dialog_layout.py"
 STRUCTURE_BROWSER_TEST = ROOT / "tests" / "browser" / "test_financial_structure_visuals.py"
+CHAT_TRUST_BROWSER_TEST = ROOT / "tests" / "browser" / "test_chat_trust_flow.py"
 STRUCTURE_LAUNCHER = ROOT / "tests" / "browser" / "visual_test_app.py"
 
 
@@ -57,14 +58,21 @@ def test_financial_structure_browser_tests_use_agent_browser_without_opt_in_skip
     assert "真实应用服务在 15 秒内未就绪" in source
 
 
-def test_acceptance_app_disables_rag_ingest_and_external_datasource():
-    """验收应用不触发 RAG 摄取与外部行情请求，避免结果依赖本地数据与网络。"""
+def test_acceptance_app_disables_rag_ingest_and_injects_fake_chat_rag():
+    """验收应用不触发 RAG 摄取与外部行情请求，并注入可控 fake RAG。
+
+    真实摄取（``rag_service``）仍关闭；``rag_store``/``rag_qa`` 改为 fake，
+    让可信问答浏览器回归经真实 SSE 产出确定性证据与停止运行，避免模型配额与联网。
+    """
     launcher = STRUCTURE_LAUNCHER.read_text(encoding="utf-8")
 
     assert "webapp.server" in launcher
     assert "rag_service = None" in launcher
-    assert "rag_store = None" in launcher
-    assert "rag_qa = None" in launcher
+    assert "_FakeRagStore" in launcher
+    assert "list_report_ids" in launcher
+    assert "_FakeRagQA" in launcher
+    assert "answer_stream" in launcher
+    assert "chat_store = ChatStore" in launcher
     assert "fetch_reports" in launcher
     assert "uvicorn" in launcher
 
@@ -77,3 +85,19 @@ def test_acceptance_teardown_only_fails_when_the_process_survives_kill():
     assert "TEARDOWN_GRACE_SECONDS" in source
     assert "SIGKILL 后仍未退出" in source
     assert source.index("process.kill()") < source.index("SIGKILL 后仍未退出")
+
+
+def test_chat_trust_browser_tests_use_agent_browser_without_opt_in_skip():
+    """可信问答浏览器回归在可用 agent-browser 下访问真实 URL，只有 CLI 缺失才跳过。"""
+    source = CHAT_TRUST_BROWSER_TEST.read_text(encoding="utf-8")
+
+    assert "AGENT_BROWSER" in source
+    assert "RUN_BROWSER_INTEGRATION" not in source
+    assert "agent-browser CLI 不可用" in source
+    assert "find_usable_agent_browser" in source
+    assert "visual_test_app" in source
+    assert "actual_app_url" in source
+    assert "file://" in source  # 文档明确说明该测试不是 file:// fixture。
+    assert "/api/chat/stream" in source  # 通过真实 SSE 端点生成会话，而非 mock 页面。
+    assert "TEARDOWN_GRACE_SECONDS" in source
+    assert "SIGKILL 后仍未退出" in source

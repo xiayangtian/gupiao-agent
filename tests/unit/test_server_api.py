@@ -18,6 +18,95 @@ from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportTy
 from financial_report_fetcher.rag.ingest import IngestResult
 
 
+def _read_sse(response):
+    """解析 SSE 响应体为 [(event_name, data), ...] 列表。"""
+    events = []
+    for block in response.text.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        event_name = None
+        data = None
+        for line in block.split("\n"):
+            if line.startswith("event: "):
+                event_name = line[len("event: "):]
+            elif line.startswith("data: "):
+                data = json.loads(line[len("data: "):])
+        if event_name is not None:
+            events.append((event_name, data))
+    return events
+
+
+def _event(events, name):
+    """从解析后的 SSE 事件中取出指定事件的数据；找不到则报错。"""
+    for event_name, data in events:
+        if event_name == name:
+            return data
+    raise AssertionError(f"事件 {name!r} 不存在，实际：{[e for e, _ in events]}")
+
+
+def _disconnect_after_first_delta(client, monkeypatch, payload, deltas):
+    """模拟客户端在首个 delta 后停止读取：用只产出 delta、不产出 done 的
+    生成器驱动流式端点（等同于「没有 done」的停止语义），返回解析出的 SSE 事件。
+
+    TestClient 的 ASGI 传输会缓冲整个响应体，无法真正中途断开连接；这里以
+    生产线程只产出部分 delta 后结束来复现同一条 stopped 持久化路径。
+    """
+    class StalledRagQA:
+        def answer_stream(self, question, history=None, filters=None, tools=None,
+                          priority_report_id=None, scope=None):
+            for text in deltas:
+                yield {"type": "delta", "text": text, "reasoning": ""}
+            # 不再产出 done：模拟停止/断开
+
+    monkeypatch.setattr(server, "rag_qa", StalledRagQA())
+    return _read_sse(client.post("/api/chat/stream", json=payload))
+
+
+def _configure_scoped_rag_answer(env, citations=None, *, report_ids=None):
+    """配置 fake rag_store + rag_qa，让 /api/chat/stream 解析公司范围并产出引用。
+
+    把 PDF 写到隔离的 REPORTS_DIR，使 EvidenceNormalizer 能把 pdf 引用映射为
+    可跳页证据 artifact；默认报告为 601288 半年报。
+    """
+    monkeypatch = env["monkeypatch"]
+    citations = list(citations or [])
+    report_ids = list(report_ids or sorted(
+        {c["report_id"] for c in citations} or ["601288:2026-06-30:semi_annual"]
+    ))
+
+    reports_dir = server.REPORTS_DIR
+    os.makedirs(reports_dir, exist_ok=True)
+    pdf_path = os.path.join(reports_dir, "农业银行_601288_半年报_2026.pdf")
+    if not os.path.exists(pdf_path):
+        with open(pdf_path, "wb") as f:
+            f.write(b"%PDF-1.4 fake")
+
+    class FakeRagStore:
+        def list_report_ids(self):
+            return list(report_ids)
+
+    class ScopedRagQA:
+        def answer_stream(self, question, history=None, filters=None, tools=None,
+                          priority_report_id=None, scope=None):
+            yield {"type": "delta", "text": "经营现金流为", "reasoning": ""}
+            yield {
+                "type": "done",
+                "answer": "经营现金流为",
+                "reasoning": "",
+                "citations": list(citations),
+                "model": "m",
+                "usage": {"total_tokens": 7},
+                "tools_used": [],
+                "web_sources": [],
+                "retrieval_report_ids": list(report_ids),
+                "retrieval_degraded": False,
+            }
+
+    monkeypatch.setattr(server, "rag_store", FakeRagStore())
+    monkeypatch.setattr(server, "rag_qa", ScopedRagQA())
+
+
 def _meta(code, rt, period, name="测试公司"):
     return ReportMeta(
         company_id=code,
@@ -147,6 +236,8 @@ def env(monkeypatch, tmp_path):
         "fake_dl": fake_dl,
         "fake_pipeline": fake_pipeline,
         "make_task_manager": make_task_manager,
+        "monkeypatch": monkeypatch,
+        "tmp_path": tmp_path,
     }
 
     for manager in task_managers:
@@ -1238,7 +1329,7 @@ class TestChatSessionsApi:
         empty = store.create_session()
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 yield {"type": "delta", "text": "答", "reasoning": ""}
                 yield {"type": "done", "answer": "答",
                        "reasoning": "", "citations": [], "model": "m",
@@ -1262,7 +1353,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 yield {"type": "delta", "text": "营收", "reasoning": ""}
                 yield {"type": "delta", "text": "增长", "reasoning": ""}
                 yield {"type": "done", "answer": "营收增长",
@@ -1283,10 +1374,14 @@ class TestChatSessionsApi:
         sessions = store.list_sessions()
         assert len(sessions) == 1
         detail = store.get_session(sessions[0]["id"])
-        assert detail["messages"] == [
-            {"role": "user", "content": "营收如何？"},
-            {"role": "assistant", "content": "营收增长"},
-        ]
+        assert detail["messages"][0] == {"role": "user", "content": "营收如何？"}
+        assert detail["messages"][1]["role"] == "assistant"
+        assert detail["messages"][1]["content"] == "营收增长"
+        # 新 run 必须真实证据化，不再是旧消息迁移的 legacy_evidence_unavailable
+        assert detail["messages"][1]["run"]["legacy_evidence_unavailable"] is False
+        assert detail["messages"][1]["run"]["status"] == "completed"
+        assert detail["messages"][1]["run"]["scope"]["mode"] == "whole_corpus"
+        assert detail["messages"][1]["run"]["artifacts"] == []
 
     def test_chat_stream_never_exposes_model_reasoning(self, client, env, monkeypatch, tmp_path):
         """SSE 只发送回答内容与可解释工具阶段，不发送模型私有推理。"""
@@ -1295,7 +1390,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "sessions.json")))
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 yield {"type": "delta", "text": "", "reasoning": "这是不应暴露的私有推理"}
                 yield {"type": "delta", "text": "公开回答", "reasoning": "另一个私有片段"}
                 yield {"type": "done", "answer": "公开回答",
@@ -1317,7 +1412,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 yield {"type": "empty"}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
@@ -1432,7 +1527,7 @@ class TestChatStreamPartial:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 yield {"type": "delta", "text": "部分回答", "reasoning": ""}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
@@ -1442,6 +1537,49 @@ class TestChatStreamPartial:
         sid = store.list_sessions()[0]["id"]
         detail = store.get_session(sid)
         assert [m["content"] for m in detail["messages"]] == ["营收如何？", "部分回答"]
+        assert detail["messages"][1]["run"]["status"] == "stopped"
+
+
+class TestChatStreamRunPersistence:
+    def test_chat_stream_persists_scope_and_pdf_artifact(self, client, env, monkeypatch, tmp_path):
+        """scope_resolved 冻结公司范围；done 持久化可跳页 PDF 证据 artifact。"""
+        from webapp.chat_store import ChatStore
+
+        store = ChatStore(str(tmp_path / "sessions.json"))
+        monkeypatch.setattr(server, "chat_store", store)
+        _configure_scoped_rag_answer(env, citations=[{
+            "report_id": "601288:2026-06-30:semi_annual",
+            "source": "pdf",
+            "page": 40,
+            "snippet": "现金流",
+        }])
+
+        events = _read_sse(client.post("/api/chat/stream", json={
+            "question": "经营现金流多少？",
+            "focus_report": {"code": "601288", "period": "2026-06-30"},
+        }))
+
+        assert _event(events, "scope_resolved")["scope"]["mode"] == "company_only"
+        assert _event(events, "run_started")["run_id"]
+        assert _event(events, "done")["run"]["artifacts"][0]["page"] == 40
+        sid = _event(events, "session")["session_id"]
+        persisted = client.get(f"/api/chat/sessions/{sid}").json()["messages"][1]["run"]
+        assert persisted["artifacts"][0]["page"] == 40
+        assert persisted["status"] == "completed"
+
+    def test_chat_stream_stop_persists_stopped_not_completed(self, client, env, monkeypatch, tmp_path):
+        """停止/断开（没有 done）后持久化 stopped run，而不是伪装为 completed。"""
+        from webapp.chat_store import ChatStore
+
+        store = ChatStore(str(tmp_path / "sessions.json"))
+        monkeypatch.setattr(server, "chat_store", store)
+        events = _disconnect_after_first_delta(
+            client, monkeypatch, {"question": "营收如何？"}, ["部分回答"],
+        )
+        sid = _event(events, "session")["session_id"]
+        run = client.get(f"/api/chat/sessions/{sid}").json()["messages"][1]["run"]
+        assert run["status"] == "stopped"
+        assert run["content"] == "部分回答"
 
 
 class TestChatStreamConcurrency:
@@ -1455,7 +1593,7 @@ class TestChatStreamConcurrency:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 _time.sleep(0.3)  # 模拟模型耗时；并发应并行而非串行
                 yield {"type": "delta", "text": question, "reasoning": ""}
                 yield {"type": "done", "answer": question + "答案", "reasoning": "",
@@ -1492,7 +1630,7 @@ class TestMcpChat:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 yield {"type": "tool_call", "name": "get_financial_metrics",
                        "arguments": {"symbol": "600519"}}
                 yield {"type": "tool_result", "name": "get_financial_metrics",
@@ -1517,7 +1655,7 @@ class TestMcpChat:
         monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "sessions.json")))
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 yield {"type": "reasoning_stage", "stage": "assess", "round": 1, "message": "正在判断"}
                 yield {"type": "done", "answer": "答案", "citations": [], "tools_used": ["web_search"],
                        "web_sources": [{"title": "公告", "url": "https://example.com/a", "content": "摘要", "published_date": "2026-09-01"}]}
@@ -1535,7 +1673,7 @@ class TestMcpChat:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
                 assert tools is None or question != "无工具问题"
                 yield {"type": "delta", "text": "答案", "reasoning": ""}
                 yield {"type": "done", "answer": "答案", "reasoning": "", "citations": [],
@@ -1554,7 +1692,7 @@ class TestMcpChat:
 
         class FakeRagQA:
             def answer_stream(self, question, history=None, filters=None, tools=None,
-                              priority_report_id=None):
+                              priority_report_id=None, scope=None):
                 yield {"type": "done", "answer": "降级回答", "citations": [],
                        "tools_used": [], "retrieval_degraded": True}
 
@@ -1796,6 +1934,58 @@ class TestSymbolResolution:
         assert calls == ["get_stock_a_code_name"]  # 缓存：只加载一次
 
 
+class TestResolveCompanyIndustry:
+    def _fake_stock_mcp(self, monkeypatch, raw=None, error=None):
+        class FakeMCP:
+            def call_tool(self, name, arguments, timeout=None):
+                if error is not None:
+                    raise error
+                return raw
+
+        monkeypatch.setattr(server, "stock_mcp", FakeMCP())
+        return FakeMCP
+
+    def test_reads_explicit_industry_field(self, monkeypatch):
+        self._fake_stock_mcp(
+            monkeypatch,
+            raw='{"industry": "银行", "industry_name": "银行", "A股简称": "农业银行"}',
+        )
+
+        ref = server._resolve_company_industry("601288")
+
+        assert ref is not None
+        assert ref.name == "银行"
+        assert ref.provider == "china-stock-mcp"
+        assert ref.resolved_at
+
+    def test_reads_industry_name_when_industry_missing(self, monkeypatch):
+        self._fake_stock_mcp(monkeypatch, raw='{"industry_name": "电力"}')
+
+        ref = server._resolve_company_industry("600900")
+
+        assert ref.name == "电力"
+
+    def test_non_json_returns_none(self, monkeypatch):
+        self._fake_stock_mcp(monkeypatch, raw="not-json")
+
+        assert server._resolve_company_industry("601288") is None
+
+    def test_missing_industry_field_returns_none(self, monkeypatch):
+        self._fake_stock_mcp(monkeypatch, raw='{"A股简称": "农业银行"}')
+
+        assert server._resolve_company_industry("601288") is None
+
+    def test_empty_industry_field_returns_none(self, monkeypatch):
+        self._fake_stock_mcp(monkeypatch, raw='{"industry": "  "}')
+
+        assert server._resolve_company_industry("601288") is None
+
+    def test_tool_failure_returns_none(self, monkeypatch):
+        self._fake_stock_mcp(monkeypatch, error=RuntimeError("mcp down"))
+
+        assert server._resolve_company_industry("601288") is None
+
+
 class TestMcpCircuit:
     def _cfg(self):
         return type("C", (), {"mcp_tools": True, "mcp_tool_timeout": 15, "mcp_max_tool_rounds": 3})()
@@ -1998,7 +2188,7 @@ class TestFocusReport:
 
         class FakeRagQA:
             def answer_stream(self, question, history=None, filters=None, tools=None,
-                              priority_report_id=None):
+                              priority_report_id=None, scope=None):
                 captured["priority"] = priority_report_id
                 yield {"type": "delta", "text": "x", "reasoning": ""}
                 yield {"type": "done", "answer": "x", "reasoning": "", "citations": [],
@@ -2022,7 +2212,7 @@ class TestFocusReport:
 
         class FakeRagQA:
             def answer_stream(self, question, history=None, filters=None, tools=None,
-                              priority_report_id=None):
+                              priority_report_id=None, scope=None):
                 captured["priority"] = priority_report_id
                 yield {"type": "done", "answer": "x", "reasoning": "", "citations": [],
                        "model": "m", "usage": {}, "tools_used": []}

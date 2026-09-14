@@ -2,6 +2,7 @@ from financial_report_fetcher.rag.config import RagConfig
 from financial_report_fetcher.rag.qa import RagQA
 from financial_report_fetcher.rag.store import RagStore
 from financial_report_fetcher.rag.chunking import Chunk
+from webapp.chat_models import Scope
 
 
 class FakeAI:
@@ -430,6 +431,105 @@ def test_answer_stream_without_priority_unchanged():
     qa = RagQA(store, ai, top_k=2)
     list(qa.answer_stream("营收如何？"))
     assert all(c["where"] is None for c in store.calls)
+
+
+def test_company_scope_never_returns_other_company_hits(tmp_path, fake_embedder):
+    """company_only 硬过滤：不得混入其他公司的任何命中。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("农业银行", rid="601288:2026-06-30:semi_annual"),
+                  _chunk("长江电力", rid="600900:2026-06-30:semi_annual")])
+    result = RagQA(store, FakeAI(), top_k=8).answer(
+        "营收多少？",
+        scope=Scope.company_only("601288", "农业银行", ["601288:2026-06-30:semi_annual"]),
+    )
+    assert result is not None
+    assert {c["report_id"] for c in result["citations"]} <= {"601288:2026-06-30:semi_annual"}
+
+
+def test_priority_report_outside_scope_is_ignored(tmp_path, fake_embedder):
+    """范围外的 priority_report_id 被忽略，不得补回范围外结果。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("农业银行", rid="601288:2026-06-30:semi_annual"),
+                  _chunk("长江电力", rid="600900:2026-06-30:semi_annual")])
+    company_scope = Scope.company_only("601288", "农业银行", ["601288:2026-06-30:semi_annual"])
+    qa = RagQA(store, FakeAIStream(), top_k=8)
+    events = list(qa.answer_stream(
+        "营收多少？", scope=company_scope,
+        priority_report_id="600900:2026-06-30:semi_annual",
+    ))
+    assert events[-1]["type"] == "done"
+    assert events[-1]["retrieval_report_ids"] == ["601288:2026-06-30:semi_annual"]
+
+
+def test_priority_report_in_scope_weights_first(tmp_path, fake_embedder):
+    """范围内 priority_report_id 仍排前，且不越出硬 Scope。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([
+        _chunk("农业银行年报营收", rid="601288:2025-12-31:annual", source="pdf"),
+        _chunk("农业银行半年报营收", rid="601288:2026-06-30:semi_annual", source="pdf"),
+    ])
+    scope = Scope.company_only(
+        "601288", "农业银行",
+        ["601288:2025-12-31:annual", "601288:2026-06-30:semi_annual"],
+    )
+    ai = FakeToolAI([[_done_event("农业银行")]])
+    qa = RagQA(store, ai, top_k=2)
+    events = list(qa.answer_stream(
+        "营收？", scope=scope, priority_report_id="601288:2026-06-30:semi_annual",
+    ))
+    assert events[-1]["type"] == "done"
+    system = ai.calls[0]["system"]
+    assert system.index("半年报营收") < system.index("年报营收"), system
+    assert events[-1]["retrieval_report_ids"] == [
+        "601288:2026-06-30:semi_annual", "601288:2025-12-31:annual",
+    ]
+
+
+def test_company_scope_uses_hard_in_filter():
+    """company_only 主查询必须使用 $in 硬过滤。"""
+    class SpyStore:
+        def __init__(self):
+            self.calls = []
+
+        def query(self, text, top_k=8, where=None):
+            self.calls.append({"top_k": top_k, "where": where})
+            return []
+
+    store = SpyStore()
+    scope = Scope.company_only("601288", "农业银行", ["601288:2026-06-30:semi_annual"])
+    qa = RagQA(store, FakeAIStream(), top_k=4)
+    list(qa.answer_stream("营收？", scope=scope))
+    assert store.calls[0]["where"] == {"report_id": {"$in": ["601288:2026-06-30:semi_annual"]}}
+
+
+def test_whole_corpus_scope_passes_no_filter():
+    """whole_corpus 不传任何 where 过滤。"""
+    class SpyStore:
+        def __init__(self):
+            self.calls = []
+
+        def query(self, text, top_k=8, where=None):
+            self.calls.append({"top_k": top_k, "where": where})
+            return []
+
+    store = SpyStore()
+    qa = RagQA(store, FakeAIStream(), top_k=4)
+    list(qa.answer_stream("营收？", scope=Scope.whole_corpus()))
+    assert store.calls[0]["where"] is None
+
+
+def test_context_includes_source_summary_without_distance(tmp_path, fake_embedder):
+    """模型上下文附受控来源摘要（公司/期次/来源类型），但不暴露内部距离分数。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("营业收入为862亿元", source="pdf", rid="600900:2025-12-31:annual")])
+    ai = FakeAIStream(answer="营业收入为862亿元")
+    qa = RagQA(store, ai, top_k=4)
+    list(qa.answer_stream("营收多少？"))
+    system = ai.last_system
+    assert "公司:600900" in system
+    assert "期次:2025-12-31" in system
+    assert "来源类型:pdf/annual" in system
+    assert "distance" not in system
 
 
 def test_build_report_id_preserves_report_periods():

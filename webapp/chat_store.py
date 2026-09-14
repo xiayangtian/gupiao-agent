@@ -11,7 +11,9 @@ import os
 import threading
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
+
+from webapp.chat_models import AnswerRun, ChatMessage
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +35,41 @@ class ChatStore:
 
     # ── 持久化 ──────────────────────────────────────────────
 
+    @staticmethod
+    def _normalize_message(message: Mapping[str, Any] | ChatMessage) -> Dict[str, Any]:
+        """Convert v1 role/content messages and v2 messages to the ChatMessage contract."""
+        if isinstance(message, ChatMessage):
+            return message.to_dict()
+        return ChatMessage.from_dict(message).to_dict()
+
+    @classmethod
+    def _normalize_session(cls, session: Mapping[str, Any]) -> Dict[str, Any]:
+        normalized = dict(session)
+        messages = session.get("messages", [])
+        if not isinstance(messages, list):
+            raise ValueError("session messages must be a JSON array")
+        normalized["messages"] = [cls._normalize_message(message) for message in messages]
+        return normalized
+
     def _load(self) -> Dict[str, Any]:
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict) and isinstance(data.get("sessions"), list):
-                return data
-        except (OSError, json.JSONDecodeError):
+                return {
+                    "schema_version": 2,
+                    "sessions": [
+                        self._normalize_session(session)
+                        for session in data["sessions"]
+                        if isinstance(session, Mapping)
+                    ],
+                }
+        except (OSError, json.JSONDecodeError, ValueError):
             pass
-        return {"sessions": []}
+        return {"schema_version": 2, "sessions": []}
 
     def _save(self) -> None:
+        self._data["schema_version"] = 2
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -60,13 +86,33 @@ class ChatStore:
                 key=lambda s: s.get("updated_at", ""),
                 reverse=True,
             )
-            return [{
-                "id": s["id"],
-                "title": s.get("title") or "新会话",
-                "message_count": len(s.get("messages", [])),
-                "created_at": s.get("created_at", ""),
-                "updated_at": s.get("updated_at", ""),
-            } for s in sessions]
+            summaries = []
+            for session in sessions:
+                latest_run = next(
+                    (
+                        message.get("run")
+                        for message in reversed(session.get("messages", []))
+                        if message.get("role") == "assistant"
+                        and isinstance(message.get("run"), Mapping)
+                    ),
+                    None,
+                )
+                scope = latest_run.get("scope") if latest_run else None
+                companies = scope.get("companies", []) if isinstance(scope, Mapping) else []
+                summaries.append({
+                    "id": session["id"],
+                    "title": session.get("title") or "新会话",
+                    "message_count": len(session.get("messages", [])),
+                    "created_at": session.get("created_at", ""),
+                    "updated_at": session.get("updated_at", ""),
+                    "status": latest_run.get("status") if latest_run else None,
+                    "scope_mode": scope.get("mode") if isinstance(scope, Mapping) else None,
+                    "company_codes": [
+                        company.get("code") for company in companies
+                        if isinstance(company, Mapping) and isinstance(company.get("code"), str)
+                    ],
+                })
+            return summaries
 
     def get_session(self, sid: str) -> Optional[Dict[str, Any]]:
         """返回会话深拷贝（含完整消息）；不存在返回 None"""
@@ -77,8 +123,25 @@ class ChatStore:
             return None
 
     def get_messages(self, sid: str) -> List[Dict[str, str]]:
-        s = self.get_session(sid)
-        return list(s.get("messages", [])) if s else []
+        """Return model-compatible role/content messages without persisted run metadata."""
+        session = self.get_session(sid)
+        if not session:
+            return []
+        messages = []
+        for message in session.get("messages", []):
+            run = message.get("run")
+            if (
+                message.get("role") == "assistant"
+                and not message.get("content")
+                and isinstance(run, Mapping)
+                and run.get("status") == "failed"
+            ):
+                continue
+            messages.append({
+                "role": message.get("role", ""),
+                "content": message.get("content", ""),
+            })
+        return messages
 
     # ── 写入 ────────────────────────────────────────────────
 
@@ -143,26 +206,51 @@ class ChatStore:
             self._save()
             return True
 
+    def _append_normalized_messages(
+        self,
+        sid: str,
+        messages: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        for session in self._data["sessions"]:
+            if session["id"] != sid:
+                continue
+            session.setdefault("messages", []).extend(messages)
+            if session.get("title") in (None, "", "新会话"):
+                first_user = next(
+                    (message.get("content", "") for message in session["messages"]
+                     if message.get("role") == "user"),
+                    "",
+                )
+                title = first_user.strip().replace("\n", " ")
+                session["title"] = title[:TITLE_MAX_CHARS] or "新会话"
+            session["updated_at"] = _now_iso()
+            self._save()
+            return dict(session)
+        return None
+
+    def append_turn(
+        self,
+        sid: str,
+        *,
+        question: str,
+        run: AnswerRun,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically persist a user question and its complete or incomplete answer run."""
+        if not isinstance(run, AnswerRun):
+            raise ValueError("run must be an AnswerRun")
+        messages = [
+            ChatMessage(role="user", content=question).to_dict(),
+            ChatMessage(role="assistant", content=run.content, run=run).to_dict(),
+        ]
+        with self._lock:
+            return self._append_normalized_messages(sid, messages)
+
     def append_messages(
         self,
         sid: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any] | ChatMessage],
     ) -> Optional[Dict[str, Any]]:
-        """向会话追加消息；标题缺省时取首条用户消息截断；返回更新后会话"""
+        """Compatibility entry point that writes every message in schema-v2 form."""
+        normalized = [self._normalize_message(message) for message in messages]
         with self._lock:
-            for s in self._data["sessions"]:
-                if s["id"] != sid:
-                    continue
-                s.setdefault("messages", []).extend(messages)
-                if s.get("title") in (None, "", "新会话"):
-                    first_user = next(
-                        (m.get("content", "") for m in s["messages"]
-                         if m.get("role") == "user"),
-                        "",
-                    )
-                    title = first_user.strip().replace("\n", " ")
-                    s["title"] = title[:TITLE_MAX_CHARS] or "新会话"
-                s["updated_at"] = _now_iso()
-                self._save()
-                return dict(s)
-            return None
+            return self._append_normalized_messages(sid, normalized)
