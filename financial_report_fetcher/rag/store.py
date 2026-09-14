@@ -99,6 +99,14 @@ class RagStore:
         res = self._collection.get(where={"report_id": report_id}, include=["metadatas"])
         return len(res.get("ids", []))
 
+    def count_source_chunks(self, report_id: str, source: str) -> int:
+        """返回指定报告、指定来源的 chunk 数，不改变既有总量统计 API。"""
+        res = self._collection.get(
+            where={"$and": [{"report_id": report_id}, {"source": source}]},
+            include=["metadatas"],
+        )
+        return len(res.get("ids", []))
+
     def list_report_ids(self) -> List[str]:
         res = self._collection.get(include=["metadatas"])
         seen: Dict[str, None] = {}

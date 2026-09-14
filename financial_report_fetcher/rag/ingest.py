@@ -365,15 +365,17 @@ class IngestionService:
         }
 
     def _has_pdf_index(self, report_id: str) -> bool:
-        """manifest 和索引均确认至少一段 PDF 内容，才可作为问答补充证据。"""
+        """仅 PDF 来源的有效索引可作为问答补充证据。"""
         info = self._manifest.get(report_id) or {}
         try:
             pdf_chunks = int(info.get("pdf_chunks", 0) or 0)
-            indexed_chunks = self.store.count_chunks(report_id)
+            indexed_pdf_chunks = self.store.count_source_chunks(report_id, "pdf")
         except Exception:
             logger.exception("无法确认 PDF 摄取结果：%s", report_id)
             return False
-        return pdf_chunks > 0 and indexed_chunks >= pdf_chunks
+        if indexed_pdf_chunks <= 0:
+            return False
+        return not pdf_chunks or indexed_pdf_chunks >= pdf_chunks
 
     @_locked
     def auto_ingest_pdf(self, pdf_path: str) -> bool:

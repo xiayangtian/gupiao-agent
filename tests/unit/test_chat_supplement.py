@@ -1,10 +1,12 @@
 from datetime import date
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from financial_report_fetcher.downloader import ReportDownloader
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
+from financial_report_fetcher.rag.chunking import Chunk
 from financial_report_fetcher.rag.ingest import IngestionService
 from financial_report_fetcher.rag.store import RagStore
 from webapp.chat_models import Scope
@@ -322,6 +324,36 @@ def test_executor_reports_ingest_failed_when_valid_pdf_creates_no_chunks(tmp_pat
         FakeDownloader(), ingestion, str(tmp_path),
         {"candidate-1": _meta("601288", "2025-06-30", "semi_annual")},
     ).run(request)
+
+    assert outcome.ingested_report_ids == ()
+    assert outcome.failure_reasons == (("candidate-1", "ingest_failed"),)
+
+
+def test_executor_rejects_analysis_only_index_for_same_hash_pdf(tmp_path, fake_embedder):
+    class SkippedDownloader:
+        def download_one(self, report, storage_dir):
+            return DownloadStatus.SKIPPED
+
+    candidate = SupplementCandidate("candidate-1", "601288:2025-06-30:semi_annual", "601288", "农业银行", "2025-06-30", "semi_annual", "巨潮资讯")
+    registry = SupplementRegistry(clock=lambda: "2026-09-14T10:00:00", id_factory=lambda: "r-analysis")
+    registry.create("s1", "营收变化", _company_scope(), [candidate])
+    request = registry.approve("r-analysis", "s1", ["candidate-1"])
+    report = _meta("601288", "2025-06-30", "semi_annual")
+    pdf_path = tmp_path / ReportDownloader.build_filename(report)
+    pdf_path.write_bytes(b"%PDF-1.7 valid")
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    store.upsert([Chunk(report_id=candidate.report_id, source="analysis", text="分析摘要", section="摘要", page=None, chunk_index=0)])
+    ingestion = IngestionService(store, reports_dir=str(tmp_path), analysis_dir=str(tmp_path / "analysis"),
+                                 manifest_path=str(tmp_path / "rag" / "manifest.json"), auto_ingest=True)
+    ingestion._manifest[candidate.report_id] = {
+        "pdf_hash": hashlib.sha1(pdf_path.read_bytes()).hexdigest(),
+        # 残留 manifest 的 PDF 计数不能由 analysis chunk 冒充满足。
+        "pdf_chunks": 1,
+        "analysis_hash": "analysis-only",
+        "analysis_chunks": 1,
+    }
+
+    outcome = SupplementExecutor(SkippedDownloader(), ingestion, str(tmp_path), {"candidate-1": report}).run(request)
 
     assert outcome.ingested_report_ids == ()
     assert outcome.failure_reasons == (("candidate-1", "ingest_failed"),)
