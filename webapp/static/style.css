@@ -2411,64 +2411,48 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .chat-artifacts {
   align-self: flex-start;
   max-width: 92%;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.chat-artifacts-head {
   font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
 }
 
-.chat-artifact {
+.chat-artifacts > summary {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-weight: 600;
+  list-style-position: outside;
+}
+
+.chat-artifacts > summary:focus-visible,
+.chat-artifact-link:focus-visible,
+.chat-pdf-page:focus-visible {
+  outline: 3px solid rgb(59 130 246 / 35%);
+  outline-offset: 2px;
+}
+
+.chat-artifacts-list {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 6px 10px;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 6px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent-border);
   background: var(--surface);
   border-radius: var(--radius-md);
-  font-size: 12px;
   line-height: 1.5;
 }
 
-.chat-artifact-label { font-weight: 600; color: var(--text-secondary); }
-.chat-artifact-title { color: var(--text-primary); }
-.chat-artifact-meta { color: var(--text-muted); }
-.chat-artifact-unavailable { color: var(--text-muted); }
-
-.chat-pdf-page {
-  align-self: flex-start;
-  display: inline-block;
-  padding: 4px 10px;
-  border: 1px solid var(--accent);
+.chat-artifact-link {
   color: var(--accent);
-  background: transparent;
-  border-radius: var(--radius-sm);
-  font-size: 12px;
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
-.chat-pdf-page:hover { background: rgba(59, 130, 246, 0.08); }
-.chat-pdf-page:focus-visible { outline: 3px solid rgb(59 130 246 / 35%); outline-offset: 2px; }
-
-.chat-web-link { color: var(--accent); overflow-wrap: anywhere; }
-
-.chat-artifact-snippet { margin-top: 2px; }
-.chat-artifact-snippet summary {
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-.chat-artifact-snippet div {
-  margin-top: 4px;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+.chat-artifact-link:hover { text-decoration: underline; }
+.chat-artifact-tool,
+.chat-artifact-unavailable { color: var(--text-secondary); overflow-wrap: anywhere; }
 
 .chat-run-status {
   align-self: flex-start;

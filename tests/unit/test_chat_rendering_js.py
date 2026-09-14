@@ -105,8 +105,8 @@ def test_scope_renderer_derives_periods_from_report_ids_and_escapes():
     assert "全库财报检索" in result["whole"]
 
 
-def test_pdf_artifact_renders_page_button_but_missing_file_does_not():
-    """可用的 PDF 证据生成 data-chat-pdf-page 跳页按钮；缺失文件绝不生成伪链接。"""
+def test_pdf_artifact_renders_only_one_collapsed_page_link_or_unavailable_state():
+    """默认收起的证据区只显示 PDF 页码跳转，不展示片段。"""
     result = _run_node(
         f"""
         const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
@@ -130,11 +130,49 @@ def test_pdf_artifact_renders_page_button_but_missing_file_does_not():
         """
     )
 
+    assert '<details class="chat-artifacts"' in result["available"]
+    assert '<summary>证据与来源（1）</summary>' in result["available"]
     assert 'data-chat-pdf-page="12"' in result["available"]
     assert "/api/history-pdf/x.pdf" in result["available"]
-    assert "打开 PDF 原文" in result["available"]
+    assert "PDF · 第 12 页" in result["available"]
+    assert "营业收入为 862 亿元" not in result["available"]
+    assert "片段" not in result["available"]
     assert "data-chat-pdf-page" not in result["missing"]
-    assert "来源文件不可用" in result["missing"]
+    assert "PDF · 第 12 页（文件不可用）" in result["missing"]
+
+
+def test_artifacts_deduplicate_same_pdf_page_and_collapse_many_pages_to_home_link():
+    """同一页 PDF 合并；同一 PDF 超过三页时只给首页入口；网页和工具也去重。"""
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const html = rendering.renderRunArtifacts({{
+          artifacts: [
+            {{source: 'pdf', report_id: '600900:2026-06-30:semi_annual', pdf_filename: '长江电力.pdf', page: 1, snippet: 'a', pdf_url: '/api/history-pdf/yangtze.pdf?jump=1#page=1'}},
+            {{source: 'pdf', report_id: '600900:2026-06-30:semi_annual', pdf_filename: '长江电力.pdf', page: 1, snippet: 'duplicate', pdf_url: '/api/history-pdf/yangtze.pdf?jump=2#page=1'}},
+            {{source: 'pdf', report_id: '600900:2026-06-30:semi_annual', pdf_filename: '长江电力.pdf', page: 2, snippet: 'b', pdf_url: '/api/history-pdf/yangtze.pdf?jump=3#page=2'}},
+            {{source: 'pdf', report_id: '600900:2026-06-30:semi_annual', pdf_filename: '长江电力.pdf', page: 3, snippet: 'c', pdf_url: '/api/history-pdf/yangtze.pdf?jump=4#page=3'}},
+            {{source: 'pdf', report_id: '600900:2026-06-30:semi_annual', pdf_filename: '长江电力.pdf', page: 4, snippet: 'd', pdf_url: '/api/history-pdf/yangtze.pdf?jump=5#page=4'}},
+            {{source: 'web', url: 'https://example.com/news', title: '公告', snippet: 'web detail'}},
+            {{source: 'web', url: 'https://example.com/news', title: '公告重复', snippet: 'web duplicate'}},
+          ],
+          tool_artifacts: [
+            {{provider: 'market', tool_name: 'price', as_of: '2026-09-10', status: 'success', result_summary: 'r1'}},
+            {{provider: 'market', tool_name: 'price', as_of: '2026-09-10', status: 'success', result_summary: 'r2'}},
+          ]
+        }});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+
+    html = result["html"]
+    assert '<summary>证据与来源（3）</summary>' in html
+    assert html.count('data-chat-pdf-home="true"') == 1
+    assert '#page=1' in html
+    assert 'data-chat-pdf-page=' not in html
+    assert html.count('https://example.com/news') == 1
+    assert html.count('market') == 1
+    assert all(value not in html for value in ('duplicate', 'web detail', '参数摘要', '结果摘要'))
 
 
 def test_pdf_artifact_rejects_unsafe_or_non_positive_page_urls():
@@ -160,7 +198,7 @@ def test_pdf_artifact_rejects_unsafe_or_non_positive_page_urls():
 
     assert "javascript:" not in result["dangerous"]
     assert "data-chat-pdf-page" not in result["dangerous"]
-    assert "来源文件不可用" in result["dangerous"]
+    assert "PDF · 第 1 页（文件不可用）" in result["dangerous"]
     assert "data-chat-pdf-page" not in result["zeroPage"]
 
 
@@ -188,8 +226,9 @@ def test_web_artifact_requires_http_url_and_escapes_title():
     assert "https://finance.example.com/a" in result["ok"]
     assert "&lt;公告&gt;" in result["ok"]
     assert "<公告>" not in result["ok"]
-    assert "发布于 2026-09-01" in result["ok"]
-    assert "抓取于 2026-09-02" in result["ok"]
+    assert "发布于" not in result["ok"]
+    assert "抓取于" not in result["ok"]
+    assert "摘要" not in result["ok"]
     assert "ftp://" not in result["bad"]
 
 
@@ -220,8 +259,8 @@ def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
     assert "历史回答，未保留证据包" in result["legacy"]
 
 
-def test_tool_artifact_arguments_summary_rendered_as_plain_text_never_parsed():
-    """arguments_summary 可能被截断为非 JSON 文本，必须按纯文本转义展示，绝不 JSON.parse。"""
+def test_tool_artifact_renders_only_provider_and_as_of_without_summaries():
+    """无跳转 URL 的工具证据仅保留来源与数据截至时间。"""
     result = _run_node(
         f"""
         const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
@@ -238,12 +277,11 @@ def test_tool_artifact_arguments_summary_rendered_as_plain_text_never_parsed():
     )
 
     assert "stock-data-mcp" in result["html"]
-    assert "get_financial_metrics" in result["html"]
     assert "数据截至 2026-09-10T10:00:00" in result["html"]
-    # 被截断的参数摘要按原文转义展示，不尝试解析成对象
-    assert "参数摘要" in result["html"]
-    assert "{&quot;code&quot;: &quot;601288&quot;, &quot;metric&quot;: &quot;营收" in result["html"]
-    assert "营业收入为 862 亿元" in result["html"]
+    assert "get_financial_metrics" not in result["html"]
+    assert "参数摘要" not in result["html"]
+    assert "结果摘要" not in result["html"]
+    assert "营业收入为 862 亿元" not in result["html"]
 
 
 def test_chat_focus_bar_clears_label_when_no_focus_report():

@@ -267,6 +267,7 @@ def _reopen_session_script(session_id: str) -> str:
   const pdfPage = document.querySelector('#chat-history .chat-pdf-page');
   const webLink = document.querySelector('#chat-history .chat-web-link');
   const statusLabel = document.querySelector('#chat-history .chat-run-status-label');
+  const artifacts = document.querySelector('#chat-history .chat-artifacts');
   return JSON.stringify({{
     routeVisible: !document.querySelector('#page-chat').classList.contains('hidden'),
     scopeText: scopeLine ? scopeLine.textContent : '',
@@ -277,7 +278,9 @@ def _reopen_session_script(session_id: str) -> str:
     webHref: webLink ? webLink.getAttribute('href') : '',
     webText: webLink ? webLink.textContent : '',
     statusText: statusLabel ? statusLabel.textContent : '',
-    hasArtifacts: !!document.querySelector('#chat-history .chat-artifacts'),
+    hasArtifacts: !!artifacts,
+    artifactsOpen: artifacts ? artifacts.open : null,
+    artifactsSummary: artifacts ? artifacts.querySelector('summary').textContent : '',
     runCount: document.querySelectorAll('#chat-history .chat-run').length
   }});
 }})()
@@ -329,10 +332,12 @@ def test_chat_history_reopens_with_scope_and_pdf_page_link(browser_session, actu
     assert "#page=40" in rendered["pdfHref"]
     assert rendered["pdfHref"].startswith("/api/history-pdf/")
     assert "javascript:" not in rendered["pdfHref"]
-    assert "打开 PDF 原文" in rendered["pdfText"]
+    assert rendered["pdfText"] == "PDF · 第 40 页"
     assert rendered["webHref"] == web["url"]
     assert web["title"] in rendered["webText"]
     assert rendered["hasArtifacts"] is True
+    assert rendered["artifactsOpen"] is False
+    assert rendered["artifactsSummary"] == "证据与来源（2）"
     assert rendered["statusText"] == "✅ 已完成"
     assert rendered["runCount"] == 1
     assert _console_errors(browser_session) == []
