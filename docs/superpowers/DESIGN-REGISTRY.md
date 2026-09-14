@@ -18,7 +18,6 @@
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
 | 智能问答可信 Agent 升级 | 实施中 | — | [主记录](#trusted-chat-agent) |
-| 方案设计台账 | 实施中 | — | [主记录](#design-registry) |
 | 财报分析前端界面 | 待核实 | — | [主记录](#financial-report-ui) |
 | 分析历史与图表 | 待核实 | — | [主记录](#analysis-history-charts) |
 | 财报分析智能体架构优化 | 待核实 | — | [主记录](#financial-agent-architecture) |
@@ -53,4 +52,4 @@
 | <a id="analysis-tab-priority"></a>分析主题Tab优先级 | [设计](specs/2026-09-10-分析主题Tab优先级-design.md) | [计划](plans/2026-09-10-分析主题Tab优先级.md) | 已实现 | — | 合并 17e4dab；`python3 -m pytest tests/unit/test_analysis_result.py -k tab_label -q`：2 passed, 2 deselected in 0.12s | 2026-09-14 |
 | <a id="trusted-chat-agent"></a>智能问答可信 Agent 升级 | [设计](specs/2026-09-10-智能问答可信Agent升级-design.md) | [M1](plans/2026-09-10-智能问答可信Agent-M1.md)、[M2](plans/2026-09-10-智能问答可信Agent-M2.md)、[M3](plans/2026-09-10-智能问答可信Agent-M3.md)、[M4](plans/2026-09-10-智能问答可信Agent-M4.md) | 实施中 | — | M1 合并 6276701；设计文档第 14 节保留 `python3 -m pytest tests/browser/test_chat_trust_flow.py -q`：6 passed；M2–M4 尚未完成 | 2026-09-14 |
 | <a id="financial-structure-visuals"></a>财务结构可视化 | [设计](specs/2026-09-10-财务结构可视化-design.md) | [计划](plans/2026-09-10-财务结构可视化.md) | 已实现 | — | 合并 1107509；`python3 -m pytest tests/unit/test_visualizations.py -q`：14 passed in 0.12s | 2026-09-14 |
-| <a id="design-registry"></a>方案设计台账 | [设计](specs/2026-09-14-方案设计台账-design.md) | [计划](plans/2026-09-14-方案设计台账.md) | 实施中 | — | 实施分支 feat/design-registry；进度记录 .superpowers/sdd/2026-09-14-方案设计台账/progress.md | 2026-09-14 |
+| <a id="design-registry"></a>方案设计台账 | [设计](specs/2026-09-14-方案设计台账-design.md) | [计划](plans/2026-09-14-方案设计台账.md) | 已实现 | — | 合并 f27056c；`python3 -m pytest tests/unit/test_design_registry.py -q` → 4 passed in 0.11s | 2026-09-14 |
