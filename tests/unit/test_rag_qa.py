@@ -1,3 +1,4 @@
+from financial_report_fetcher.rag.config import RagConfig
 from financial_report_fetcher.rag.qa import RagQA
 from financial_report_fetcher.rag.store import RagStore
 from financial_report_fetcher.rag.chunking import Chunk
@@ -279,6 +280,34 @@ def test_answer_stream_respects_max_tool_rounds(tmp_path, fake_embedder):
     assert done["tools_used"] == ["get_news_data"]
     # 共 3 次模型调用：2 轮工具 + 1 轮最终答案
     assert len(ai.calls) == 3
+
+
+def test_answer_stream_tool_limit_says_it_resets_on_the_next_question(tmp_path, fake_embedder):
+    """上限是单次问答保护，不应被表述成账号“额度耗尽”。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容E")])
+    ai = FakeToolAI([
+        [_tool_calls_event([
+            {"id": "c1", "name": "stock_prices", "arguments": '{"symbol":"600519"}'},
+            {"id": "c2", "name": "index_prices", "arguments": '{"symbol":"000300"}'},
+        ])],
+        [_done_event("基于已有信息的回答")],
+    ])
+    qa = RagQA(store, ai, top_k=4, max_tool_calls=1,
+               tool_executor=lambda name, args: '{"ok":true}')
+
+    events = list(qa.answer_stream("今日行情", tools=[{"type": "function"}]))
+
+    limit_result = [event for event in events if event["type"] == "tool_result"][1]
+    assert limit_result["ok"] is False
+    assert limit_result["summary"] == (
+        "工具调用失败：本次问答已达到工具调用上限（1 次）；重新发送问题会重置，"
+        "请基于已有信息回答"
+    )
+
+
+def test_default_tool_call_limit_is_ten_for_broad_daily_market_questions():
+    assert RagConfig().mcp_max_tool_calls == 10
 
 
 def test_answer_stream_emits_stages_and_web_sources_across_rounds(tmp_path, fake_embedder):

@@ -56,7 +56,7 @@ class RagQA:
         top_k: int = 8,
         tool_executor: Optional[Callable[[str, Dict[str, Any]], str]] = None,
         max_tool_rounds: int = 3,
-        max_tool_calls: int = 6,
+        max_tool_calls: int = 10,
         tool_result_max_chars: int = 2000,
         reranker: Optional[Reranker] = None,
         rerank_candidates: int = 30,
@@ -329,7 +329,10 @@ class RagQA:
                             result = "工具调用失败：检测到重复调用，已使用此前结果，请基于已有信息继续回答"
                             ok = False
                         elif total_tool_calls >= self.max_tool_calls:
-                            result = "工具调用失败：已达到本次问答的工具调用上限，请基于已有信息回答"
+                            result = (
+                                f"工具调用失败：本次问答已达到工具调用上限（{self.max_tool_calls} 次）；"
+                                "重新发送问题会重置，请基于已有信息回答"
+                            )
                             ok = False
                         else:
                             seen_tool_calls.add(identity)
