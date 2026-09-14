@@ -99,8 +99,37 @@ def test_registry_enforces_status_executability_and_completion_evidence_contract
             assert record["executability"] == "—"
 
         if record["status"] == "已实现":
-            assert re.search(r"合并 [0-9a-f]{7,}", record["evidence"])
-            assert re.search(r"`python3 -m pytest [^`]+`[^|]*\b\d+ passed\b", record["evidence"])
+            merged_and_verified = (
+                re.search(r"合并 [0-9a-f]{7,}", record["evidence"])
+                and re.search(r"`python3 -m pytest [^`]+`[^|]*\b\d+ passed\b", record["evidence"])
+            )
+            user_confirmed_historical = (
+                "用户确认 2026-09-14：历史需求已完成" in record["evidence"]
+                and "原合并记录缺失" in record["evidence"]
+            )
+            assert merged_and_verified or user_confirmed_historical
+
+
+def test_user_confirmed_historical_designs_are_completed_with_traceable_override():
+    historical_titles = {
+        "财报分析前端界面",
+        "分析历史与图表",
+        "财报分析智能体架构优化",
+        "RAG 知识库与通用问答",
+        "RAG 增强多维度分析",
+        "RAG 查询重排序（rerank）",
+        "问答接入 MCP 工具",
+        "功能修复与 Git 隐私清理",
+        "P0 可靠性修复",
+        "动态证据化财报分析",
+        "多轮问答与网页搜索",
+        "渐进式财报报告阅读体验",
+    }
+    records = {record["title"]: record for record in _main_records()}
+    assert {title for title in historical_titles if records[title]["status"] == "已实现"} == historical_titles
+    for title in historical_titles:
+        assert "用户确认 2026-09-14：历史需求已完成" in records[title]["evidence"]
+        assert "原合并记录缺失" in records[title]["evidence"]
 
 
 def test_project_workflow_defines_registry_updates_and_direct_execution():
