@@ -126,113 +126,128 @@
       + '</div>';
   }
 
-  function pdfArtifactHtml(artifact) {
-    var page = positivePage(artifact && artifact.page);
-    var url = safePdfUrl(artifact && artifact.pdf_url);
-    var snippet = String((artifact && artifact.snippet) || '');
-    var label = 'PDF 原文';
-    if (page) label += ' · 第 ' + page + ' 页';
+  var PDF_PAGE_LINK_LIMIT = 3;
 
-    var html = '<span class="chat-artifact-label">' + escapeHtml(label) + '</span>';
-    if (url && page) {
-      html += '<a class="chat-pdf-page" href="' + escapeHtml(url) + '"'
-        + ' target="chat-pdf-viewer" rel="noopener noreferrer"'
-        + ' data-chat-pdf-page="' + page + '">'
-        + '打开 PDF 原文 · 第 ' + page + ' 页</a>';
-    } else {
-      // 文件缺失 / URL 不可信：显示不可用，绝不生成伪页码跳转。
-      html += '<span class="chat-artifact-unavailable">来源文件不可用</span>';
-    }
-    if (snippet) {
-      html += '<details class="chat-artifact-snippet"><summary>片段</summary>'
-        + '<div>' + escapeHtml(snippet) + '</div></details>';
-    }
-    return '<div class="chat-artifact chat-artifact-pdf">' + html + '</div>';
+  function pdfDocumentKey(artifact, url) {
+    var reportId = String((artifact && artifact.report_id) || '');
+    var filename = String((artifact && artifact.pdf_filename) || '');
+    return reportId + '|' + filename + '|' + String(url || '').replace(/[#?].*$/, '');
   }
 
-  function webArtifactHtml(artifact) {
-    var url = isHttpUrl(artifact && artifact.url) ? String(artifact.url) : '';
-    var title = String((artifact && artifact.title) || '');
-    var publishedAt = String((artifact && artifact.published_at) || '');
-    var fetchedAt = String((artifact && artifact.fetched_at) || '');
-    var snippet = String((artifact && artifact.snippet) || '');
-    if (!url) return '';
-
-    var metaParts = [];
-    if (publishedAt) metaParts.push('发布于 ' + publishedAt);
-    if (fetchedAt) metaParts.push('抓取于 ' + fetchedAt);
-
-    var html = '<span class="chat-artifact-label">网页来源</span>'
-      + '<a class="chat-web-link" href="' + escapeHtml(url) + '"'
-      + ' target="_blank" rel="noopener noreferrer">' + escapeHtml(title || url) + '</a>';
-    if (metaParts.length) {
-      html += '<span class="chat-artifact-meta">' + metaParts.map(escapeHtml).join(' · ') + '</span>';
-    }
-    if (snippet) {
-      html += '<details class="chat-artifact-snippet"><summary>摘要</summary>'
-        + '<div>' + escapeHtml(snippet) + '</div></details>';
-    }
-    return '<div class="chat-artifact chat-artifact-web">' + html + '</div>';
+  function pdfHomeUrl(url) {
+    return url ? url.replace(/#.*$/, '') + '#page=1' : '';
   }
 
-  function toolArtifactHtml(artifact) {
-    var provider = String((artifact && artifact.provider) || '');
-    var toolName = String((artifact && artifact.tool_name) || '');
-    var asOf = String((artifact && artifact.as_of) || '');
-    var status = String((artifact && artifact.status) || '');
-    var argumentsSummary = String((artifact && artifact.arguments_summary) || '');
-    var resultSummary = String((artifact && artifact.result_summary) || '');
-    if (!provider && !toolName) return '';
+  function pdfEntryHtml(entry) {
+    if (entry.home) {
+      if (entry.url) {
+        return '<a class="chat-artifact-link chat-pdf-page" href="' + escapeHtml(entry.url) + '"'
+          + ' target="chat-pdf-viewer" rel="noopener noreferrer" data-chat-pdf-home="true">'
+          + 'PDF · 打开首页</a>';
+      }
+      return '<span class="chat-artifact-unavailable">PDF（文件不可用）</span>';
+    }
+    if (entry.url && entry.page) {
+      return '<a class="chat-artifact-link chat-pdf-page" href="' + escapeHtml(entry.url) + '"'
+        + ' target="chat-pdf-viewer" rel="noopener noreferrer" data-chat-pdf-page="' + entry.page + '">'
+        + 'PDF · 第 ' + entry.page + ' 页</a>';
+    }
+    return '<span class="chat-artifact-unavailable">PDF · 第 ' + (entry.page || '—') + ' 页（文件不可用）</span>';
+  }
 
-    var metaParts = [];
-    if (toolName) metaParts.push(toolName);
-    if (asOf) metaParts.push('数据截至 ' + asOf);
-    if (status) metaParts.push(status === 'success' ? '已获取' : '获取失败');
+  function compactPdfEntries(artifacts) {
+    var documents = [];
+    var byDocument = {};
+    artifacts.forEach(function (artifact) {
+      if (!artifact || artifact.source !== 'pdf') return;
+      var url = safePdfUrl(artifact.pdf_url);
+      var key = pdfDocumentKey(artifact, url);
+      var document = byDocument[key];
+      if (!document) {
+        document = { pages: [], pageMap: {}, firstUrl: url };
+        byDocument[key] = document;
+        documents.push(document);
+      }
+      if (!document.firstUrl && url) document.firstUrl = url;
+      var page = positivePage(artifact.page);
+      var pageKey = page ? String(page) : 'unavailable';
+      var pageEntry = document.pageMap[pageKey];
+      if (!pageEntry) {
+        pageEntry = { page: page, url: url };
+        document.pageMap[pageKey] = pageEntry;
+        document.pages.push(pageEntry);
+      } else if (!pageEntry.url && url) {
+        pageEntry.url = url;
+      }
+    });
 
-    var html = '<span class="chat-artifact-label">实时工具</span>'
-      + '<span class="chat-artifact-title">' + escapeHtml(provider || '实时工具') + '</span>';
-    if (metaParts.length) {
-      html += '<span class="chat-artifact-meta">' + metaParts.map(escapeHtml).join(' · ') + '</span>';
-    }
-    // arguments_summary 可能被截断成非 JSON 文本：一律按纯文本转义展示，绝不 JSON.parse。
-    if (argumentsSummary) {
-      html += '<details class="chat-artifact-snippet"><summary>参数摘要</summary>'
-        + '<div>' + escapeHtml(argumentsSummary) + '</div></details>';
-    }
-    if (resultSummary) {
-      html += '<details class="chat-artifact-snippet"><summary>结果摘要</summary>'
-        + '<div>' + escapeHtml(resultSummary) + '</div></details>';
-    }
-    return '<div class="chat-artifact chat-artifact-tool">' + html + '</div>';
+    var entries = [];
+    documents.forEach(function (document) {
+      if (document.pages.length > PDF_PAGE_LINK_LIMIT) {
+        entries.push({ home: true, url: pdfHomeUrl(document.firstUrl) });
+      } else {
+        document.pages.forEach(function (page) { entries.push(page); });
+      }
+    });
+    return entries;
+  }
+
+  function compactWebEntries(artifacts) {
+    var seen = {};
+    var entries = [];
+    artifacts.forEach(function (artifact) {
+      if (!artifact || artifact.source !== 'web') return;
+      var url = isHttpUrl(artifact.url) ? String(artifact.url) : '';
+      if (!url || seen[url]) return;
+      seen[url] = true;
+      entries.push({ url: url, title: String(artifact.title || url) });
+    });
+    return entries;
+  }
+
+  function compactToolEntries(tools) {
+    var seen = {};
+    var entries = [];
+    tools.forEach(function (tool) {
+      if (!tool || typeof tool !== 'object') return;
+      var provider = String(tool.provider || '');
+      var toolName = String(tool.tool_name || '');
+      var asOf = String(tool.as_of || '');
+      if (!provider && !toolName) return;
+      // 工具名不展示时，同一来源、同一数据截至时间只保留一行。
+      var key = provider + '|' + asOf;
+      if (seen[key]) return;
+      seen[key] = true;
+      entries.push({ provider: provider || '实时数据', asOf: asOf });
+    });
+    return entries;
   }
 
   function renderRunArtifacts(run) {
     if (!run || typeof run !== 'object') return '';
     var artifacts = Array.isArray(run.artifacts) ? run.artifacts : [];
     var tools = Array.isArray(run.tool_artifacts) ? run.tool_artifacts : [];
-    if (!artifacts.length && !tools.length) return '';
-
+    var pdfEntries = compactPdfEntries(artifacts);
+    var webEntries = compactWebEntries(artifacts);
+    var toolEntries = compactToolEntries(tools);
     var parts = [];
-    artifacts.forEach(function (artifact) {
-      if (!artifact || typeof artifact !== 'object') return;
-      if (artifact.source === 'pdf') {
-        var pdf = pdfArtifactHtml(artifact);
-        if (pdf) parts.push(pdf);
-      } else if (artifact.source === 'web') {
-        var web = webArtifactHtml(artifact);
-        if (web) parts.push(web);
-      }
+
+    pdfEntries.forEach(function (entry) { parts.push(pdfEntryHtml(entry)); });
+    webEntries.forEach(function (entry) {
+      parts.push('<a class="chat-artifact-link chat-web-link" href="' + escapeHtml(entry.url) + '"'
+        + ' target="_blank" rel="noopener noreferrer">网页 · ' + escapeHtml(entry.title) + '</a>');
     });
-    tools.forEach(function (tool) {
-      var rendered = toolArtifactHtml(tool);
-      if (rendered) parts.push(rendered);
+    toolEntries.forEach(function (entry) {
+      var label = '实时数据 · ' + entry.provider;
+      if (entry.asOf) label += ' · 数据截至 ' + entry.asOf;
+      parts.push('<span class="chat-artifact-tool">' + escapeHtml(label) + '</span>');
     });
     if (!parts.length) return '';
 
-    return '<section class="chat-artifacts" aria-label="回答证据与来源">'
-      + '<div class="chat-artifacts-head">证据与来源</div>'
-      + parts.join('')
-      + '</section>';
+    return '<details class="chat-artifacts" aria-label="回答证据与来源">'
+      + '<summary>证据与来源（' + parts.length + '）</summary>'
+      + '<div class="chat-artifacts-list">' + parts.join('') + '</div>'
+      + '</details>';
   }
 
   function renderRunStatus(run) {
