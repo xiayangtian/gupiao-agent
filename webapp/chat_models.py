@@ -6,6 +6,7 @@ historic answers cannot be presented as scoped or evidenced when they are not.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from math import isfinite
 from numbers import Real
@@ -13,12 +14,30 @@ from typing import Any, ClassVar, Literal, Mapping, Sequence
 from urllib.parse import urlparse
 
 ScopeMode = Literal["company_only", "company_industry", "whole_corpus"]
-AnswerStatus = Literal["completed", "partial", "stopped", "failed"]
+AnswerStatus = Literal["completed", "partial", "stopped", "failed", "waiting_consent"]
 FactVerification = Literal["verified", "reference", "conflict", "unavailable"]
 
 _SCOPE_MODES = frozenset(("company_only", "company_industry", "whole_corpus"))
-_ANSWER_STATUSES = frozenset(("completed", "partial", "stopped", "failed"))
+_ANSWER_STATUSES = frozenset(("completed", "partial", "stopped", "failed", "waiting_consent"))
 _FACT_VERIFICATIONS = frozenset(("verified", "reference", "conflict", "unavailable"))
+
+# 补充授权摘要的受控字段：只允许候选人可读信息，禁止 URL、文件路径和模型原始参数。
+SUPPLEMENT_MAX_CANDIDATES = 5
+_SUPPLEMENT_REASON_MAX_CHARS = 240
+_SUPPLEMENT_STATUSES = frozenset((
+    "proposed", "approved", "declined", "downloading", "ingesting",
+    "resuming", "completed", "expired", "failed",
+))
+_SUPPLEMENT_KEYS = frozenset((
+    "status", "reason", "limit", "candidates", "ingested_report_ids", "failed",
+))
+_SUPPLEMENT_CANDIDATE_KEYS = frozenset((
+    "id", "company", "code", "period", "report_type", "label", "source",
+))
+_SUPPLEMENT_CANDIDATE_REQUIRED_KEYS = ("id", "company", "code", "period", "report_type")
+_SUPPLEMENT_FAILURE_KEYS = frozenset(("candidate_id", "reason"))
+_SUPPLEMENT_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://")
+_SUPPLEMENT_ABSOLUTE_PATH_RE = re.compile(r"^(?:/|[A-Za-z]:[\\/])")
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -43,6 +62,111 @@ def _sequence(value: Any, name: str) -> Sequence[Any]:
 
 def _strings(value: Any, name: str) -> tuple[str, ...]:
     return tuple(_string(item, f"{name}[]") for item in _sequence(value, name))
+
+
+def _safe_supplement_text(value: Any, name: str, *, required: bool = True) -> str:
+    """补充摘要只保留可读说明：拒绝 URL、绝对路径和 PDF 文件名。"""
+    text = _string(value, name, required=required)
+    if _SUPPLEMENT_URL_RE.search(text):
+        raise ValueError(f"{name} must not contain a URL")
+    if _SUPPLEMENT_ABSOLUTE_PATH_RE.match(text):
+        raise ValueError(f"{name} must not contain a file path")
+    if text.lower().endswith(".pdf"):
+        raise ValueError(f"{name} must not contain a file name")
+    return text
+
+
+def _normalize_supplement_candidate(value: Any) -> dict[str, str]:
+    data = _mapping(value, "supplement candidate")
+    unknown = set(data) - _SUPPLEMENT_CANDIDATE_KEYS
+    if unknown:
+        raise ValueError(f"supplement candidate contains unsupported keys: {sorted(unknown)}")
+    candidate = {
+        key: _safe_supplement_text(data.get(key), f"supplement candidate {key}")
+        for key in _SUPPLEMENT_CANDIDATE_REQUIRED_KEYS
+    }
+    for key in ("label", "source"):
+        candidate[key] = _safe_supplement_text(
+            data.get(key, ""), f"supplement candidate {key}", required=False
+        )
+    return candidate
+
+
+def _normalize_supplement_failure(value: Any) -> dict[str, str]:
+    data = _mapping(value, "supplement failure")
+    unknown = set(data) - _SUPPLEMENT_FAILURE_KEYS
+    if unknown:
+        raise ValueError(f"supplement failure contains unsupported keys: {sorted(unknown)}")
+    return {
+        "candidate_id": _safe_supplement_text(
+            data.get("candidate_id"), "supplement failure candidate_id"
+        ),
+        "reason": _safe_supplement_text(
+            data.get("reason", ""), "supplement failure reason", required=False
+        ),
+    }
+
+
+def _normalize_supplement(value: Any) -> dict[str, Any]:
+    """校验并归一化 AnswerRun 的补充授权摘要，未知字段一律拒绝。"""
+    data = _mapping(value, "supplement")
+    unknown = set(data) - _SUPPLEMENT_KEYS
+    if unknown:
+        raise ValueError(f"supplement contains unsupported keys: {sorted(unknown)}")
+
+    status = _string(data.get("status"), "supplement status")
+    if status not in _SUPPLEMENT_STATUSES:
+        raise ValueError(f"supplement status must be one of {sorted(_SUPPLEMENT_STATUSES)}")
+
+    reason = _safe_supplement_text(data.get("reason", ""), "supplement reason", required=False)
+    if len(reason) > _SUPPLEMENT_REASON_MAX_CHARS:
+        raise ValueError(
+            f"supplement reason must be at most {_SUPPLEMENT_REASON_MAX_CHARS} characters"
+        )
+
+    limit = data.get("limit", SUPPLEMENT_MAX_CANDIDATES)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= SUPPLEMENT_MAX_CANDIDATES:
+        raise ValueError(
+            f"supplement limit must be an integer between 1 and {SUPPLEMENT_MAX_CANDIDATES}"
+        )
+
+    candidates = tuple(
+        _normalize_supplement_candidate(item)
+        for item in _sequence(data.get("candidates", []), "supplement candidates")
+    )
+    if len(candidates) > SUPPLEMENT_MAX_CANDIDATES:
+        raise ValueError(
+            f"supplement candidates must be at most {SUPPLEMENT_MAX_CANDIDATES}"
+        )
+
+    ingested = tuple(
+        _safe_supplement_text(item, "supplement ingested_report_ids[]")
+        for item in _sequence(data.get("ingested_report_ids", []), "supplement ingested_report_ids")
+    )
+    failed = tuple(
+        _normalize_supplement_failure(item)
+        for item in _sequence(data.get("failed", []), "supplement failed")
+    )
+
+    return {
+        "status": status,
+        "reason": reason,
+        "limit": limit,
+        "candidates": candidates,
+        "ingested_report_ids": ingested,
+        "failed": failed,
+    }
+
+
+def _supplement_to_json(supplement: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": supplement["status"],
+        "reason": supplement["reason"],
+        "limit": supplement["limit"],
+        "candidates": [dict(candidate) for candidate in supplement["candidates"]],
+        "ingested_report_ids": list(supplement["ingested_report_ids"]),
+        "failed": [dict(item) for item in supplement["failed"]],
+    }
 
 
 @dataclass(frozen=True)
@@ -470,6 +594,8 @@ class AnswerRun:
     elapsed_seconds: float | None = None
     model: str = ""
     legacy_evidence_unavailable: bool = False
+    # 补充授权摘要：仅候选人可读字段与结果摘要，不含 URL、路径或模型原始参数。
+    supplement: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _string(self.content, "content", required=False)
@@ -497,6 +623,10 @@ class AnswerRun:
             raise ValueError("legacy_evidence_unavailable must be a boolean")
         if self.legacy_evidence_unavailable and (self.facts or self.artifacts or self.tool_artifacts):
             raise ValueError("legacy runs must not fabricate evidence artifacts")
+        if self.supplement is not None:
+            if not isinstance(self.supplement, Mapping):
+                raise ValueError("supplement must be a JSON object or null")
+            object.__setattr__(self, "supplement", _normalize_supplement(self.supplement))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -513,6 +643,7 @@ class AnswerRun:
             "elapsed_seconds": self.elapsed_seconds,
             "model": self.model,
             "legacy_evidence_unavailable": self.legacy_evidence_unavailable,
+            "supplement": _supplement_to_json(self.supplement) if self.supplement is not None else None,
         }
 
     @classmethod
@@ -545,6 +676,7 @@ class AnswerRun:
             elapsed_seconds=elapsed_seconds,
             model=_string(data.get("model", ""), "model", required=False),
             legacy_evidence_unavailable=legacy,
+            supplement=data.get("supplement"),
         )
 
 

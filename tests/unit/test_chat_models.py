@@ -110,6 +110,87 @@ def test_answer_run_rejects_non_finite_elapsed_seconds(value):
         AnswerRun(content="x", status="completed", elapsed_seconds=value)
 
 
+def _supplement_summary():
+    return {
+        "status": "proposed",
+        "reason": "本地只有 2024 年报，无法核验 2025 年上半年变化。",
+        "limit": 5,
+        "candidates": [{
+            "id": "candidate-1",
+            "company": "农业银行",
+            "code": "601288",
+            "period": "2025-06-30",
+            "report_type": "semi_annual",
+            "label": "2025 半年报",
+            "source": "巨潮资讯",
+        }],
+    }
+
+
+def _waiting_consent_run(supplement):
+    return AnswerRun(
+        content="",
+        status="waiting_consent",
+        scope=Scope.company_only("601288", "农业银行", ["601288:2024-12-31:annual"]),
+        supplement=supplement,
+    )
+
+
+def test_waiting_consent_round_trips_with_safe_supplement_summary():
+    run = _waiting_consent_run(_supplement_summary())
+    assert run.status == "waiting_consent"
+
+    restored = AnswerRun.from_dict(run.to_dict())
+
+    assert restored == run
+    assert restored.supplement["status"] == "proposed"
+    assert restored.supplement["limit"] == 5
+    assert restored.supplement["candidates"][0]["period"] == "2025-06-30"
+
+
+@pytest.mark.parametrize("bad", [
+    {"status": "proposed", "download_url": "https://cninfo.example/x.pdf"},
+    {"status": "proposed", "reason": "下载地址 https://cninfo.example/x.pdf"},
+    {"status": "proposed", "reason": "文件在 reports/农业银行_601288_半年报_2026.pdf"},
+    {"status": "proposed", "reason": "本地路径 /Users/x/reports/a.pdf"},
+    {"status": "未知"},
+    {"status": "proposed", "limit": 6},
+    {"status": "proposed", "needs": [{"period": "2025-06-30"}]},
+])
+def test_answer_run_rejects_unsafe_or_unknown_supplement_summary(bad):
+    with pytest.raises(ValueError):
+        _waiting_consent_run(bad)
+
+
+def test_supplement_summary_rejects_unknown_candidate_keys_and_too_many_candidates():
+    with pytest.raises(ValueError):
+        _waiting_consent_run({
+            "status": "proposed",
+            "candidates": [{
+                "id": "candidate-1", "company": "农业银行", "code": "601288",
+                "period": "2025-06-30", "report_type": "semi_annual",
+                "pdf_url": "https://cninfo.example/x.pdf",
+            }],
+        })
+
+    with pytest.raises(ValueError):
+        _waiting_consent_run({
+            "status": "proposed",
+            "candidates": [
+                {
+                    "id": f"candidate-{index}", "company": "农业银行", "code": "601288",
+                    "period": "2025-06-30", "report_type": "semi_annual",
+                }
+                for index in range(6)
+            ],
+        })
+
+
+def test_answer_run_without_supplement_summary_still_reads():
+    run = AnswerRun.from_dict({"content": "旧回答", "status": "completed"})
+    assert run.supplement is None
+
+
 def test_all_contracts_are_json_round_trippable_and_frozen():
     fact = Fact(
         metric="revenue", value=1.0, unit="亿元", period="2026-06-30",

@@ -56,6 +56,7 @@ class ChatStore:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict) and isinstance(data.get("sessions"), list):
+                supplements = data.get("supplements")
                 return {
                     "schema_version": 2,
                     "sessions": [
@@ -63,10 +64,15 @@ class ChatStore:
                         for session in data["sessions"]
                         if isinstance(session, Mapping)
                     ],
+                    "supplements": {
+                        str(key): dict(value)
+                        for key, value in (supplements or {}).items()
+                        if isinstance(value, Mapping)
+                    },
                 }
         except (OSError, json.JSONDecodeError, ValueError):
             pass
-        return {"schema_version": 2, "sessions": []}
+        return {"schema_version": 2, "sessions": [], "supplements": {}}
 
     def _save(self) -> None:
         self._data["schema_version"] = 2
@@ -194,6 +200,37 @@ class ChatStore:
                 return dict(s)
             return None
 
+    # ── 补充授权请求 ────────────────────────────────────────
+
+    def save_supplement(self, request: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        """持久化补充授权请求；会话不存在返回 None，已绑定的会话不可更换。"""
+        if not isinstance(request, Mapping):
+            raise ValueError("supplement request must be a JSON object")
+        record = json.loads(json.dumps(dict(request), ensure_ascii=False))
+        supplement_id = record.get("id")
+        session_id = record.get("session_id")
+        if not isinstance(supplement_id, str) or not supplement_id.strip():
+            raise ValueError("supplement request must include a non-empty id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("supplement request must include a non-empty session_id")
+        with self._lock:
+            if not any(session["id"] == session_id for session in self._data["sessions"]):
+                return None
+            existing = self._data["supplements"].get(supplement_id)
+            if existing is not None and existing.get("session_id") != session_id:
+                raise ValueError("supplement session binding must not change")
+            self._data["supplements"][supplement_id] = record
+            self._save()
+            return json.loads(json.dumps(record, ensure_ascii=False))
+
+    def get_supplement(self, supplement_id: str) -> Optional[Dict[str, Any]]:
+        """返回补充授权请求深拷贝；不存在返回 None"""
+        with self._lock:
+            record = self._data["supplements"].get(supplement_id)
+            if record is None:
+                return None
+            return json.loads(json.dumps(record, ensure_ascii=False))
+
     def delete_session(self, sid: str) -> bool:
         """删除会话；不存在返回 False"""
         with self._lock:
@@ -201,6 +238,11 @@ class ChatStore:
             self._data["sessions"] = [
                 s for s in self._data["sessions"] if s["id"] != sid
             ]
+            # 补充授权请求属于会话，随会话一并删除，避免跨会话残留。
+            self._data["supplements"] = {
+                key: value for key, value in self._data["supplements"].items()
+                if value.get("session_id") != sid
+            }
             if len(self._data["sessions"]) == before:
                 return False
             self._save()

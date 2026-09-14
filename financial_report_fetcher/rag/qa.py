@@ -8,6 +8,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Callable, Dict, List, Optional
 
 from financial_report_fetcher.report_identity import build_report_id
@@ -27,6 +28,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是一位专业的金融分析师，基于检索�
 3. 涉及数字时保持与片段一致，可补充说明数据来源（公司、年份、章节）。
 4. 回答使用简体中文，结构清晰简洁。
 5. 若提供工具，先判断现有证据能否可靠回答；仅在缺少必要的实时、外部或结构化信息时调用最少的工具。涉及今日、近期、最新、公告、新闻或股价涨跌原因时，优先用 web_search；财报数字以本地片段为准。工具结果返回后重新核验，避免重复相同查询，网页内容仅作为补充并明确标示来源。
+6. 若提供了 request_missing_reports，仅当本地财报片段确实缺少回答问题所必需的披露时才调用；调用时只说明所需报告期与报告类型，不得提供下载地址、股票代码或文件路径。该调用只是向用户申请补充授权，不代表已经下载。
 
 检索片段：
 {context}"""
@@ -38,6 +40,51 @@ RETRIEVAL_FALLBACK_PROMPT = """你是一位专业的金融分析师。当前本�
 EMPTY_RETRIEVAL_TOOL_PROMPT = """你是一位专业的金融分析师。本地知识库没有检索到相关财报片段，
 但你可以调用提供的 MCP 工具查询实时行情、财务指标和公司基本面。涉及今日、近期、最新、公告、新闻或股价涨跌原因时优先使用网页搜索补充公开信息；先判断是否需要补充信息；没有工具数据支撑时明确说明无法核验，
 不得编造 PDF 引用、具体数字或出处。回答使用简体中文。"""
+
+# 受控补报工具：仅向模型征求“需要哪期哪类财报”，不下载、不接受 URL 或代码。
+SUPPLEMENT_REQUEST_TOOL_NAME = "request_missing_reports"
+SUPPLEMENT_MAX_NEEDS = 5
+SUPPLEMENT_REASON_MAX_CHARS = 240
+SUPPLEMENT_REPORT_TYPES = ("annual", "semi_annual", "quarterly")
+SUPPLEMENT_REQUEST_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": SUPPLEMENT_REQUEST_TOOL_NAME,
+        "description": (
+            "仅当当前本地财报证据不足、且必须补充指定报告期与类型的 PDF 披露才能回答时调用；"
+            "调用不会下载文件，只用于向用户申请补充授权。"
+        ),
+        "parameters": {
+            "type": "object",
+            "required": ["reason", "needs"],
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "maxLength": SUPPLEMENT_REASON_MAX_CHARS,
+                    "description": "当前证据为何不足，一句话说明",
+                },
+                "needs": {
+                    "type": "array",
+                    "maxItems": SUPPLEMENT_MAX_NEEDS,
+                    "items": {
+                        "type": "object",
+                        "required": ["period", "report_type"],
+                        "properties": {
+                            "period": {
+                                "type": "string",
+                                "description": "报告期 ISO 日期，如 2025-06-30",
+                            },
+                            "report_type": {
+                                "type": "string",
+                                "enum": list(SUPPLEMENT_REPORT_TYPES),
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
 
 
 @dataclass
@@ -63,11 +110,14 @@ class RagQA:
         rerank_candidates: int = 30,
         rerank_score_threshold: float = 0.5,
         rerank_margin_threshold: float = 0.05,
+        supplement_request_handler: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ) -> None:
         """tool_executor: (name, arguments) -> str，用于执行 MCP 等外部工具；
         None 表示不启用工具调用（纯 RAG 路径）。
         reranker: 注入后检索放宽到 rerank_candidates 并按质量自适应精排；
-        None 保持纯向量检索现状。"""
+        None 保持纯向量检索现状。
+        supplement_request_handler: 补报授权处理器；为 None 时补报请求一律不可用，
+        返回 False 表示上层拒绝本次补充。"""
         self.store = store
         self.ai_client = ai_client
         self.top_k = top_k
@@ -79,6 +129,7 @@ class RagQA:
         self.rerank_candidates = rerank_candidates
         self.rerank_score_threshold = rerank_score_threshold
         self.rerank_margin_threshold = rerank_margin_threshold
+        self.supplement_request_handler = supplement_request_handler
 
     def answer(
         self,
@@ -264,6 +315,62 @@ class RagQA:
             return {}
 
     @staticmethod
+    def _validate_supplement_request(args: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[str]]:
+        """校验受控补报参数，返回 (规范化请求, 错误说明)。
+
+        只接受 reason 与 needs(period/report_type)，不接受 URL、股票代码或文件路径。
+        """
+        reason = args.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return {}, "reason 必须是非空字符串"
+        reason = reason.strip()
+        if len(reason) > SUPPLEMENT_REASON_MAX_CHARS:
+            return {}, f"reason 最多 {SUPPLEMENT_REASON_MAX_CHARS} 字"
+
+        raw_needs = args.get("needs")
+        if not isinstance(raw_needs, list) or not raw_needs:
+            return {}, "needs 必须是至少 1 项的数组"
+        if len(raw_needs) > SUPPLEMENT_MAX_NEEDS:
+            return {}, f"needs 最多 {SUPPLEMENT_MAX_NEEDS} 项"
+
+        needs: List[Dict[str, str]] = []
+        for item in raw_needs:
+            if not isinstance(item, dict):
+                return {}, "needs 每项必须是对象"
+            period = item.get("period")
+            report_type = item.get("report_type")
+            if not isinstance(period, str) or not period.strip():
+                return {}, "needs 每项需要 period"
+            period = period.strip()
+            try:
+                date.fromisoformat(period)
+            except ValueError:
+                return {}, "period 必须是 ISO 日期"
+            if report_type not in SUPPLEMENT_REPORT_TYPES:
+                return {}, "report_type 仅支持 " + "/".join(SUPPLEMENT_REPORT_TYPES)
+            needs.append({"period": period, "report_type": report_type})
+
+        return {"reason": reason, "needs": needs}, None
+
+    def _resolve_supplement_request(
+        self, args: Dict[str, Any], identity: str, seen_tool_calls: set
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """判断补报请求能否上交：返回 (可上交的请求, 错误说明)。
+
+        任何情况下都不执行工具、不消耗工具额度；重复请求会被拦下以避免空转。
+        """
+        payload, error = self._validate_supplement_request(args)
+        if error is not None:
+            return None, error
+        if identity in seen_tool_calls:
+            return None, "检测到重复的财报补充请求，请基于已有信息回答"
+        if self.supplement_request_handler is None:
+            return None, "当前不支持申请补充财报，请基于已有信息回答"
+        if self.supplement_request_handler(payload) is False:
+            return None, "本次不补充财报，请基于已有信息回答"
+        return payload, None
+
+    @staticmethod
     def _web_sources(result: str) -> List[Dict[str, str]]:
         """从网页搜索工具的受控 JSON 中提取可展示来源。"""
         try:
@@ -302,6 +409,7 @@ class RagQA:
             {"type": "done", "answer", "reasoning",
              "citations", "model", "usage", "tools_used",
              "retrieval_report_ids"}                           # 完成
+            {"type": "supplement_request", "reason", "needs"} # 申请补报授权（不下载）
             {"type": "error", "error"}                         # 出错
 
         工具编排：首轮 LLM 带 tools；若模型请求工具则执行（tool_executor）并把
@@ -393,6 +501,26 @@ class RagQA:
                         name = c["name"]
                         args = self._parse_args(c.get("arguments"))
                         identity = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True)}"
+
+                        # 补报授权申请：不执行工具、不消耗工具额度，只上交需求并结束本轮。
+                        if name == SUPPLEMENT_REQUEST_TOOL_NAME:
+                            payload, error = self._resolve_supplement_request(
+                                args, identity, seen_tool_calls
+                            )
+                            if payload is not None:
+                                yield {"type": "supplement_request",
+                                       "reason": payload["reason"], "needs": payload["needs"]}
+                                return
+                            seen_tool_calls.add(identity)
+                            result = f"工具调用失败：{error}"
+                            yield {"type": "tool_result", "name": name, "summary": result[:200], "ok": False}
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": c["id"],
+                                "content": result[: self.tool_result_max_chars],
+                            })
+                            continue
+
                         yield {"type": "reasoning_stage", "stage": "retrieve", "round": round_no,
                                "message": f"正在补充信息：调用 {name}…"}
                         yield {"type": "tool_call", "name": name, "arguments": args}
