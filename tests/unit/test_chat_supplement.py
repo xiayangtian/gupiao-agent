@@ -99,6 +99,21 @@ def test_create_requires_unique_candidates_within_the_five_report_budget():
         registry.create("s1", "问题", _company_scope(), _candidates(6))
 
 
+def test_transition_cannot_bypass_approval_or_decline_and_allows_operational_flow():
+    registry = _registry_with_request()
+
+    with pytest.raises(ValueError, match="approve|decline"):
+        registry.transition("r1", "approved")
+    with pytest.raises(ValueError, match="approve|decline"):
+        registry.transition("r1", "declined")
+
+    registry.approve("r1", "s1", ["c1"])
+    assert registry.transition("r1", "downloading").status == "downloading"
+    assert registry.transition("r1", "ingesting").status == "ingesting"
+    assert registry.transition("r1", "resuming").status == "resuming"
+    assert registry.transition("r1", "completed").status == "completed"
+
+
 def test_declined_or_expired_request_cannot_be_approved():
     registry = _registry_with_request()
     declined = registry.decline("r1", "s1")

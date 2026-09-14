@@ -23,7 +23,7 @@ _STATUSES = frozenset((
     "resuming", "completed", "expired", "failed",
 ))
 _TRANSITIONS = {
-    "proposed": frozenset(("approved", "declined", "expired", "failed")),
+    "proposed": frozenset(("expired", "failed")),
     "approved": frozenset(("downloading", "failed")),
     "downloading": frozenset(("ingesting", "failed")),
     "ingesting": frozenset(("resuming", "failed")),
@@ -305,6 +305,8 @@ class SupplementRegistry:
             raise KeyError("补充请求不存在")
         if status not in _STATUSES:
             raise ValueError("补充请求状态非法")
+        if status in ("approved", "declined"):
+            raise ValueError("approved/declined 必须通过 approve()/decline() 授权")
         if status not in _TRANSITIONS[request.status]:
             raise ValueError("补充请求状态转换非法")
         transitioned = replace(request, status=status)
