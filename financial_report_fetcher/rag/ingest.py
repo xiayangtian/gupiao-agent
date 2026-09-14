@@ -365,20 +365,26 @@ class IngestionService:
         }
 
     @_locked
-    def auto_ingest_pdf(self, pdf_path: str) -> None:
-        """自动摄取钩子（下载场景）：仅摄 PDF，文件已加入则跳过（幂等）"""
+    def auto_ingest_pdf(self, pdf_path: str) -> bool:
+        """自动摄取单份 PDF，返回是否已成功入库或确认已存在。
+
+        ``False`` 表示自动摄取未启用、身份不可解析或实际摄取失败；调用方不得
+        将其当作可用于恢复回答的证据。异常仍在此记录，保持既有后台钩子不抛出。
+        """
         if not self.auto_ingest:
-            return
+            return False
         rid = parse_pdf_report_id(pdf_path)
         if rid is None:
-            return
+            return False
         info = self._manifest.get(rid) or {}
         try:
             if info.get("pdf_hash") == _sha1_file(pdf_path):
-                return
+                return True
             self.ingest_file(rid, "pdf", file_path=pdf_path)
+            return True
         except Exception:
             logger.exception("自动摄取失败：%s", pdf_path)
+            return False
 
     @_locked
     def auto_ingest_report(self, pdf_path: str) -> None:

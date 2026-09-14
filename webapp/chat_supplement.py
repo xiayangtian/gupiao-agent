@@ -357,7 +357,7 @@ class SupplementCandidateResolver:
         return build_report_id(report.company_id, report.period, report.report_type)
 
     @staticmethod
-    def _rank(report: ReportMeta, needs: Sequence[ReportNeed]) -> tuple[int, int, str]:
+    def _rank(report: ReportMeta, needs: Sequence[ReportNeed]) -> tuple[int, int, int, str]:
         exact = any(
             need.period == report.period.isoformat() and need.report_type == report.report_type.value
             for need in needs
@@ -368,7 +368,10 @@ class SupplementCandidateResolver:
             tier = 1
         else:
             tier = 2
-        return tier, -report.period.toordinal(), report.report_type.value
+        # 披露日是同优先级候选的真实来源排序；历史元数据缺失时排在末尾，
+        # 再用报告期保证结果稳定，不从期间伪造披露日。
+        disclosure = report.disclosure_date or date.min
+        return tier, -disclosure.toordinal(), -report.period.toordinal(), report.report_type.value
 
     def resolve(
         self,
@@ -418,13 +421,19 @@ class SupplementOutcome:
     ingested_report_ids: tuple[str, ...] = ()
     skipped_report_ids: tuple[str, ...] = ()
     failed: tuple[str, ...] = ()
+    # (候选 ID, 受控原因类别)，供调用方说明失败而不泄露 URL、路径或异常文本。
+    failure_reasons: tuple[tuple[str, str], ...] = ()
 
-    def to_dict(self) -> dict[str, list[str]]:
+    def to_dict(self) -> dict[str, list[Any]]:
         return {
             "downloaded_report_ids": list(self.downloaded_report_ids),
             "ingested_report_ids": list(self.ingested_report_ids),
             "skipped_report_ids": list(self.skipped_report_ids),
             "failed": list(self.failed),
+            "failure_reasons": [
+                {"candidate_id": candidate_id, "reason": reason}
+                for candidate_id, reason in self.failure_reasons
+            ],
         }
 
 
@@ -462,39 +471,46 @@ class SupplementExecutor:
         ingested: list[str] = []
         skipped: list[str] = []
         failed: list[str] = []
+        failure_reasons: list[tuple[str, str]] = []
         candidate_by_id = {candidate.id: candidate for candidate in request.candidates}
+
+        def _failed(candidate_id: str, reason: str) -> None:
+            failed.append(candidate_id)
+            failure_reasons.append((candidate_id, reason))
 
         for candidate_id in request.selected_ids:
             candidate = candidate_by_id[candidate_id]
             report = self._reports_by_candidate.get(candidate_id)
             if report is None or candidate.code != company_code or report.company_id != company_code:
-                failed.append(candidate_id)
+                _failed(candidate_id, "unavailable_metadata")
                 continue
             report_id = build_report_id(report.company_id, report.period, report.report_type)
             if report_id != candidate.report_id or not report.download_url:
-                failed.append(candidate_id)
+                _failed(candidate_id, "unavailable_metadata")
                 continue
             try:
                 status = self._downloader.download_one(report, self._storage_dir)
             except Exception:
-                failed.append(candidate_id)
+                _failed(candidate_id, "download_failed")
                 continue
-            if status == DownloadStatus.FAILED:
-                failed.append(candidate_id)
+            if status != DownloadStatus.SUCCESS and status != DownloadStatus.SKIPPED:
+                _failed(candidate_id, "download_failed")
                 continue
 
             path = os.path.join(self._storage_dir, build_report_filename(report))
             if not self._valid_pdf(path):
-                failed.append(candidate_id)
+                _failed(candidate_id, "invalid_pdf")
                 continue
             if status == DownloadStatus.SUCCESS:
                 downloaded.append(report_id)
             else:
                 skipped.append(report_id)
             try:
-                self._ingestion_service.auto_ingest_pdf(path)
+                ingested_ok = self._ingestion_service.auto_ingest_pdf(path)
             except Exception:
-                failed.append(candidate_id)
+                ingested_ok = False
+            if ingested_ok is not True:
+                _failed(candidate_id, "ingest_failed")
                 continue
             ingested.append(report_id)
 
@@ -503,4 +519,5 @@ class SupplementExecutor:
             ingested_report_ids=tuple(ingested),
             skipped_report_ids=tuple(skipped),
             failed=tuple(failed),
+            failure_reasons=tuple(failure_reasons),
         )

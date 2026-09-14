@@ -273,6 +273,20 @@ class TestReportMeta:
         )
         assert rm.company_id == "比亚迪"
 
+    def test_disclosure_date_is_optional_for_existing_callers(self):
+        legacy = ReportMeta(
+            company_id="600519", report_type=ReportType.ANNUAL,
+            period=date(2024, 12, 31), download_url="https://example.test/report.pdf",
+            title="2024 年年度报告",
+        )
+        announced = ReportMeta(
+            company_id="600519", report_type=ReportType.ANNUAL,
+            period=date(2024, 12, 31), download_url="https://example.test/report.pdf",
+            title="2024 年年度报告", disclosure_date=date(2025, 3, 28),
+        )
+        assert legacy.disclosure_date is None
+        assert announced.disclosure_date == date(2025, 3, 28)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DownloadSummary

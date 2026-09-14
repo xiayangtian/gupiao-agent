@@ -204,6 +204,7 @@ def test_executor_never_downloads_without_approved_request_and_only_resumes_inge
 
         def auto_ingest_pdf(self, path):
             self.paths.append(path)
+            return True
 
     candidates = (
         SupplementCandidate("candidate-1", "601288:2025-06-30:semi_annual", "601288", "农业银行", "2025-06-30", "semi_annual", "巨潮资讯"),
@@ -231,3 +232,92 @@ def test_executor_never_downloads_without_approved_request_and_only_resumes_inge
     assert outcome.failed == ("candidate-2",)
     assert len(ingestion.paths) == 1
     assert "https://" not in str(outcome.to_dict())
+
+
+def test_resolver_ranks_disclosure_date_and_keeps_exact_ordered_top_five():
+    resolver = SupplementCandidateResolver(id_factory=lambda index: f"candidate-{index}")
+    reports = [
+        _meta("601288", "2025-06-30", "semi_annual"),
+        _meta("601288", "2025-12-31", "annual"),
+        _meta("601288", "2025-09-30", "quarterly"),
+        _meta("601288", "2024-12-31", "annual"),
+        _meta("601288", "2024-06-30", "semi_annual"),
+        _meta("601288", "2024-09-30", "quarterly"),
+        _meta("601288", "2023-12-31", "annual"),
+    ]
+    reports[1].disclosure_date = date(2026, 3, 31)
+    reports[3].disclosure_date = date(2025, 3, 31)
+    reports[6].disclosure_date = date(2024, 3, 31)
+    candidates = resolver.resolve(
+        _company_scope(),
+        [{"period": "2025-06-30", "report_type": "semi_annual"}],
+        reports,
+        lambda report: False,
+        lambda: set(),
+    )
+    assert [candidate.report_id for candidate in candidates] == [
+        "601288:2025-06-30:semi_annual",
+        "601288:2025-12-31:annual",
+        "601288:2024-12-31:annual",
+        "601288:2023-12-31:annual",
+        "601288:2024-06-30:semi_annual",
+    ]
+
+
+def test_executor_handles_skipped_download_and_safe_failure_reasons(tmp_path):
+    class FakeDownloader:
+        def download_one(self, report, storage_dir):
+            path = Path(storage_dir) / ReportDownloader.build_filename(report)
+            if report.period == date(2025, 6, 30):
+                path.write_bytes(b"%PDF-1.7 already-present")
+                return DownloadStatus.SKIPPED
+            return DownloadStatus.FAILED
+
+    class FakeIngestion:
+        def __init__(self):
+            self.paths = []
+
+        def auto_ingest_pdf(self, path):
+            self.paths.append(path)
+            return True
+
+    candidates = (
+        SupplementCandidate("candidate-1", "601288:2025-06-30:semi_annual", "601288", "农业银行", "2025-06-30", "semi_annual", "巨潮资讯"),
+        SupplementCandidate("candidate-2", "601288:2025-12-31:annual", "601288", "农业银行", "2025-12-31", "annual", "巨潮资讯"),
+    )
+    registry = SupplementRegistry(clock=lambda: "2026-09-14T10:00:00", id_factory=lambda: "r3")
+    registry.create("s1", "营收变化", _company_scope(), candidates)
+    request = registry.approve("r3", "s1", ["candidate-1", "candidate-2"])
+    outcome = SupplementExecutor(
+        FakeDownloader(), FakeIngestion(), str(tmp_path),
+        {"candidate-1": _meta("601288", "2025-06-30", "semi_annual"),
+         "candidate-2": _meta("601288", "2025-12-31", "annual")},
+    ).run(request)
+    assert outcome.skipped_report_ids == ("601288:2025-06-30:semi_annual",)
+    assert outcome.ingested_report_ids == ("601288:2025-06-30:semi_annual",)
+    assert outcome.failed == ("candidate-2",)
+    assert outcome.failure_reasons == (("candidate-2", "download_failed"),)
+    assert "https://" not in str(outcome.to_dict())
+
+
+def test_executor_does_not_resume_when_ingestion_fails(tmp_path):
+    class FakeDownloader:
+        def download_one(self, report, storage_dir):
+            (Path(storage_dir) / ReportDownloader.build_filename(report)).write_bytes(b"%PDF-1.7 valid")
+            return DownloadStatus.SUCCESS
+
+    class FailedIngestion:
+        def auto_ingest_pdf(self, path):
+            return False
+
+    candidate = SupplementCandidate("candidate-1", "601288:2025-06-30:semi_annual", "601288", "农业银行", "2025-06-30", "semi_annual", "巨潮资讯")
+    registry = SupplementRegistry(clock=lambda: "2026-09-14T10:00:00", id_factory=lambda: "r4")
+    registry.create("s1", "营收变化", _company_scope(), [candidate])
+    request = registry.approve("r4", "s1", ["candidate-1"])
+    outcome = SupplementExecutor(
+        FakeDownloader(), FailedIngestion(), str(tmp_path),
+        {"candidate-1": _meta("601288", "2025-06-30", "semi_annual")},
+    ).run(request)
+    assert outcome.downloaded_report_ids == ("601288:2025-06-30:semi_annual",)
+    assert outcome.ingested_report_ids == ()
+    assert outcome.failure_reasons == (("candidate-1", "ingest_failed"),)

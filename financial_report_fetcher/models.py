@@ -126,6 +126,8 @@ class ReportMeta:
     download_url: str        # 财报 PDF 文件的下载地址
     title: str               # 财报标题（如 "贵州茅台2023年年度报告"）
     company_name: str = ""   # 公司名称（如 "长江电力"），用于文件名展示
+    # 公告发布日；历史调用方未提供时保持 None，不能从报告期推测。
+    disclosure_date: Optional[date] = None
 
 
 @dataclass
