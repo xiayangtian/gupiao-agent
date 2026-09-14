@@ -1,0 +1,112 @@
+import pytest
+
+from webapp.chat_models import Scope
+from webapp.chat_supplement import (
+    SupplementCandidate,
+    SupplementRegistry,
+    SupplementRequest,
+)
+
+
+def _company_scope():
+    return Scope.company_only(
+        "601288", "农业银行", ["601288:2025-12-31:annual"]
+    )
+
+
+def _candidates(count=5):
+    return [
+        SupplementCandidate(
+            id=f"c{index}",
+            report_id=f"601288:202{index}-12-31:annual",
+            code="601288",
+            company="农业银行",
+            period=f"202{index}-12-31",
+            report_type="annual",
+            source="巨潮资讯",
+        )
+        for index in range(1, count + 1)
+    ]
+
+
+def _registry_with_request():
+    registry = SupplementRegistry(
+        clock=lambda: "2026-09-14T10:00:00",
+        id_factory=lambda: "r1",
+    )
+    registry.create(
+        session_id="s1",
+        question="营收变化",
+        scope=_company_scope(),
+        candidates=_candidates(2),
+    )
+    return registry
+
+
+def test_approve_rejects_cross_session_replay_and_more_than_five_candidates():
+    registry = SupplementRegistry(
+        clock=lambda: "2026-09-14T10:00:00",
+        id_factory=lambda: "r1",
+    )
+    request = registry.create(
+        session_id="s1",
+        question="营收变化",
+        scope=_company_scope(),
+        candidates=_candidates(5),
+    )
+
+    with pytest.raises(PermissionError):
+        registry.approve(request.id, session_id="other", candidate_ids=["c1"])
+    with pytest.raises(ValueError, match="最多 5"):
+        registry.approve(
+            request.id,
+            session_id="s1",
+            candidate_ids=["c1", "c2", "c3", "c4", "c5", "c6"],
+        )
+
+
+def test_approved_request_cannot_be_consumed_twice():
+    registry = _registry_with_request()
+    request = registry.approve("r1", "s1", ["c1"])
+    assert request.status == "approved"
+    assert request.consumed_at == "2026-09-14T10:00:00"
+
+    registry.mark_consumed("r1")
+    with pytest.raises(ValueError, match="已消费"):
+        registry.approve("r1", "s1", ["c1"])
+
+
+def test_request_round_trip_omits_url_and_path_fields():
+    request = _registry_with_request().get("r1")
+    assert request is not None
+
+    encoded = request.to_dict()
+    assert set(encoded["candidates"][0]) == {
+        "id", "report_id", "code", "company", "period", "report_type", "source",
+    }
+    restored = SupplementRequest.from_dict(encoded)
+    assert restored == request
+
+
+def test_create_requires_unique_candidates_within_the_five_report_budget():
+    registry = SupplementRegistry(clock=lambda: "2026-09-14T10:00:00")
+    duplicate = _candidates(2)
+    duplicate[1] = duplicate[0]
+
+    with pytest.raises(ValueError, match="候选 ID 必须唯一"):
+        registry.create("s1", "问题", _company_scope(), duplicate)
+    with pytest.raises(ValueError, match="最多 5"):
+        registry.create("s1", "问题", _company_scope(), _candidates(6))
+
+
+def test_declined_or_expired_request_cannot_be_approved():
+    registry = _registry_with_request()
+    declined = registry.decline("r1", "s1")
+    assert declined.status == "declined"
+    with pytest.raises(ValueError, match="不是待授权状态"):
+        registry.approve("r1", "s1", ["c1"])
+
+    expired_registry = _registry_with_request()
+    expired_registry.transition("r1", "expired")
+    with pytest.raises(ValueError, match="已过期"):
+        expired_registry.approve("r1", "s1", ["c1"])
