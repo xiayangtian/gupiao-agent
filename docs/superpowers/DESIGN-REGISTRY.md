@@ -17,6 +17,8 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
+| 智能问答可信 Agent 升级 | 实施中 | — | [主记录](#trusted-chat-agent) |
+| 方案设计台账 | 实施中 | — | [主记录](#design-registry) |
 | 财报分析前端界面 | 待核实 | — | [主记录](#financial-report-ui) |
 | 分析历史与图表 | 待核实 | — | [主记录](#analysis-history-charts) |
 | 财报分析智能体架构优化 | 待核实 | — | [主记录](#financial-agent-architecture) |
@@ -29,8 +31,6 @@
 | 动态证据化财报分析 | 待核实 | — | [主记录](#dynamic-evidence-analysis) |
 | 多轮问答与网页搜索 | 待核实 | — | [主记录](#multi-turn-web-search) |
 | 渐进式财报报告阅读体验 | 待核实 | — | [主记录](#progressive-report-reading) |
-| 智能问答可信 Agent 升级 | 实施中 | — | [主记录](#trusted-chat-agent) |
-| 方案设计台账 | 实施中 | — | [主记录](#design-registry) |
 
 ## 全部设计
 

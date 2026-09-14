@@ -6,6 +6,7 @@ REGISTRY = ROOT / "docs/superpowers/DESIGN-REGISTRY.md"
 SPECS = ROOT / "docs/superpowers/specs"
 STATUSES = {"待实现", "实施中", "已实现", "待核实"}
 EXECUTABILITY = {"可直接执行", "先补计划", "—"}
+UNFINISHED_STATUS_RANK = {"待实现": 0, "实施中": 1, "待核实": 2}
 ANCHOR_RE = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 LINK_RE = re.compile(r"\]\(([^)]+)\)")
 
@@ -81,7 +82,7 @@ def test_unfinished_index_is_exact_projection_of_non_completed_main_records():
         for record in main_records
         if record["status"] != "已实现"
     ]
-    assert sorted(index_records) == sorted(expected)
+    assert index_records == sorted(expected, key=lambda record: UNFINISHED_STATUS_RANK[record[1]])
     assert len(index_records) == len(set(index_records))
     assert all(anchor in {record["anchor"] for record in main_records} for *_, anchor in index_records)
 
