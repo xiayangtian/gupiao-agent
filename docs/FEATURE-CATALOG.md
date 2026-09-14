@@ -15,13 +15,13 @@
 
 | 功能 | 用户能力 | 实现入口 | 验证入口 | 最近变更 |
 | --- | --- | --- | --- | --- |
-| [财报发现、下载与预览](#report-download) | 查询公司、下载本地 PDF、在浏览器预览 | `datasource.py`、`downloader.py`、`webapp/server.py` | `test_downloader.py`、`test_download_flow.py` | 以台账“财报分析前端界面 / P0 可靠性修复”为准 |
-| [证据化财报分析](#evidence-analysis) | 对单份财报生成可回溯分析、事实和证据 | `analysis_pipeline.py`、`evidence/`、`facts.py` | `test_analysis_pipeline.py`、`test_evidence_*.py` | 动态证据化分析已登记为已实现 |
-| [分析阅读、历史与可视化](#analysis-reading) | 渐进式主题阅读、历史报告、财务结构图表 | `analysis_workflow.js`、`analysis_visualizations.js`、`history.py` | `test_progressive_analysis_ui.py`、`test_visualizations.py` | 主题 Tab / 财务结构可视化已合入 |
-| [RAG 知识库与检索](#rag) | 摄取 PDF、跨报告或限定范围问答、可选重排序 | `rag/ingest.py`、`store.py`、`qa.py`、`reranker.py` | `test_rag_*.py` | RAG 与增强分析已登记为已实现 |
-| [可信智能问答](#trusted-chat) | 多轮聊天、范围约束、证据链接、会话历史与紧凑来源区 | `webapp/chat_*.py`、`rag/qa.py`、`app.js`、`chat_rendering.js` | `test_chat_*.py`、`test_chat_trust_flow.py` | M1 与紧凑证据展示已合入 |
-| [行情与 MCP 基本面](#market-mcp) | 实时行情、K 线、基本面/MCP 工具 | `market/tencent.py`、`market/mcp_client.py`、`mcp_guard.py` | `test_market_*.py`、`test_mcp_*.py` | 最小闭环已接入 |
-| [任务与运行可靠性](#runtime) | 分析任务后台执行、取消、恢复和 SSE/轮询 | `webapp/tasks.py`、`task_store.py`、`server.py` | `test_tasks.py`、`test_server_api.py` | P0 可靠性修复已登记为已实现 |
+| [财报发现、下载与预览](#report-download) | 查询公司、下载本地 PDF、在浏览器预览 | `datasource.py`、`downloader.py`、`webapp/server.py` | `test_downloader.py`、`test_download_flow.py` | 见设计台账登记证据 |
+| [证据化财报分析](#evidence-analysis) | 对单份财报生成可回溯分析、事实和证据 | `analysis_pipeline.py`、`evidence/`、`facts.py` | `test_analysis_pipeline.py`、`test_evidence_*.py` | 见设计台账登记证据 |
+| [分析阅读、历史与可视化](#analysis-reading) | 渐进式主题阅读、历史报告、财务结构图表 | `analysis_workflow.js`、`analysis_visualizations.js`、`history.py` | `test_progressive_analysis_ui.py`、`test_visualizations.py` | `17e4dab`、`1107509` |
+| [RAG 知识库与检索](#rag) | 摄取 PDF、跨报告或限定范围问答、可选重排序 | `financial_report_fetcher/rag/ingest.py`、`financial_report_fetcher/rag/qa.py`、`financial_report_fetcher/rag/reranker.py` | `test_rag_*.py` | 见设计台账登记证据 |
+| [可信智能问答](#trusted-chat) | 多轮聊天、范围约束、证据链接、会话历史与紧凑来源区 | `webapp/chat_scope.py`、`financial_report_fetcher/rag/qa.py`、`webapp/static/app.js`、`webapp/static/chat_rendering.js` | `test_chat_*.py`、`test_chat_trust_flow.py` | M1 与紧凑证据展示已合入 |
+| [行情与 MCP 基本面](#market-mcp) | 实时行情、K 线、基本面/MCP 工具 | `financial_report_fetcher/market/tencent.py`、`financial_report_fetcher/market/mcp_client.py`、`webapp/mcp_guard.py` | `test_market_*.py`、`test_mcp_*.py` | 见设计台账登记证据 |
+| [任务与运行可靠性](#runtime) | 分析任务后台执行、取消、恢复和 SSE/轮询 | `webapp/tasks.py`、`task_store.py`、`server.py` | `test_tasks.py`、`test_server_api.py` | 见设计台账登记证据 |
 
 ---
 
@@ -40,25 +40,25 @@
 
 **变更记录**
 
-- 历史实现已在设计台账中确认；原始合并记录不完整，详见对应台账证据。
+- 历史实现已在设计台账中确认；原始合并记录缺失，详见[RAG 知识库与通用问答](superpowers/DESIGN-REGISTRY.md#rag-knowledge-qa)等台账条目。
 
-<a id="evidence-analysis"></a>
+<a id="trusted-chat"></a>
 ## 证据化财报分析
 
 **用户行为**：对一份 PDF 生成财务、风险、经营等分析；输出 Markdown/JSON，并为事实、数值和结论保留可核验的 PDF/结构化数据证据。文本不足的页可按需进入 OCR，不阻塞已有结论。
 
 | 项目 | 定位信息 |
 | --- | --- |
-| 核心代码 | `financial_report_fetcher/analyzer.py`、`analysis_ai.py`、`analysis_pipeline.py`、`analysis_result.py`、`facts.py`、`evidence/models.py`、`evidence/resolver.py`、`evidence/ocr.py`、`evidence/structured.py` |
+| 核心代码 | `financial_report_fetcher/analyzer.py`、`analysis_ai.py`、`analysis_pipeline.py`、`analysis_result.py`、`facts.py`、`financial_report_fetcher/evidence/models.py`、`financial_report_fetcher/evidence/resolver.py`、`financial_report_fetcher/evidence/ocr.py`、`financial_report_fetcher/evidence/structured.py` |
 | 前端 | `webapp/static/analysis_workflow.js`、`webapp/static/analysis_visualizations.js`、`webapp/static/app.js` |
-| 数据契约 | `Evidence`、`FinancialFact`、`ValidationSummary`；兼容输出保留 `metrics`，同时提供 `schema_version=2`、`facts`、`validation` |
+| 数据契约 | `Evidence`、`FinancialFact`、`ValidationSummary`；当前分析文档为 `schema_version=3`（含可视化时为 `4`），携带 `evidence_catalog` / `evidence_summary` 与 `facts` / `validation`；`schema_version=2` 仅为旧版 `AnalysisReport` 兼容路径，读取时归入 `LegacyAnalysisDocument` |
 | 关键不变量 | 数值事实须经过有限值、期间、单位和范围校验；证据冲突不得伪造单一确定结论；OCR 失败时保留已完成内容并标记降级 |
 | 验证 | `tests/unit/test_analysis_pipeline.py`、`test_analysis_result.py`、`test_facts.py`、`test_evidence_models.py`、`test_evidence_resolver.py`、`test_ocr_enrichment.py`、`test_structured_data.py` |
 | 设计与记录 | [动态证据化财报分析](superpowers/specs/2026-09-01-动态证据化财报分析-design.md)、[财务结构可视化](superpowers/specs/2026-09-10-财务结构可视化-design.md) |
 
 **变更记录**
 
-- 2026-09-14：台账确认动态证据化分析和财务结构可视化均已实现；具体验证证据见台账相应条目。
+- 历史实现已在设计台账中确认；原始合并记录缺失，详见[动态证据化财报分析](superpowers/DESIGN-REGISTRY.md#dynamic-evidence-analysis)等台账条目。
 
 <a id="analysis-reading"></a>
 ## 分析阅读、历史与可视化
@@ -119,11 +119,15 @@
 
 | 项目 | 定位信息 |
 | --- | --- |
-| 核心代码 | `financial_report_fetcher/market/tencent.py`、`market/mcp_client.py`、`rag/mcp_tools.py`、`webapp/mcp_guard.py` |
+| 核心代码 | `financial_report_fetcher/market/tencent.py`、`financial_report_fetcher/market/mcp_client.py`、`financial_report_fetcher/rag/mcp_tools.py`、`webapp/mcp_guard.py` |
 | API/CLI | Web 端 `/api/quote`、`/api/quote/kline`、`/api/quote/index`、`/api/stock/*`、`/api/stock/mcp/call`；CLI 的 `quote`、`mcp` 子命令 |
 | 关键不变量 | MCP 仅执行配置白名单内工具；失败遵循熔断/冷却语义；外部工具文本在可信问答中只能作为 `reference`，不能自动成为未核验事实 |
 | 验证 | `tests/unit/test_market_api.py`、`test_market_tencent.py`、`test_market_mcp_client.py`、`test_mcp_client.py`、`test_mcp_guard.py`、`test_mcp_tools.py` |
 | 设计与记录 | [问答接入 MCP 工具](superpowers/specs/2026-08-19-问答接入MCP工具设计.md)、[股票相关能力调研](stock-capabilities.md) |
+
+**变更记录**
+
+- 历史实现已在设计台账中确认（[问答接入 MCP 工具](superpowers/DESIGN-REGISTRY.md#chat-mcp-tools)）；原始合并记录缺失。
 
 <a id="runtime"></a>
 ## 任务与运行可靠性
@@ -137,10 +141,15 @@
 | 验证 | `tests/unit/test_tasks.py`、`test_server_api.py`、`test_service_scripts.py`、`test_browser_test_safety.py` |
 | 设计与记录 | [P0 可靠性修复](superpowers/specs/2026-08-30-P0可靠性修复设计.md)、[改进路线图](IMPROVEMENT_ROADMAP.md) |
 
+**变更记录**
+
+- 历史实现已在设计台账中确认（[P0 可靠性修复](superpowers/DESIGN-REGISTRY.md#p0-reliability)）；原始合并记录缺失。
+
 ## 维护规则
 
-- 影响用户可见功能、API 契约、数据模型、不变量或测试入口的合并，必须更新对应功能条目。
-- “最近变更”只记录**已合入 `main`** 的提交：短 SHA、改动目的和必要的兼容性说明；临时调试、重格式化和未合入分支不登记。
+- 影响用户可见功能、API 契约、数据模型、实现入口、不变量或测试入口的合并，必须更新对应功能条目。
+- 影响用户可见的功能列表、使用方式、配置或启动方式的变更，必须同时更新 `README.md`（详见 `AGENTS.md`）。
+- “最近变更”只记录**已合入 `main`** 的提交：短 SHA、改动目的和必要的兼容性说明；临时调试、重格式化和未合入分支不登记。历史功能无可核对合并记录时，写“见设计台账登记证据”并链向台账条目，不伪造 SHA。
 - 新功能先在 [设计台账](superpowers/DESIGN-REGISTRY.md)登记设计状态；合入后再在本目录新增或扩展功能条目。
 - 删除或替换功能时，保留最近变更记录，并明确迁移入口；不要让旧路径静默失效。
 - 每次修改功能前，先阅读本目录对应条目和其列出的关键不变量；若文档与代码不一致，先以代码/测试修正文档，再继续迭代。

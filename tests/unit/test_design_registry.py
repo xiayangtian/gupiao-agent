@@ -145,6 +145,18 @@ def test_project_workflow_defines_registry_updates_and_direct_execution():
         assert requirement in policy
 
 
+def _catalog_backtick_paths(text: str):
+    """提取目录中形如 `a/b.py` 的可验证仓库路径。"""
+    candidates = re.findall(r"`([A-Za-z0-9_./-]+\.(?:py|js|css|md))`", text)
+    return sorted({candidate for candidate in candidates if "/" in candidate})
+
+
+def _catalog_relative_links(text: str):
+    """提取目录中的相对 Markdown 链接目标（不含纯锚点）。"""
+    targets = re.findall(r"\]\(([^)]+)\)", text)
+    return sorted({target for target in targets if not target.startswith("#") and "://" not in target})
+
+
 def test_feature_catalog_maps_current_capabilities_to_implementation_and_tests():
     text = FEATURE_CATALOG.read_text(encoding="utf-8")
     for requirement in (
@@ -168,6 +180,23 @@ def test_feature_catalog_maps_current_capabilities_to_implementation_and_tests()
         "tests/browser/test_chat_trust_flow.py",
     ):
         assert path in text
+
+
+def test_feature_catalog_paths_and_relative_links_resolve():
+    """目录中列出的实现/测试路径与相对链接必须真实存在。"""
+    text = FEATURE_CATALOG.read_text(encoding="utf-8")
+
+    paths = _catalog_backtick_paths(text)
+    assert paths, "目录至少应列出可校验的实现或测试路径"
+    for path in paths:
+        assert (ROOT / path).is_file(), f"功能目录引用了不存在的路径：{path}"
+
+    links = _catalog_relative_links(text)
+    assert links, "目录至少应链接到设计文档或台账"
+    for target in links:
+        path = target.split("#", 1)[0]
+        resolved = FEATURE_CATALOG.parent / path
+        assert resolved.is_file() and resolved.stat().st_size > 0, f"功能目录存在不可用链接：{target}"
 
 
 def test_project_workflow_requires_automatic_feature_documentation_updates():
