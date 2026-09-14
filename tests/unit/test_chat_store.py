@@ -207,17 +207,34 @@ def test_waiting_consent_run_with_supplement_summary_survives_reload(tmp_path):
 
 
 def test_load_survives_non_mapping_supplements_field(tmp_path):
-    """supplements 不是对象时（旧版或损坏文件）不应影响会话读取。"""
+    """supplements 是非空数组时也不影响会话读取（`or {}` 兜不住真值列表）。"""
     path = tmp_path / "sessions.json"
     path.write_text(
-        json.dumps({"sessions": [], "supplements": []}, ensure_ascii=False),
+        json.dumps({
+            "sessions": [{
+                "id": "s1",
+                "title": "旧会话",
+                "messages": [
+                    {"role": "user", "content": "问题"},
+                    {"role": "assistant", "content": "旧回答"},
+                ],
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+            }],
+            "supplements": [{"id": "sup-1", "session_id": "s-x"}],
+        }, ensure_ascii=False),
         encoding="utf-8",
     )
 
     store = ChatStore(str(path))
 
-    assert store.list_sessions() == []
+    assert [session["id"] for session in store.list_sessions()] == ["s1"]
+    assert store.get_session("s1")["messages"][0]["content"] == "问题"
     assert store.get_supplement("sup-1") is None
+
     sid = store.create_session()["id"]
     assert store.save_supplement(_supplement_request(sid))["session_id"] == sid
-    assert ChatStore(str(path)).get_supplement("sup-1")["session_id"] == sid
+
+    reloaded = ChatStore(str(path))
+    assert sorted(session["id"] for session in reloaded.list_sessions()) == sorted(["s1", sid])
+    assert reloaded.get_supplement("sup-1")["session_id"] == sid

@@ -681,13 +681,16 @@ def test_accepted_supplement_request_consumes_no_tool_call_budget(tmp_path, fake
 
 
 def test_rejected_supplement_request_keeps_tool_call_budget_usable(tmp_path, fake_embedder):
-    """被拒绝的补报请求也不占额度：随后的真实工具在 max_tool_calls=1 下仍可执行。"""
+    """处理器拒绝（参数合法）时也不占额度：随后的真实工具在 max_tool_calls=1 下仍可执行。"""
     store = RagStore(str(tmp_path), fake_embedder)
     store.upsert([_chunk("内容X")])
     ai = FakeToolAI([
         [_tool_calls_event([{
             "id": "c1", "name": "request_missing_reports",
-            "arguments": '{"reason":"缺少半年报","needs":[]}',
+            "arguments": (
+                '{"reason":"缺少半年报",'
+                '"needs":[{"period":"2025-06-30","report_type":"semi_annual"}]}'
+            ),
         }])],
         [_tool_calls_event([{
             "id": "c2", "name": "stock_prices", "arguments": '{"symbol":"600519"}',
@@ -695,12 +698,18 @@ def test_rejected_supplement_request_keeps_tool_call_budget_usable(tmp_path, fak
         [_done_event("基于工具数据的回答")],
     ])
     executed = []
+    handled = []
     qa = RagQA(store, ai, top_k=4, max_tool_calls=1,
                tool_executor=lambda name, args: executed.append(name) or "价格 1 元",
-               supplement_request_handler=lambda payload: None)
+               supplement_request_handler=lambda payload: handled.append(payload) or False)
 
     events = list(qa.answer_stream("现在价格？", tools=[SUPPLEMENT_REQUEST_TOOL]))
 
-    assert executed == ["stock_prices"]
+    # 参数合法，确实到达处理器；处理器返回 False 才被拒。
+    assert handled == [{
+        "reason": "缺少半年报",
+        "needs": [{"period": "2025-06-30", "report_type": "semi_annual"}],
+    }]
     assert not any(event["type"] == "supplement_request" for event in events)
+    assert executed == ["stock_prices"]
     assert events[-1]["type"] == "done"

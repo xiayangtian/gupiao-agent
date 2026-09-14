@@ -214,13 +214,46 @@ def test_supplement_summary_defaults_skipped_reports_and_resume_time():
     {"status": "completed", "resumed_at": "https://cninfo.example/x"},
     {"status": "completed", "resumed_at": "/Users/x/reports/a.pdf"},
     {"status": "completed", "resumed_at": "昨天"},
-    {"status": "completed", "skipped_report_ids": ["601288:2025-06-30:semi_annual"] * 6},
     {"status": "completed", "ingested_report_ids": ["601288:2025-06-30:semi_annual"] * 6},
-    {"status": "completed", "skipped_report_ids": ["https://cninfo.example/x.pdf"]},
 ])
-def test_supplement_summary_rejects_unsafe_resume_time_and_oversized_report_ids(bad):
+def test_supplement_summary_rejects_unsafe_resume_time_and_oversized_ingested_ids(bad):
     with pytest.raises(ValueError):
         _waiting_consent_run(bad)
+
+
+def test_supplement_skipped_reports_are_accepted_up_to_five_and_text_checked():
+    """skipped_report_ids 是合法字段：5 项接受，6 项与 URL/路径拒绝。"""
+    five_periods = [
+        "2025-06-30", "2025-03-31", "2024-12-31", "2024-09-30", "2024-06-30",
+    ]
+    skipped_five = [f"601288:{period}:semi_annual" for period in five_periods]
+
+    accepted = _waiting_consent_run(
+        {"status": "completed", "skipped_report_ids": skipped_five}
+    )
+
+    assert accepted.supplement["skipped_report_ids"] == tuple(skipped_five)
+    assert len(accepted.supplement["skipped_report_ids"]) == 5
+
+    with pytest.raises(ValueError, match="skipped_report_ids"):
+        _waiting_consent_run({
+            "status": "completed",
+            "skipped_report_ids": [f"601288:{period}:quarterly" for period in five_periods] + [
+                "2024-03-31"
+            ],
+        })
+
+    with pytest.raises(ValueError):
+        _waiting_consent_run({
+            "status": "completed",
+            "skipped_report_ids": ["https://cninfo.example/x.pdf"],
+        })
+
+    with pytest.raises(ValueError):
+        _waiting_consent_run({
+            "status": "completed",
+            "skipped_report_ids": ["/Users/x/reports/农业银行_601288_年报_2024.pdf"],
+        })
 
 
 def test_answer_run_with_supplement_summary_stays_hashable():
