@@ -5,6 +5,8 @@ import pytest
 
 from financial_report_fetcher.downloader import ReportDownloader
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
+from financial_report_fetcher.rag.ingest import IngestionService
+from financial_report_fetcher.rag.store import RagStore
 from webapp.chat_models import Scope
 from webapp.chat_supplement import (
     SupplementCandidate,
@@ -298,6 +300,31 @@ def test_executor_handles_skipped_download_and_safe_failure_reasons(tmp_path):
     assert outcome.failed == ("candidate-2",)
     assert outcome.failure_reasons == (("candidate-2", "download_failed"),)
     assert "https://" not in str(outcome.to_dict())
+
+
+def test_executor_reports_ingest_failed_when_valid_pdf_creates_no_chunks(tmp_path, fake_embedder, monkeypatch):
+    class FakeDownloader:
+        def download_one(self, report, storage_dir):
+            (Path(storage_dir) / ReportDownloader.build_filename(report)).write_bytes(b"%PDF-1.7 valid")
+            return DownloadStatus.SUCCESS
+
+    monkeypatch.setattr("financial_report_fetcher.rag.chunking.extract_pdf_pages", lambda path: [])
+    candidate = SupplementCandidate("candidate-1", "601288:2025-06-30:semi_annual", "601288", "农业银行", "2025-06-30", "semi_annual", "巨潮资讯")
+    registry = SupplementRegistry(clock=lambda: "2026-09-14T10:00:00", id_factory=lambda: "r-empty")
+    registry.create("s1", "营收变化", _company_scope(), [candidate])
+    request = registry.approve("r-empty", "s1", ["candidate-1"])
+    ingestion = IngestionService(
+        RagStore(str(tmp_path / "rag"), fake_embedder), reports_dir=str(tmp_path),
+        analysis_dir=str(tmp_path / "analysis"), manifest_path=str(tmp_path / "rag" / "manifest.json"),
+        auto_ingest=True,
+    )
+    outcome = SupplementExecutor(
+        FakeDownloader(), ingestion, str(tmp_path),
+        {"candidate-1": _meta("601288", "2025-06-30", "semi_annual")},
+    ).run(request)
+
+    assert outcome.ingested_report_ids == ()
+    assert outcome.failure_reasons == (("candidate-1", "ingest_failed"),)
 
 
 def test_executor_does_not_resume_when_ingestion_fails(tmp_path):

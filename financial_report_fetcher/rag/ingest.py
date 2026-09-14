@@ -364,12 +364,24 @@ class IngestionService:
             "chunk_count": chunks,
         }
 
+    def _has_pdf_index(self, report_id: str) -> bool:
+        """manifest 和索引均确认至少一段 PDF 内容，才可作为问答补充证据。"""
+        info = self._manifest.get(report_id) or {}
+        try:
+            pdf_chunks = int(info.get("pdf_chunks", 0) or 0)
+            indexed_chunks = self.store.count_chunks(report_id)
+        except Exception:
+            logger.exception("无法确认 PDF 摄取结果：%s", report_id)
+            return False
+        return pdf_chunks > 0 and indexed_chunks >= pdf_chunks
+
     @_locked
     def auto_ingest_pdf(self, pdf_path: str) -> bool:
-        """自动摄取单份 PDF，返回是否已成功入库或确认已存在。
+        """自动摄取单份 PDF，返回是否有可用的 PDF 索引证据。
 
-        ``False`` 表示自动摄取未启用、身份不可解析或实际摄取失败；调用方不得
-        将其当作可用于恢复回答的证据。异常仍在此记录，保持既有后台钩子不抛出。
+        ``False`` 表示自动摄取未启用、身份不可解析、摄取失败或未产生 PDF chunk；
+        调用方不得将其当作可用于恢复回答的证据。异常仍在此记录，保持既有后台
+        钩子不抛出。
         """
         if not self.auto_ingest:
             return False
@@ -379,9 +391,9 @@ class IngestionService:
         info = self._manifest.get(rid) or {}
         try:
             if info.get("pdf_hash") == _sha1_file(pdf_path):
-                return True
+                return self._has_pdf_index(rid)
             self.ingest_file(rid, "pdf", file_path=pdf_path)
-            return True
+            return self._has_pdf_index(rid)
         except Exception:
             logger.exception("自动摄取失败：%s", pdf_path)
             return False

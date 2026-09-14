@@ -484,6 +484,21 @@ def test_auto_ingest_pdf_returns_true_for_new_or_already_indexed_pdf(tmp_path, f
     assert svc.auto_ingest_pdf(str(pdf)) is True
 
 
+def test_auto_ingest_pdf_rejects_empty_pdf_index_including_same_hash_shortcut(tmp_path, fake_embedder, monkeypatch):
+    """有效 PDF 若未产生任何 PDF chunk，不能作为问答补充证据。"""
+    pdf = _write_pdf(tmp_path)
+    monkeypatch.setattr("financial_report_fetcher.rag.chunking.extract_pdf_pages", lambda p: [])
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    svc = IngestionService(store, reports_dir=str(tmp_path),
+                           analysis_dir=str(tmp_path / "analysis"),
+                           manifest_path=str(tmp_path / "rag" / "manifest.json"),
+                           auto_ingest=True)
+
+    assert svc.auto_ingest_pdf(str(pdf)) is False
+    assert svc.auto_ingest_pdf(str(pdf)) is False
+    assert svc.status()["reports"]["600900:2025-12-31:annual"]["pdf_chunks"] == 0
+
+
 def test_auto_ingest_report_persists_manifest(tmp_path, fake_embedder, monkeypatch):
     """auto_ingest_report 后 manifest 落盘：模拟重启后 status 可见，再次摄取不重复"""
     pdf = _write_pdf(tmp_path)
