@@ -214,7 +214,8 @@
       var toolName = String(tool.tool_name || '');
       var asOf = String(tool.as_of || '');
       if (!provider && !toolName) return;
-      var key = provider + '|' + toolName + '|' + asOf;
+      // 工具名不展示时，同一来源、同一数据截至时间只保留一行。
+      var key = provider + '|' + asOf;
       if (seen[key]) return;
       seen[key] = true;
       entries.push({ provider: provider || '实时数据', asOf: asOf });

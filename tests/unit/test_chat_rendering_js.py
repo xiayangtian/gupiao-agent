@@ -158,7 +158,7 @@ def test_artifacts_deduplicate_same_pdf_page_and_collapse_many_pages_to_home_lin
           ],
           tool_artifacts: [
             {{provider: 'market', tool_name: 'price', as_of: '2026-09-10', status: 'success', result_summary: 'r1'}},
-            {{provider: 'market', tool_name: 'price', as_of: '2026-09-10', status: 'success', result_summary: 'r2'}},
+            {{provider: 'market', tool_name: 'volume', as_of: '2026-09-10', status: 'success', result_summary: 'r2'}},
           ]
         }});
         console.log(JSON.stringify({{html}}));
@@ -173,6 +173,28 @@ def test_artifacts_deduplicate_same_pdf_page_and_collapse_many_pages_to_home_lin
     assert html.count('https://example.com/news') == 1
     assert html.count('market') == 1
     assert all(value not in html for value in ('duplicate', 'web detail', '参数摘要', '结果摘要'))
+
+
+def test_pdf_with_exactly_three_pages_keeps_each_page_link():
+    """阈值是超过三页；恰好三页仍应保留三个精准页码链接。"""
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const html = rendering.renderRunArtifacts({{
+          artifacts: [1, 2, 3].map(page => ({{
+            source: 'pdf', report_id: '600900:2026-06-30:semi_annual',
+            pdf_filename: '长江电力.pdf', page,
+            pdf_url: '/api/history-pdf/yangtze.pdf?jump=1#page=' + page
+          }}))
+        }});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+
+    html = result["html"]
+    assert '<summary>证据与来源（3）</summary>' in html
+    assert html.count('data-chat-pdf-page=') == 3
+    assert 'data-chat-pdf-home=' not in html
 
 
 def test_pdf_artifact_rejects_unsafe_or_non_positive_page_urls():
