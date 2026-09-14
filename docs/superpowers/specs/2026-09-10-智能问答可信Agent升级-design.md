@@ -384,3 +384,42 @@
 1. 行业比较中“行业成分股”的最大数量与流动性筛选规则：建议 M2 先限制为可获得报告且数据期可比的公司，数量超过 20 时提示收窄范围。
 2. 网页新闻的首选域名清单：建议 M2 按公告、交易所、主流财经媒体分级，并将可信域名配置化。
 3. 研究记忆的最大保存周期：建议 M4 以用户显式保存为准，事实保留来源有效期，不设隐式永久记忆。
+
+## 14. M1 浏览器验收记录（实际执行证据）
+
+> 本小节为 Task 8 追加的实际验收证据，仅记录真实运行结果，不改动上文已确认设计。
+
+### 运行方式
+
+- 命令：`python3 -m pytest tests/browser/test_chat_trust_flow.py -q`
+- 结果：`6 passed`
+- 应用：真实 `webapp.server:app`，经 `tests/browser/visual_test_app.py` 启动，
+  注入可控 fake `rag_qa.answer_stream` 与固定 reports/PDF fixture，
+  全程不消耗模型配额、不访问真实网络。
+- 地址：`http://127.0.0.1:<动态端口>/#/chat`（每用例由 `_free_port()` 分配独立端口，
+  逐用例启动独立进程与独立 `ChatStore`，避免跨用例/历史运行残留）。
+- 真实浏览器：agent-browser（`find_usable_agent_browser` 探针通过；CLI 不可执行才跳过，
+  不使用 `RUN_BROWSER_INTEGRATION` 环境变量选择跳过）。
+
+### 视口与验收结果
+
+| 视口 | 验收点 | console errors | page errors | 横向溢出 |
+|---|---|---|---|---|
+| 1280x900 | 本公司 Scope、PDF 第 40 页跳转、历史重开、无溢出 | 0 | 0 | 无 |
+| 768x1000 | 行业本地样本标记、无溢出 | 0 | 0 | 无 |
+| 390x844 | 本公司 Scope、PDF 第 40 页跳转、历史重开、无溢出 | 0 | 0 | 无 |
+| 默认视口 | stopped 状态（「已停止」可见、无「已完成」误导）、本公司 Scope、网页来源 | 0 | 0 | — |
+
+### 断言的真实 DOM / 网络证据
+
+- 历史重开：`company_only` Scope 首部含「本公司」「601288」「2026 半年报」；
+  PDF 证据按钮 `data-chat-pdf-page="40"`，`href` 以 `/api/history-pdf/` 开头且含
+  `#page=40`，不含 `javascript:`；网页来源 `href` 等于持久化的 `https://` 地址。
+- 行业范围：`scopeNote` 含「本地可检索同业样本」，`scopeText` 含
+  「银行业（数据源分类）」，全文不含「全行业排名」。
+- 停止运行：状态标签为「⏹ 已停止」，正文含「已停止」「重新生成」，
+  不含「已完成」。
+- 网络：仅忽略应用未提供的 `/favicon.ico`；其余同源请求无 4xx/5xx。
+- 修复记录：浏览器回归暴露 `renderChatFocusBar` 在无聚焦报告（`STATE.chatFocusReport == null`）
+  时读取空引用字段的运行时错误，已加空值防护（见 Task 8 报告偏离说明）；
+  修复后三视口 `console errors` 与 `page errors` 均为 0。
