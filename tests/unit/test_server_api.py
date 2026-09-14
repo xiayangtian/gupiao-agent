@@ -1283,10 +1283,10 @@ class TestChatSessionsApi:
         sessions = store.list_sessions()
         assert len(sessions) == 1
         detail = store.get_session(sessions[0]["id"])
-        assert detail["messages"] == [
-            {"role": "user", "content": "营收如何？"},
-            {"role": "assistant", "content": "营收增长"},
-        ]
+        assert detail["messages"][0] == {"role": "user", "content": "营收如何？"}
+        assert detail["messages"][1]["role"] == "assistant"
+        assert detail["messages"][1]["content"] == "营收增长"
+        assert detail["messages"][1]["run"]["legacy_evidence_unavailable"] is True
 
     def test_chat_stream_never_exposes_model_reasoning(self, client, env, monkeypatch, tmp_path):
         """SSE 只发送回答内容与可解释工具阶段，不发送模型私有推理。"""
