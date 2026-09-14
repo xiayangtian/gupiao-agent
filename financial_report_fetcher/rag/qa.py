@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from financial_report_fetcher.report_identity import build_report_id
+from webapp.chat_models import Scope
 
 from .reranker import Reranker, _maybe_rerank
 from .store import RagStore
@@ -85,29 +86,25 @@ class RagQA:
         history: Optional[List[Dict[str, str]]] = None,
         filters: Optional[Dict[str, Any]] = None,
         priority_report_id: Optional[str] = None,
+        scope: Optional[Scope] = None,
     ) -> Optional[Dict[str, Any]]:
         """检索并回答；检索为空返回 None（调用方决定兜底）
 
-        priority_report_id: 指定后提升该报告片段的检索权重（排前补足）。
+        scope: company_only/company_industry 时按 report_ids 硬过滤，
+        whole_corpus 不做过滤；priority_report_id 仅在 Scope 允许范围内生效。
         """
         try:
-            hits = self._query_with_priority(question, filters, priority_report_id)
+            hits = self._query_with_priority(question, scope, priority_report_id, filters)
         except Exception as exc:  # embedding 模型未就绪/网络不可达时降级直答
             logger.exception("RAG 检索失败，降级为无检索回答：%s", exc)
             messages = list(history or [])
             messages.append({"role": "user", "content": question})
             resp = self.ai_client.chat(messages=messages, system=RETRIEVAL_FALLBACK_PROMPT)
-            return {"answer": resp["content"], "citations": [], "retrieval_degraded": True}
+            return {"answer": resp["content"], "citations": [], "retrieval_report_ids": [], "retrieval_degraded": True}
         if not hits:
             return None
 
-        lines = []
-        for i, h in enumerate(hits, start=1):
-            where = f"{h.get('report_id', '?')}「{h.get('section', '?')}」"
-            if h.get("page"):
-                where += f" 第{h['page']}页"
-            lines.append(f"[{i}] {where}：{h['text'][:300]}")
-        system = SYSTEM_PROMPT_TEMPLATE.format(context="\n".join(lines))
+        system = SYSTEM_PROMPT_TEMPLATE.format(context="\n".join(self._context_lines(hits)))
 
         messages: List[Dict[str, str]] = []
         if history:
@@ -117,7 +114,11 @@ class RagQA:
         resp = self.ai_client.chat(messages=messages, system=system)
         answer_text = resp["content"]
         citations = self._build_citations(hits, answer_text)
-        return {"answer": answer_text, "citations": citations}
+        return {
+            "answer": answer_text,
+            "citations": citations,
+            "retrieval_report_ids": self._retrieval_report_ids(hits),
+        }
 
     @staticmethod
     def build_report_id(code: str, period_iso: str) -> str:
@@ -127,33 +128,105 @@ class RagQA:
     def _query_with_priority(
         self,
         question: str,
-        filters: Optional[Dict[str, Any]],
+        scope: Optional[Scope],
         priority_report_id: Optional[str],
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """检索 + 聚焦报告加权 + 自适应 rerank（可选）统一入口。
+        """检索 + Scope 硬过滤 + 聚焦报告加权 + 自适应 rerank（可选）统一入口。
 
         - 候选数：注入 reranker 时放宽到 rerank_candidates（供精排），否则 top_k；
-        - priority_report_id：该报告片段插入候选最前（去重），提升权重；
+        - Scope 为 company_only/company_industry 时，主查询与 priority 查询都使用
+          同一 ``$in`` 硬过滤，绝不越界；whole_corpus 传 None；
+        - priority_report_id 仅在 Scope 允许范围内生效，否则忽略并记录 debug 日志；
         - 最后走 _maybe_rerank（无 reranker 时直接取前 top_k，保持优先级）。
         """
         query_top_k = self.rerank_candidates if self.reranker else self.top_k
-        hits = self.store.query(question, top_k=query_top_k, where=filters)
-        if priority_report_id:
+        where = self._resolve_where(scope, filters)
+        hits = self.store.query(question, top_k=query_top_k, where=where)
+        if priority_report_id and self._priority_allowed(scope, priority_report_id):
+            pri_where = self._priority_where(scope, priority_report_id)
             try:
                 pri = self.store.query(
                     question,
                     top_k=max(3, self.top_k // 2),
-                    where={"report_id": priority_report_id},
+                    where=pri_where,
                 )
             except Exception:
                 pri = []
             if pri:
                 seen = {h["id"] for h in pri}
                 hits = list(pri) + [h for h in hits if h["id"] not in seen]
+        elif priority_report_id:
+            logger.debug("priority_report_id=%s 超出当前 Scope，已忽略", priority_report_id)
         return _maybe_rerank(
             question, hits, self.reranker, self.top_k,
             self.rerank_score_threshold, self.rerank_margin_threshold,
         )
+
+    @staticmethod
+    def _resolve_where(
+        scope: Optional[Scope],
+        filters: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """把 Scope 解析为 Chroma where 硬过滤；无 Scope 时沿用旧 filters。"""
+        if scope is None:
+            return filters
+        if scope.mode == "whole_corpus":
+            return None
+        return {"report_id": {"$in": list(scope.report_ids)}}
+
+    @staticmethod
+    def _priority_allowed(scope: Optional[Scope], priority_report_id: str) -> bool:
+        """priority_report_id 是否在当前 Scope 允许范围内。
+
+        Scope 为 None 或 whole_corpus 时无边界，允许全局聚焦；
+        company_only/company_industry 时必须在 scope.report_ids 中。
+        """
+        if scope is None or scope.mode == "whole_corpus":
+            return True
+        return priority_report_id in scope.report_ids
+
+    @staticmethod
+    def _priority_where(
+        scope: Optional[Scope],
+        priority_report_id: str,
+    ) -> Dict[str, Any]:
+        """聚焦报告查询的 where；硬 Scope 下用单元素 $in 保持同一过滤语义。"""
+        if scope is not None and scope.mode != "whole_corpus":
+            return {"report_id": {"$in": [priority_report_id]}}
+        return {"report_id": priority_report_id}
+
+    def _context_lines(self, hits: List[Dict[str, Any]]) -> List[str]:
+        """构建受控上下文行：只暴露报告身份、章节、页码与来源摘要，绝不暴露内部距离分数。"""
+        lines: List[str] = []
+        for i, h in enumerate(hits, start=1):
+            rid = str(h.get("report_id") or "?")
+            company, period, kind = self._split_report_id(rid)
+            where = f"{rid}「{h.get('section', '?')}」"
+            if h.get("page"):
+                where += f" 第{h['page']}页"
+            summary = f"公司:{company} 期次:{period} 来源类型:{h.get('source', '?')}/{kind}"
+            lines.append(f"[{i}] {where}（{summary}）：{h['text'][:300]}")
+        return lines
+
+    @staticmethod
+    def _split_report_id(report_id: str) -> tuple[str, str, str]:
+        """按 ``code:period:type`` 报告身份前缀约定拆分公司、期次、报告类型。"""
+        parts = report_id.split(":")
+        company = parts[0] if len(parts) > 0 and parts[0] else "?"
+        period = parts[1] if len(parts) > 1 and parts[1] else "?"
+        kind = parts[2] if len(parts) > 2 and parts[2] else "?"
+        return company, period, kind
+
+    @staticmethod
+    def _retrieval_report_ids(hits: List[Dict[str, Any]]) -> List[str]:
+        """按命中顺序去重返回报告身份列表，供 AnswerRun.retrieval_report_ids 使用。"""
+        seen: List[str] = []
+        for h in hits:
+            rid = h.get("report_id")
+            if rid and rid not in seen:
+                seen.append(rid)
+        return seen
 
     @staticmethod
     def _build_citations(hits: List[Dict[str, Any]], answer_text: str) -> List[Dict[str, Any]]:
@@ -218,6 +291,7 @@ class RagQA:
         filters: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         priority_report_id: Optional[str] = None,
+        scope: Optional[Scope] = None,
     ):
         """流式检索回答，可选工具调用编排。事件：
 
@@ -226,7 +300,8 @@ class RagQA:
             {"type": "tool_call", "name", "arguments"}         # 开始调用工具
             {"type": "tool_result", "name", "summary"}         # 工具返回摘要
             {"type": "done", "answer", "reasoning",
-             "citations", "model", "usage", "tools_used"}      # 完成
+             "citations", "model", "usage", "tools_used",
+             "retrieval_report_ids"}                           # 完成
             {"type": "error", "error"}                         # 出错
 
         工具编排：首轮 LLM 带 tools；若模型请求工具则执行（tool_executor）并把
@@ -235,28 +310,23 @@ class RagQA:
         """
         retrieval_degraded = False
         try:
-            hits = self._query_with_priority(question, filters, priority_report_id)
+            hits = self._query_with_priority(question, scope, priority_report_id, filters)
         except Exception as exc:  # 首次 embedding 下载失败时不让整条流式问答中断
             logger.exception("RAG 检索失败，降级为无检索流式回答：%s", exc)
             hits = []
             retrieval_degraded = True
+        retrieval_report_ids = self._retrieval_report_ids(hits)
         can_use_tools = bool(tools and self.tool_executor is not None)
         if not hits and not retrieval_degraded and not can_use_tools:
             yield {"type": "empty"}
             return
 
-        lines = []
-        for i, h in enumerate(hits, start=1):
-            where = f"{h.get('report_id', '?')}「{h.get('section', '?')}」"
-            if h.get("page"):
-                where += f" 第{h['page']}页"
-            lines.append(f"[{i}] {where}：{h['text'][:300]}")
         if retrieval_degraded:
             system = RETRIEVAL_FALLBACK_PROMPT
         elif not hits:
             system = EMPTY_RETRIEVAL_TOOL_PROMPT
         else:
-            system = SYSTEM_PROMPT_TEMPLATE.format(context="\n".join(lines))
+            system = SYSTEM_PROMPT_TEMPLATE.format(context="\n".join(self._context_lines(hits)))
 
         messages: List[Dict[str, str]] = []
         if history:
@@ -281,6 +351,7 @@ class RagQA:
                         "model": evt.get("model"),
                         "usage": evt.get("usage") or {},
                         "tools_used": [],
+                        "retrieval_report_ids": retrieval_report_ids,
                         "retrieval_degraded": retrieval_degraded,
                     }
                     return
@@ -371,6 +442,7 @@ class RagQA:
                         "usage": evt.get("usage") or {},
                         "tools_used": tools_used,
                         "web_sources": web_sources,
+                        "retrieval_report_ids": retrieval_report_ids,
                         "retrieval_degraded": retrieval_degraded,
                     }
                     return
@@ -398,6 +470,7 @@ class RagQA:
                     "usage": evt.get("usage") or {},
                     "tools_used": tools_used,
                     "web_sources": web_sources,
+                    "retrieval_report_ids": retrieval_report_ids,
                     "retrieval_degraded": retrieval_degraded,
                 }
                 return
