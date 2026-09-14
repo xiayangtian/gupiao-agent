@@ -175,6 +175,27 @@ def test_artifacts_deduplicate_same_pdf_page_and_collapse_many_pages_to_home_lin
     assert all(value not in html for value in ('duplicate', 'web detail', '参数摘要', '结果摘要'))
 
 
+def test_tool_entries_with_different_as_of_remain_distinct():
+    """同一来源但数据截至时间不同，不得被过度合并。"""
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const html = rendering.renderRunArtifacts({{
+          tool_artifacts: [
+            {{provider: 'market', tool_name: 'price', as_of: '2026-09-10T09:00:00'}},
+            {{provider: 'market', tool_name: 'price', as_of: '2026-09-10T10:00:00'}},
+          ]
+        }});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+
+    html = result["html"]
+    assert html.count('market') == 2
+    assert '数据截至 2026-09-10T09:00:00' in html
+    assert '数据截至 2026-09-10T10:00:00' in html
+
+
 def test_pdf_with_exactly_three_pages_keeps_each_page_link():
     """阈值是超过三页；恰好三页仍应保留三个精准页码链接。"""
     result = _run_node(
