@@ -7,6 +7,7 @@ historic answers cannot be presented as scoped or evidenced when they are not.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from numbers import Real
 from typing import Any, ClassVar, Literal, Mapping, Sequence
 from urllib.parse import urlparse
@@ -162,6 +163,9 @@ class Scope:
         elif self.mode == "company_industry":
             if len(self.companies) != 1 or self.industry is None or not self.report_ids:
                 raise ValueError("company_industry requires one company, an industry source, and report_ids")
+            company_code = self.companies[0].code
+            if not any(report_id.split(":", 1)[0] != company_code for report_id in self.report_ids):
+                raise ValueError("company_industry requires at least one peer report")
         else:
             if self.report_ids:
                 raise ValueError("whole_corpus requires empty report_ids")
@@ -219,8 +223,8 @@ class Fact:
     def __post_init__(self) -> None:
         for name in ("metric", "unit", "period", "period_kind", "entity_scope", "company_code", "source_type"):
             _string(getattr(self, name), name)
-        if isinstance(self.value, bool) or not isinstance(self.value, Real):
-            raise ValueError("value must be a number")
+        if isinstance(self.value, bool) or not isinstance(self.value, Real) or not isfinite(self.value):
+            raise ValueError("value must be a finite number")
         if not isinstance(self.evidence_ids, tuple) or not self.evidence_ids:
             raise ValueError("evidence_ids must be a non-empty tuple")
         for evidence_id in self.evidence_ids:
@@ -483,8 +487,12 @@ class AnswerRun:
             _string(report_id, "retrieval_report_id")
         for name in ("id", "created_at", "completed_at", "model"):
             _string(getattr(self, name), name, required=False)
-        if self.elapsed_seconds is not None and (isinstance(self.elapsed_seconds, bool) or not isinstance(self.elapsed_seconds, Real)):
-            raise ValueError("elapsed_seconds must be a number or null")
+        if self.elapsed_seconds is not None and (
+            isinstance(self.elapsed_seconds, bool)
+            or not isinstance(self.elapsed_seconds, Real)
+            or not isfinite(self.elapsed_seconds)
+        ):
+            raise ValueError("elapsed_seconds must be a finite number or null")
         if not isinstance(self.legacy_evidence_unavailable, bool):
             raise ValueError("legacy_evidence_unavailable must be a boolean")
         if self.legacy_evidence_unavailable and (self.facts or self.artifacts or self.tool_artifacts):
@@ -514,8 +522,12 @@ class AnswerRun:
         if scope_data is not None and not isinstance(scope_data, Mapping):
             raise ValueError("scope must be a JSON object or null")
         elapsed_seconds = data.get("elapsed_seconds")
-        if elapsed_seconds is not None and (isinstance(elapsed_seconds, bool) or not isinstance(elapsed_seconds, Real)):
-            raise ValueError("elapsed_seconds must be a number or null")
+        if elapsed_seconds is not None and (
+            isinstance(elapsed_seconds, bool)
+            or not isinstance(elapsed_seconds, Real)
+            or not isfinite(elapsed_seconds)
+        ):
+            raise ValueError("elapsed_seconds must be a finite number or null")
         legacy = data.get("legacy_evidence_unavailable", False)
         if not isinstance(legacy, bool):
             raise ValueError("legacy_evidence_unavailable must be a boolean")

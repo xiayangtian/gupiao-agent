@@ -67,6 +67,13 @@ def test_scope_variants_validate_industry_and_whole_corpus_boundaries():
     assert Scope.whole_corpus().report_ids == ()
     with pytest.raises(ValueError, match="company_industry"):
         Scope("company_industry", (CompanyRef("601288", "农业银行"),), (), industry)
+    with pytest.raises(ValueError, match="peer report"):
+        Scope(
+            "company_industry",
+            (CompanyRef("601288", "农业银行"),),
+            ("601288:2026-06-30:semi_annual",),
+            industry,
+        )
     with pytest.raises(ValueError, match="whole_corpus"):
         Scope("whole_corpus", (), ("601288:2026-06-30:semi_annual",))
 
@@ -85,6 +92,22 @@ def test_contracts_validate_artifact_fact_and_status_values():
             company_code="601288", source_type="pdf", evidence_ids=("pdf_p1",),
             verification="unknown",
         )
+
+
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_fact_rejects_non_finite_values(value):
+    with pytest.raises(ValueError, match="finite number"):
+        Fact(
+            metric="revenue", value=value, unit="亿元", period="2026-06-30",
+            period_kind="semi_annual_cumulative", entity_scope="consolidated",
+            company_code="601288", source_type="pdf", evidence_ids=("pdf_p1",),
+        )
+
+
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_answer_run_rejects_non_finite_elapsed_seconds(value):
+    with pytest.raises(ValueError, match="finite number"):
+        AnswerRun(content="x", status="completed", elapsed_seconds=value)
 
 
 def test_all_contracts_are_json_round_trippable_and_frozen():
