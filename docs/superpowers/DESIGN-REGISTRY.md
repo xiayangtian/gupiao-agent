@@ -17,6 +17,7 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
+| 智能问答财报补充下载 | 待实现 | 可直接执行 | [主记录](#chat-pdf-supplement) |
 | 智能问答可信 Agent 升级 | 实施中 | — | [主记录](#trusted-chat-agent) |
 
 ## 全部设计
@@ -41,3 +42,4 @@
 | <a id="trusted-chat-agent"></a>智能问答可信 Agent 升级 | [设计](specs/2026-09-10-智能问答可信Agent升级-design.md) | [M1](plans/2026-09-10-智能问答可信Agent-M1.md)、[M2](plans/2026-09-10-智能问答可信Agent-M2.md)、[M3](plans/2026-09-10-智能问答可信Agent-M3.md)、[M4](plans/2026-09-10-智能问答可信Agent-M4.md) | 实施中 | — | M1 合并 6276701；设计文档第 14 节保留 `python3 -m pytest tests/browser/test_chat_trust_flow.py -q`：6 passed；M2–M4 尚未完成 | 2026-09-14 |
 | <a id="financial-structure-visuals"></a>财务结构可视化 | [设计](specs/2026-09-10-财务结构可视化-design.md) | [计划](plans/2026-09-10-财务结构可视化.md) | 已实现 | — | 合并 1107509；`python3 -m pytest tests/unit/test_visualizations.py -q`：14 passed in 0.12s | 2026-09-14 |
 | <a id="design-registry"></a>方案设计台账 | [设计](specs/2026-09-14-方案设计台账-design.md) | [计划](plans/2026-09-14-方案设计台账.md) | 已实现 | — | 合并 f27056c；`python3 -m pytest tests/unit/test_design_registry.py -q` → 4 passed in 0.11s | 2026-09-14 |
+| <a id="chat-pdf-supplement"></a>智能问答财报补充下载 | [设计](specs/2026-09-14-智能问答财报补充下载-design.md) | [计划](plans/2026-09-14-问答补报.md) | 待实现 | 可直接执行 | 无；设计于 2026-09-14 确认，实施计划已就绪，尚未开工 | 2026-09-14 |
