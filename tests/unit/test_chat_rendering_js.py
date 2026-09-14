@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CHAT_RENDERING_JS = ROOT / "webapp" / "static" / "chat_rendering.js"
+APP_JS = ROOT / "webapp" / "static" / "app.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="前端渲染回归测试需要 Node.js")
@@ -243,3 +244,52 @@ def test_tool_artifact_arguments_summary_rendered_as_plain_text_never_parsed():
     assert "参数摘要" in result["html"]
     assert "{&quot;code&quot;: &quot;601288&quot;, &quot;metric&quot;: &quot;营收" in result["html"]
     assert "营业收入为 862 亿元" in result["html"]
+
+
+def test_chat_focus_bar_clears_label_when_no_focus_report():
+    """无聚焦报告时 renderChatFocusBar 不抛错且清空标签，聚焦存在时文案不变。
+
+    浏览器回归（tests/browser/test_chat_trust_flow.py）暴露了 ``STATE.chatFocusReport``
+    为 null 时直接读取 ``fr.company`` 的运行时错误；本测试在纯 JS 环境复现该守卫，
+    未加守卫时（读取空引用）会在 Node 抛错，从而构成红态。
+    """
+    result = _run_node(
+        f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('function renderChatFocusBar() {{');
+        const end = src.indexOf('function currentScopeMode()', start);
+        if (start < 0 || end < 0) throw new Error('renderChatFocusBar/currentScopeMode 未找到');
+        const fnSource = src.slice(start, end);
+
+        function runWith(focusReport) {{
+          const events = [];
+          const label = {{ textContent: 'STALE' }};
+          const bar = {{ classList: {{ add: (c) => events.push('bar-add:' + c), remove: (c) => events.push('bar-remove:' + c) }} }};
+          const sandbox = {{
+            $: (sel) => sel === '#chat-focus-bar' ? bar : (sel === '#chat-focus-label' ? label : null),
+            $$: () => [],
+            STATE: {{ chatFocusReport: focusReport }},
+            renderChatScopeBar: () => events.push('scope-bar'),
+          }};
+          vm.createContext(sandbox);
+          vm.runInContext(fnSource + '\\nrenderChatFocusBar();', sandbox);
+          return {{ labelText: label.textContent, events }};
+        }}
+
+        let nullThrew = false;
+        let nullResult = null;
+        try {{ nullResult = runWith(null); }} catch (e) {{ nullThrew = true; }}
+        const withCompany = runWith({{ code: '601288', period: '2026-06-30', company: '农业银行' }});
+        console.log(JSON.stringify({{ nullThrew, nullResult, withCompany }}));
+        """
+    )
+
+    assert result["nullThrew"] is False
+    assert result["nullResult"]["labelText"] == ""
+    assert "bar-add:hidden" in result["nullResult"]["events"]
+    assert "scope-bar" in result["nullResult"]["events"]
+    assert result["withCompany"]["labelText"] == "聚焦报告：农业银行（601288 · 2026-06-30）——检索优先本报告"
+    assert "bar-add:hidden" not in result["withCompany"]["events"]
+    assert "bar-remove:hidden" in result["withCompany"]["events"]

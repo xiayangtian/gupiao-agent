@@ -2134,7 +2134,12 @@ function renderChatFocusBar() {
   if (!fr || !fr.code) { bar.classList.add('hidden'); } else { bar.classList.remove('hidden'); }
   var label = $('#chat-focus-label');
   if (label) {
-    label.textContent = '聚焦报告：' + (fr.company || '') + '（' + fr.code + ' · ' + fr.period + '）——检索优先本报告';
+    // 无聚焦报告时清空标签，绝不读取空引用字段（历史跳转上下文缺失时不报错）。
+    if (fr && fr.code) {
+      label.textContent = '聚焦报告：' + (fr.company || '') + '（' + fr.code + ' · ' + fr.period + '）——检索优先本报告';
+    } else {
+      label.textContent = '';
+    }
   }
   renderChatScopeBar();
 }
