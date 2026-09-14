@@ -3,6 +3,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "docs/superpowers/DESIGN-REGISTRY.md"
+FEATURE_CATALOG = ROOT / "docs/FEATURE-CATALOG.md"
 SPECS = ROOT / "docs/superpowers/specs"
 STATUSES = {"待实现", "实施中", "已实现", "待核实"}
 EXECUTABILITY = {"可直接执行", "先补计划", "—"}
@@ -140,5 +141,70 @@ def test_project_workflow_defines_registry_updates_and_direct_execution():
         "实施中",
         "已实现",
         "验证",
+    ):
+        assert requirement in policy
+
+
+def _catalog_backtick_paths(text: str):
+    """提取目录中形如 `a/b.py` 的可验证仓库路径。"""
+    candidates = re.findall(r"`([A-Za-z0-9_./-]+\.(?:py|js|css|md))`", text)
+    return sorted({candidate for candidate in candidates if "/" in candidate})
+
+
+def _catalog_relative_links(text: str):
+    """提取目录中的相对 Markdown 链接目标（不含纯锚点）。"""
+    targets = re.findall(r"\]\(([^)]+)\)", text)
+    return sorted({target for target in targets if not target.startswith("#") and "://" not in target})
+
+
+def test_feature_catalog_maps_current_capabilities_to_implementation_and_tests():
+    text = FEATURE_CATALOG.read_text(encoding="utf-8")
+    for requirement in (
+        "功能总览",
+        "实现入口",
+        "关键不变量",
+        "验证",
+        "最近变更",
+        "可信智能问答",
+        "证据化财报分析",
+        "RAG 知识库与检索",
+        "行情与 MCP 基本面",
+        "任务与运行可靠性",
+    ):
+        assert requirement in text
+
+    for path in (
+        "webapp/chat_scope.py",
+        "webapp/chat_evidence.py",
+        "financial_report_fetcher/rag/qa.py",
+        "tests/browser/test_chat_trust_flow.py",
+    ):
+        assert path in text
+
+
+def test_feature_catalog_paths_and_relative_links_resolve():
+    """目录中列出的实现/测试路径与相对链接必须真实存在。"""
+    text = FEATURE_CATALOG.read_text(encoding="utf-8")
+
+    paths = _catalog_backtick_paths(text)
+    assert paths, "目录至少应列出可校验的实现或测试路径"
+    for path in paths:
+        assert (ROOT / path).is_file(), f"功能目录引用了不存在的路径：{path}"
+
+    links = _catalog_relative_links(text)
+    assert links, "目录至少应链接到设计文档或台账"
+    for target in links:
+        path = target.split("#", 1)[0]
+        resolved = FEATURE_CATALOG.parent / path
+        assert resolved.is_file() and resolved.stat().st_size > 0, f"功能目录存在不可用链接：{target}"
+
+
+def test_project_workflow_requires_automatic_feature_documentation_updates():
+    policy = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    for requirement in (
+        "FEATURE-CATALOG.md",
+        "必须自动更新",
+        "README.md",
+        "未合入分支",
     ):
         assert requirement in policy
