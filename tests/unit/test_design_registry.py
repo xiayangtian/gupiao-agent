@@ -3,6 +3,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "docs/superpowers/DESIGN-REGISTRY.md"
+FEATURE_CATALOG = ROOT / "docs/FEATURE-CATALOG.md"
 SPECS = ROOT / "docs/superpowers/specs"
 STATUSES = {"待实现", "实施中", "已实现", "待核实"}
 EXECUTABILITY = {"可直接执行", "先补计划", "—"}
@@ -140,5 +141,41 @@ def test_project_workflow_defines_registry_updates_and_direct_execution():
         "实施中",
         "已实现",
         "验证",
+    ):
+        assert requirement in policy
+
+
+def test_feature_catalog_maps_current_capabilities_to_implementation_and_tests():
+    text = FEATURE_CATALOG.read_text(encoding="utf-8")
+    for requirement in (
+        "功能总览",
+        "实现入口",
+        "关键不变量",
+        "验证",
+        "最近变更",
+        "可信智能问答",
+        "证据化财报分析",
+        "RAG 知识库与检索",
+        "行情与 MCP 基本面",
+        "任务与运行可靠性",
+    ):
+        assert requirement in text
+
+    for path in (
+        "webapp/chat_scope.py",
+        "webapp/chat_evidence.py",
+        "financial_report_fetcher/rag/qa.py",
+        "tests/browser/test_chat_trust_flow.py",
+    ):
+        assert path in text
+
+
+def test_project_workflow_requires_automatic_feature_documentation_updates():
+    policy = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    for requirement in (
+        "FEATURE-CATALOG.md",
+        "必须自动更新",
+        "README.md",
+        "未合入分支",
     ):
         assert requirement in policy
