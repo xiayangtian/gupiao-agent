@@ -57,6 +57,9 @@ class ChatStore:
                 data = json.load(f)
             if isinstance(data, dict) and isinstance(data.get("sessions"), list):
                 supplements = data.get("supplements")
+                if not isinstance(supplements, Mapping):
+                    # 旧版或损坏的 supplements 字段（如数组）一律忽略，不影响会话读取。
+                    supplements = {}
                 return {
                     "schema_version": 2,
                     "sessions": [
@@ -66,7 +69,7 @@ class ChatStore:
                     ],
                     "supplements": {
                         str(key): dict(value)
-                        for key, value in (supplements or {}).items()
+                        for key, value in supplements.items()
                         if isinstance(value, Mapping)
                     },
                 }

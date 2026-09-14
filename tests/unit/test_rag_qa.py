@@ -655,3 +655,52 @@ def test_supplement_request_without_handler_is_controlled_failure(tmp_path, fake
     assert not any(event["type"] == "supplement_request" for event in events)
     assert events[-1]["type"] == "done"
     assert executed == []
+
+
+def test_accepted_supplement_request_consumes_no_tool_call_budget(tmp_path, fake_embedder):
+    """已被接受的补报请求不执行工具、不消耗 max_tool_calls 额度。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容W")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{
+            "id": "c1", "name": "request_missing_reports",
+            "arguments": '{"reason":"缺少半年报","needs":[{"period":"2025-06-30","report_type":"semi_annual"}]}',
+        }])],
+    ])
+    executed = []
+    qa = RagQA(store, ai, top_k=4, max_tool_calls=1,
+               tool_executor=lambda name, args: executed.append((name, args)) or "不应调用",
+               supplement_request_handler=lambda payload: None)
+
+    events = list(qa.answer_stream("2025 上半年情况？", tools=[SUPPLEMENT_REQUEST_TOOL]))
+
+    assert events[-1]["type"] == "supplement_request"
+    assert executed == []
+    assert not any(event["type"] == "tool_result" for event in events)
+    assert qa.max_tool_calls == 1  # 额度未被消耗或改写
+
+
+def test_rejected_supplement_request_keeps_tool_call_budget_usable(tmp_path, fake_embedder):
+    """被拒绝的补报请求也不占额度：随后的真实工具在 max_tool_calls=1 下仍可执行。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容X")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{
+            "id": "c1", "name": "request_missing_reports",
+            "arguments": '{"reason":"缺少半年报","needs":[]}',
+        }])],
+        [_tool_calls_event([{
+            "id": "c2", "name": "stock_prices", "arguments": '{"symbol":"600519"}',
+        }])],
+        [_done_event("基于工具数据的回答")],
+    ])
+    executed = []
+    qa = RagQA(store, ai, top_k=4, max_tool_calls=1,
+               tool_executor=lambda name, args: executed.append(name) or "价格 1 元",
+               supplement_request_handler=lambda payload: None)
+
+    events = list(qa.answer_stream("现在价格？", tools=[SUPPLEMENT_REQUEST_TOOL]))
+
+    assert executed == ["stock_prices"]
+    assert not any(event["type"] == "supplement_request" for event in events)
+    assert events[-1]["type"] == "done"

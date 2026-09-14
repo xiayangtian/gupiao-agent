@@ -204,3 +204,20 @@ def test_waiting_consent_run_with_supplement_summary_survives_reload(tmp_path):
     assert reloaded["messages"][1]["run"]["status"] == "waiting_consent"
     assert reloaded["messages"][1]["run"]["supplement"]["status"] == "proposed"
     assert reloaded["messages"][1]["run"]["supplement"]["candidates"][0]["code"] == "601288"
+
+
+def test_load_survives_non_mapping_supplements_field(tmp_path):
+    """supplements 不是对象时（旧版或损坏文件）不应影响会话读取。"""
+    path = tmp_path / "sessions.json"
+    path.write_text(
+        json.dumps({"sessions": [], "supplements": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    store = ChatStore(str(path))
+
+    assert store.list_sessions() == []
+    assert store.get_supplement("sup-1") is None
+    sid = store.create_session()["id"]
+    assert store.save_supplement(_supplement_request(sid))["session_id"] == sid
+    assert ChatStore(str(path)).get_supplement("sup-1")["session_id"] == sid

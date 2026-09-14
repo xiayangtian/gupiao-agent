@@ -186,6 +186,49 @@ def test_supplement_summary_rejects_unknown_candidate_keys_and_too_many_candidat
         })
 
 
+def test_supplement_summary_keeps_skipped_reports_and_resume_time():
+    run = _waiting_consent_run({
+        "status": "completed",
+        "limit": 5,
+        "ingested_report_ids": ["601288:2025-06-30:semi_annual"],
+        "skipped_report_ids": ["601288:2024-12-31:annual"],
+        "resumed_at": "2026-09-14T10:00:00",
+    })
+
+    restored = AnswerRun.from_dict(run.to_dict())
+
+    assert restored == run
+    assert restored.supplement["ingested_report_ids"] == ("601288:2025-06-30:semi_annual",)
+    assert restored.supplement["skipped_report_ids"] == ("601288:2024-12-31:annual",)
+    assert restored.supplement["resumed_at"] == "2026-09-14T10:00:00"
+    assert restored.supplement["resumed_at"] == run.supplement["resumed_at"]
+
+
+def test_supplement_summary_defaults_skipped_reports_and_resume_time():
+    run = _waiting_consent_run(_supplement_summary())
+    assert run.supplement["skipped_report_ids"] == ()
+    assert run.supplement["resumed_at"] == ""
+
+
+@pytest.mark.parametrize("bad", [
+    {"status": "completed", "resumed_at": "https://cninfo.example/x"},
+    {"status": "completed", "resumed_at": "/Users/x/reports/a.pdf"},
+    {"status": "completed", "resumed_at": "昨天"},
+    {"status": "completed", "skipped_report_ids": ["601288:2025-06-30:semi_annual"] * 6},
+    {"status": "completed", "ingested_report_ids": ["601288:2025-06-30:semi_annual"] * 6},
+    {"status": "completed", "skipped_report_ids": ["https://cninfo.example/x.pdf"]},
+])
+def test_supplement_summary_rejects_unsafe_resume_time_and_oversized_report_ids(bad):
+    with pytest.raises(ValueError):
+        _waiting_consent_run(bad)
+
+
+def test_answer_run_with_supplement_summary_stays_hashable():
+    run = _waiting_consent_run(_supplement_summary())
+    assert hash(run) == hash(_waiting_consent_run(_supplement_summary()))
+    assert run in {run}
+
+
 def test_answer_run_without_supplement_summary_still_reads():
     run = AnswerRun.from_dict({"content": "旧回答", "status": "completed"})
     assert run.supplement is None

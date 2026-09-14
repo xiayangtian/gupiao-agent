@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from math import isfinite
 from numbers import Real
 from typing import Any, ClassVar, Literal, Mapping, Sequence
@@ -29,7 +30,8 @@ _SUPPLEMENT_STATUSES = frozenset((
     "resuming", "completed", "expired", "failed",
 ))
 _SUPPLEMENT_KEYS = frozenset((
-    "status", "reason", "limit", "candidates", "ingested_report_ids", "failed",
+    "status", "reason", "limit", "candidates",
+    "ingested_report_ids", "skipped_report_ids", "resumed_at", "failed",
 ))
 _SUPPLEMENT_CANDIDATE_KEYS = frozenset((
     "id", "company", "code", "period", "report_type", "label", "source",
@@ -107,6 +109,26 @@ def _normalize_supplement_failure(value: Any) -> dict[str, str]:
     }
 
 
+def _normalize_supplement_report_ids(value: Any, name: str) -> tuple[str, ...]:
+    """补充报告身份列表：受控文本且不超过单次授权上限。"""
+    report_ids = tuple(
+        _safe_supplement_text(item, f"{name}[]") for item in _sequence(value, name)
+    )
+    if len(report_ids) > SUPPLEMENT_MAX_CANDIDATES:
+        raise ValueError(f"{name} must be at most {SUPPLEMENT_MAX_CANDIDATES}")
+    return report_ids
+
+
+def _supplement_timestamp(value: Any, name: str) -> str:
+    """可审计时间戳：非空 ISO 8601，且不得是 URL 或文件路径。"""
+    text = _safe_supplement_text(value, name)
+    try:
+        datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO 8601 timestamp") from exc
+    return text
+
+
 def _normalize_supplement(value: Any) -> dict[str, Any]:
     """校验并归一化 AnswerRun 的补充授权摘要，未知字段一律拒绝。"""
     data = _mapping(value, "supplement")
@@ -139,14 +161,20 @@ def _normalize_supplement(value: Any) -> dict[str, Any]:
             f"supplement candidates must be at most {SUPPLEMENT_MAX_CANDIDATES}"
         )
 
-    ingested = tuple(
-        _safe_supplement_text(item, "supplement ingested_report_ids[]")
-        for item in _sequence(data.get("ingested_report_ids", []), "supplement ingested_report_ids")
+    ingested = _normalize_supplement_report_ids(
+        data.get("ingested_report_ids", []), "supplement ingested_report_ids"
+    )
+    skipped = _normalize_supplement_report_ids(
+        data.get("skipped_report_ids", []), "supplement skipped_report_ids"
     )
     failed = tuple(
         _normalize_supplement_failure(item)
         for item in _sequence(data.get("failed", []), "supplement failed")
     )
+    raw_resumed_at = data.get("resumed_at", "")
+    resumed_at = ""
+    if raw_resumed_at not in (None, ""):
+        resumed_at = _supplement_timestamp(raw_resumed_at, "supplement resumed_at")
 
     return {
         "status": status,
@@ -154,6 +182,8 @@ def _normalize_supplement(value: Any) -> dict[str, Any]:
         "limit": limit,
         "candidates": candidates,
         "ingested_report_ids": ingested,
+        "skipped_report_ids": skipped,
+        "resumed_at": resumed_at,
         "failed": failed,
     }
 
@@ -165,6 +195,8 @@ def _supplement_to_json(supplement: Mapping[str, Any]) -> dict[str, Any]:
         "limit": supplement["limit"],
         "candidates": [dict(candidate) for candidate in supplement["candidates"]],
         "ingested_report_ids": list(supplement["ingested_report_ids"]),
+        "skipped_report_ids": list(supplement["skipped_report_ids"]),
+        "resumed_at": supplement["resumed_at"],
         "failed": [dict(item) for item in supplement["failed"]],
     }
 
@@ -595,7 +627,8 @@ class AnswerRun:
     model: str = ""
     legacy_evidence_unavailable: bool = False
     # 补充授权摘要：仅候选人可读字段与结果摘要，不含 URL、路径或模型原始参数。
-    supplement: Mapping[str, Any] | None = None
+    # 映射字段不参与哈希，AnswerRun 仍可用于集合与字典键。
+    supplement: Mapping[str, Any] | None = field(default=None, hash=False)
 
     def __post_init__(self) -> None:
         _string(self.content, "content", required=False)
