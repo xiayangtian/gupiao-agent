@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from hashlib import sha256
+import os
 from secrets import token_urlsafe
 from typing import Any, Callable, Literal, Mapping, Sequence
 
+from financial_report_fetcher.downloader import ReportDownloader
+from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
+from financial_report_fetcher.report_identity import build_report_filename, build_report_id
 from webapp.chat_models import Scope
 
 SupplementStatus = Literal[
@@ -312,3 +316,191 @@ class SupplementRegistry:
         transitioned = replace(request, status=status)
         self._requests[request.id] = transitioned
         return transitioned
+
+
+@dataclass(frozen=True)
+class ReportNeed:
+    """模型提出的披露需求；只保留期间和类型，不接受 URL、代码或文件路径。"""
+
+    period: str
+    report_type: str
+
+    def __post_init__(self) -> None:
+        _non_empty(self.period, "报告期")
+        if self.report_type not in {item.value for item in ReportType}:
+            raise ValueError("报告类型非法")
+        try:
+            date.fromisoformat(self.period)
+        except ValueError as exc:
+            raise ValueError("报告期必须是 ISO 日期") from exc
+
+    @classmethod
+    def from_value(cls, value: Mapping[str, Any] | "ReportNeed") -> "ReportNeed":
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise ValueError("报告需求必须是 JSON 对象")
+        return cls(
+            period=_non_empty(value.get("period"), "报告期"),
+            report_type=_non_empty(value.get("report_type"), "报告类型"),
+        )
+
+
+class SupplementCandidateResolver:
+    """将模型的受控披露需求解析为当前单公司范围内的下载候选。"""
+
+    def __init__(self, *, id_factory: Callable[[int], str] | None = None) -> None:
+        self._id_factory = id_factory or (lambda index: f"candidate-{token_urlsafe(12)}-{index}")
+
+    @staticmethod
+    def _report_id(report: ReportMeta) -> str:
+        return build_report_id(report.company_id, report.period, report.report_type)
+
+    @staticmethod
+    def _rank(report: ReportMeta, needs: Sequence[ReportNeed]) -> tuple[int, int, str]:
+        exact = any(
+            need.period == report.period.isoformat() and need.report_type == report.report_type.value
+            for need in needs
+        )
+        if exact:
+            tier = 0
+        elif report.report_type in (ReportType.ANNUAL, ReportType.SEMI_ANNUAL):
+            tier = 1
+        else:
+            tier = 2
+        return tier, -report.period.toordinal(), report.report_type.value
+
+    def resolve(
+        self,
+        scope: Scope,
+        needs: Sequence[Mapping[str, Any] | ReportNeed],
+        reports: Sequence[ReportMeta],
+        local_pdf_exists: Callable[[ReportMeta], bool],
+        indexed_report_ids: Callable[[], Sequence[str] | set[str]],
+    ) -> list[SupplementCandidate]:
+        if scope.mode != "company_only":
+            raise ValueError("仅 company_only 范围允许补充财报")
+        company = scope.companies[0]
+        normalized_needs = tuple(ReportNeed.from_value(need) for need in needs[:_MAX_CANDIDATES])
+        indexed = set(indexed_report_ids())
+        accepted: list[ReportMeta] = []
+        seen_report_ids: set[str] = set()
+        for report in reports:
+            if not isinstance(report, ReportMeta) or report.company_id != company.code:
+                continue
+            report_id = self._report_id(report)
+            if report_id in seen_report_ids or report_id in indexed:
+                continue
+            seen_report_ids.add(report_id)
+            if not report.download_url or local_pdf_exists(report):
+                continue
+            accepted.append(report)
+
+        candidates: list[SupplementCandidate] = []
+        for index, report in enumerate(sorted(accepted, key=lambda item: self._rank(item, normalized_needs))[:_MAX_CANDIDATES], start=1):
+            candidates.append(SupplementCandidate(
+                id=_non_empty(self._id_factory(index), "候选 ID"),
+                report_id=self._report_id(report),
+                code=company.code,
+                company=company.name,
+                period=report.period.isoformat(),
+                report_type=report.report_type.value,
+                source="巨潮资讯",
+            ))
+        return candidates
+
+
+@dataclass(frozen=True)
+class SupplementOutcome:
+    """下载和摄取的最小安全摘要，不保留 URL、路径或原始异常。"""
+
+    downloaded_report_ids: tuple[str, ...] = ()
+    ingested_report_ids: tuple[str, ...] = ()
+    skipped_report_ids: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, list[str]]:
+        return {
+            "downloaded_report_ids": list(self.downloaded_report_ids),
+            "ingested_report_ids": list(self.ingested_report_ids),
+            "skipped_report_ids": list(self.skipped_report_ids),
+            "failed": list(self.failed),
+        }
+
+
+class SupplementExecutor:
+    """仅在已授权请求上顺序下载并摄取；单项失败不影响其他候选。"""
+
+    def __init__(
+        self,
+        downloader: ReportDownloader,
+        ingestion_service: Any,
+        storage_dir: str,
+        reports_by_candidate: Mapping[str, ReportMeta],
+    ) -> None:
+        self._downloader = downloader
+        self._ingestion_service = ingestion_service
+        self._storage_dir = _non_empty(storage_dir, "报告目录")
+        self._reports_by_candidate = dict(reports_by_candidate)
+
+    @staticmethod
+    def _valid_pdf(path: str) -> bool:
+        try:
+            with open(path, "rb") as file:
+                return file.read(5) == b"%PDF-"
+        except OSError:
+            return False
+
+    def run(self, request: SupplementRequest) -> SupplementOutcome:
+        if not isinstance(request, SupplementRequest) or request.status != "approved" or not request.consumed_at:
+            raise PermissionError("仅已批准且已消费的补充请求可以下载")
+        if request.scope.mode != "company_only":
+            raise PermissionError("仅 company_only 范围允许下载")
+
+        company_code = request.scope.companies[0].code
+        downloaded: list[str] = []
+        ingested: list[str] = []
+        skipped: list[str] = []
+        failed: list[str] = []
+        candidate_by_id = {candidate.id: candidate for candidate in request.candidates}
+
+        for candidate_id in request.selected_ids:
+            candidate = candidate_by_id[candidate_id]
+            report = self._reports_by_candidate.get(candidate_id)
+            if report is None or candidate.code != company_code or report.company_id != company_code:
+                failed.append(candidate_id)
+                continue
+            report_id = build_report_id(report.company_id, report.period, report.report_type)
+            if report_id != candidate.report_id or not report.download_url:
+                failed.append(candidate_id)
+                continue
+            try:
+                status = self._downloader.download_one(report, self._storage_dir)
+            except Exception:
+                failed.append(candidate_id)
+                continue
+            if status == DownloadStatus.FAILED:
+                failed.append(candidate_id)
+                continue
+
+            path = os.path.join(self._storage_dir, build_report_filename(report))
+            if not self._valid_pdf(path):
+                failed.append(candidate_id)
+                continue
+            if status == DownloadStatus.SUCCESS:
+                downloaded.append(report_id)
+            else:
+                skipped.append(report_id)
+            try:
+                self._ingestion_service.auto_ingest_pdf(path)
+            except Exception:
+                failed.append(candidate_id)
+                continue
+            ingested.append(report_id)
+
+        return SupplementOutcome(
+            downloaded_report_ids=tuple(downloaded),
+            ingested_report_ids=tuple(ingested),
+            skipped_report_ids=tuple(skipped),
+            failed=tuple(failed),
+        )

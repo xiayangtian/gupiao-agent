@@ -1,8 +1,15 @@
+from datetime import date
+from pathlib import Path
+
 import pytest
 
+from financial_report_fetcher.downloader import ReportDownloader
+from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
 from webapp.chat_models import Scope
 from webapp.chat_supplement import (
     SupplementCandidate,
+    SupplementCandidateResolver,
+    SupplementExecutor,
     SupplementRegistry,
     SupplementRequest,
 )
@@ -125,3 +132,102 @@ def test_declined_or_expired_request_cannot_be_approved():
     expired_registry.transition("r1", "expired")
     with pytest.raises(ValueError, match="已过期"):
         expired_registry.approve("r1", "s1", ["c1"])
+
+
+def _meta(code, period, report_type, *, url="https://cninfo.example/report.pdf", company="农业银行"):
+    return ReportMeta(
+        company_id=code,
+        company_name=company,
+        period=date.fromisoformat(period),
+        report_type=ReportType(report_type),
+        download_url=url,
+        title=f"{company}{period}{report_type}",
+    )
+
+
+def test_resolver_limits_to_scope_company_filters_local_and_sorts_requested_period_first():
+    resolver = SupplementCandidateResolver(id_factory=lambda index: f"candidate-{index}")
+    reports = [
+        _meta("601288", "2025-12-31", "annual"),
+        _meta("601288", "2025-06-30", "semi_annual"),
+        _meta("601288", "2025-09-30", "quarterly"),
+        _meta("601288", "2024-12-31", "annual"),
+        _meta("601288", "2024-06-30", "semi_annual"),
+        _meta("601288", "2024-09-30", "quarterly"),
+        _meta("601288", "2023-12-31", "annual", url=""),
+        _meta("600000", "2025-06-30", "semi_annual", company="浦发银行"),
+        _meta("601288", "2025-12-31", "annual"),  # 重复 report_id
+    ]
+    candidates = resolver.resolve(
+        _company_scope(),
+        [{"period": "2025-06-30", "report_type": "semi_annual"}],
+        reports,
+        local_pdf_exists=lambda report: report.period == date(2024, 6, 30),
+        indexed_report_ids=lambda: {"601288:2025-09-30:quarterly"},
+    )
+
+    assert [candidate.report_id for candidate in candidates] == [
+        "601288:2025-06-30:semi_annual",
+        "601288:2025-12-31:annual",
+        "601288:2024-12-31:annual",
+        "601288:2024-09-30:quarterly",
+    ]
+    assert len(candidates) <= 5
+    assert all(candidate.code == "601288" for candidate in candidates)
+    assert all("url" not in candidate.to_dict() for candidate in candidates)
+
+
+def test_resolver_rejects_non_company_only_scope():
+    resolver = SupplementCandidateResolver()
+    with pytest.raises(ValueError, match="company_only"):
+        resolver.resolve(
+            Scope.whole_corpus(), [], [], lambda report: False, lambda: set()
+        )
+
+
+def test_executor_never_downloads_without_approved_request_and_only_resumes_ingested_ids(tmp_path):
+    class FakeDownloader:
+        def __init__(self):
+            self.calls = []
+
+        def download_one(self, report, storage_dir):
+            self.calls.append(report.company_id)
+            path = Path(storage_dir) / ReportDownloader.build_filename(report)
+            if report.company_id == "601288":
+                path.write_bytes(b"%PDF-1.7 valid")
+                return DownloadStatus.SUCCESS
+            return DownloadStatus.FAILED
+
+    class FakeIngestion:
+        def __init__(self):
+            self.paths = []
+
+        def auto_ingest_pdf(self, path):
+            self.paths.append(path)
+
+    candidates = (
+        SupplementCandidate("candidate-1", "601288:2025-06-30:semi_annual", "601288", "农业银行", "2025-06-30", "semi_annual", "巨潮资讯"),
+        SupplementCandidate("candidate-2", "600000:2025-06-30:semi_annual", "600000", "浦发银行", "2025-06-30", "semi_annual", "巨潮资讯"),
+    )
+    registry = SupplementRegistry(clock=lambda: "2026-09-14T10:00:00", id_factory=lambda: "r2")
+    request = registry.create("s1", "营收变化", _company_scope(), candidates)
+    reports = {
+        "candidate-1": _meta("601288", "2025-06-30", "semi_annual"),
+        "candidate-2": _meta("600000", "2025-06-30", "semi_annual", company="浦发银行"),
+    }
+    downloader = FakeDownloader()
+    ingestion = FakeIngestion()
+    executor = SupplementExecutor(downloader, ingestion, str(tmp_path), reports)
+
+    with pytest.raises(PermissionError, match="已批准"):
+        executor.run(request)
+    assert downloader.calls == []
+
+    approved = registry.approve("r2", "s1", ["candidate-1", "candidate-2"])
+    outcome = executor.run(approved)
+
+    assert outcome.downloaded_report_ids == ("601288:2025-06-30:semi_annual",)
+    assert outcome.ingested_report_ids == ("601288:2025-06-30:semi_annual",)
+    assert outcome.failed == ("candidate-2",)
+    assert len(ingestion.paths) == 1
+    assert "https://" not in str(outcome.to_dict())
