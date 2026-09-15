@@ -2459,6 +2459,121 @@ function parseSseFrame(frame) {
   return { event: event, data: data };
 }
 
+// 补充财报必须由用户显式勾选后才能授权；这里不保存 URL、路径或错误堆栈。
+function renderSupplementConsent(container, payload, handlers) {
+  if (!container || !payload) return null;
+  var selected = new Set();
+  var card = document.createElement('section');
+  card.className = 'chat-supplement-consent';
+  card.setAttribute('aria-live', 'polite');
+  card.setAttribute('aria-label', '补充财报授权');
+  var title = document.createElement('h3');
+  title.textContent = '需要补充财报原文';
+  var reason = document.createElement('p');
+  reason.className = 'chat-supplement-reason';
+  reason.textContent = payload.reason || '需要补充报告原文后才能继续回答。';
+  var hint = document.createElement('p');
+  hint.className = 'chat-supplement-hint';
+  hint.textContent = '请选择最多 ' + payload.limit + ' 份报告；未选择不会下载。';
+  var list = document.createElement('div');
+  list.className = 'chat-supplement-candidates';
+  (payload.candidates || []).forEach(function (candidate, index) {
+    var row = document.createElement('label');
+    row.className = 'chat-supplement-candidate';
+    var checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = false;
+    checkbox.value = candidate.id;
+    checkbox.setAttribute('aria-label', '选择 ' + (candidate.label || candidate.name || ('报告 ' + (index + 1))));
+    var text = document.createElement('span');
+    text.textContent = candidate.label || candidate.name || candidate.id;
+    checkbox.addEventListener('change', function () {
+      if (checkbox.checked) {
+        if (selected.size >= payload.limit) {
+          checkbox.checked = false;
+          return;
+        }
+        selected.add(candidate.id);
+      } else {
+        selected.delete(candidate.id);
+      }
+      approve.disabled = selected.size === 0;
+    });
+    row.appendChild(checkbox);
+    row.appendChild(text);
+    list.appendChild(row);
+  });
+  var actions = document.createElement('div');
+  actions.className = 'chat-supplement-actions';
+  var decline = document.createElement('button');
+  decline.type = 'button';
+  decline.className = 'btn chat-supplement-decline';
+  decline.textContent = '暂不补充';
+  var approve = document.createElement('button');
+  approve.type = 'button';
+  approve.className = 'btn primary chat-supplement-approve';
+  approve.textContent = '确认补充并继续';
+  approve.disabled = selected.size === 0;
+  var status = document.createElement('p');
+  status.className = 'chat-supplement-status';
+  status.setAttribute('role', 'status');
+  status.hidden = true;
+  function setBusy(busy, message) {
+    card.setAttribute('aria-busy', busy ? 'true' : 'false');
+    var checkboxes = list.querySelectorAll('input[type="checkbox"]');
+    for (var boxIndex = 0; boxIndex < checkboxes.length; boxIndex++) checkboxes[boxIndex].disabled = busy;
+    decline.disabled = busy;
+    approve.disabled = busy || selected.size === 0;
+    status.hidden = !message;
+    status.textContent = message || '';
+  }
+  function act(action) {
+    setBusy(true, action === 'approve' ? '正在下载并索引所选财报…' : '正在基于现有信息继续回答…');
+    var task = action === 'approve'
+      ? handlers.approve(Array.from(selected))
+      : handlers.decline();
+    Promise.resolve(task).catch(function () {
+      setBusy(false, '本次未补充成功，已基于现有信息回答');
+      if (handlers.error) handlers.error();
+    });
+  }
+  decline.addEventListener('click', function () { act('decline'); });
+  approve.addEventListener('click', function () { act('approve'); });
+  actions.appendChild(decline);
+  actions.appendChild(approve);
+  card.appendChild(title);
+  card.appendChild(reason);
+  card.appendChild(hint);
+  card.appendChild(list);
+  card.appendChild(actions);
+  card.appendChild(status);
+  container.appendChild(card);
+  scrollChatToBottom();
+  return { card: card, setBusy: setBusy, setStatus: function (message) { setBusy(true, message); } };
+}
+
+async function consumeSupplementStream(response, handlers) {
+  if (!response.ok || !response.body) throw new Error('补充请求失败');
+  var reader = response.body.getReader();
+  var decoder = new TextDecoder();
+  var buffer = '';
+  while (true) {
+    var chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    var frames = buffer.split('\n\n');
+    buffer = frames.pop();
+    for (var i = 0; i < frames.length; i++) {
+      var parsed = parseSseFrame(frames[i]);
+      if (parsed && handlers[parsed.event]) handlers[parsed.event](parsed.data);
+    }
+  }
+  if (buffer.trim()) {
+    var finalFrame = parseSseFrame(buffer.trim());
+    if (finalFrame && handlers[finalFrame.event]) handlers[finalFrame.event](finalFrame.data);
+  }
+}
+
 // 停止当前会话的流式生成（中断 SSE；后端会把已生成部分保存进历史）
 function stopChatStream() {
   var st = chatStreams[chatStreamKey()];
@@ -2558,6 +2673,50 @@ async function sendChatQA() {
   }
   input.value = '';
   await submitQuestion(q, key);
+}
+
+async function resolveSupplementConsent(supplementId, action, candidateIds, card) {
+  // decline 载荷刻意不含 candidate_ids；后端据此拒绝任何隐式选择。
+  var body = action === 'decline'
+    ? { session_id: chatSessionId, action: 'decline' }
+    : { session_id: chatSessionId, action: 'approve', candidate_ids: candidateIds };
+  var response = await fetch('/api/chat/supplements/' + encodeURIComponent(supplementId) + '/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  var answerText = '';
+  await consumeSupplementStream(response, {
+    session: function (data) {
+      if (data.session_id) chatSessionId = data.session_id;
+    },
+    supplement_download_started: function () {
+      card.setStatus('正在下载所选财报…');
+    },
+    supplement_downloaded: function () {
+      card.setStatus('财报已下载，正在准备索引…');
+    },
+    supplement_ingested: function () {
+      card.setStatus('财报已索引，正在恢复回答…');
+    },
+    supplement_failed: function () {
+      card.setStatus('部分补充未成功，正在基于现有信息继续回答…');
+    },
+    delta: function (data) {
+      answerText += data.text || '';
+    },
+    done: function (data) {
+      card.card.remove();
+      appendAssistantRun('#chat-history', { content: data.answer || answerText, run: data.run });
+      appendChatElapsed('#chat-history', data.elapsed_seconds);
+      appendAnalysisCitations('#chat-history', data.citations || []);
+      scrollChatToBottom();
+      loadChatSessions().then(function () { renderChatSessionList(); });
+    },
+    error: function () {
+      throw new Error('补充恢复失败');
+    },
+  });
 }
 
 async function submitQuestion(q, key) {
@@ -2725,6 +2884,33 @@ async function submitQuestion(q, key) {
           }
           if (thinkingEl) setThinkingText(thinkingEl, ok ? '已获取工具数据，正在整理回答…' : '工具获取失败，继续基于已有信息回答…');
           scrollChatToBottom();
+        }
+      } else if (parsed.event === 'supplement_needed') {
+        // 本轮到此等待明确授权：移除临时思考状态，绝不自动触发下载。
+        done = true;
+        st.finishedNormally = true;
+        if (parsed.data.session_id) chatSessionId = parsed.data.session_id;
+        if (isCurrentChatStream(key)) {
+          if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
+          if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
+          thinkingEl = null;
+          scopeEl = null;
+          var consent = renderSupplementConsent($('#chat-history'), parsed.data, {
+            approve: function (candidateIds) {
+              return resolveSupplementConsent(parsed.data.supplement_id, 'approve', candidateIds, consent);
+            },
+            decline: function () {
+              return resolveSupplementConsent(parsed.data.supplement_id, 'decline', [], consent);
+            },
+            error: function () {
+              if (consent.card.parentNode) consent.card.remove();
+              appendAssistantRun('#chat-history', {
+                content: '本次未补充成功，已基于现有信息回答',
+                run: { status: 'partial' },
+              });
+              scrollChatToBottom();
+            },
+          });
         }
       } else if (parsed.event === 'done') {
         done = true;
