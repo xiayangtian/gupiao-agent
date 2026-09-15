@@ -40,6 +40,21 @@ def test_chat_renderer_normalizes_html_sup_citations_to_markdown_labels():
     assert result == {"plain": "结论[1] 来自工具", "escaped": "结论[2] 来自网页"}
 
 
+def test_chat_renderer_removes_leaked_dsml_tool_call_markup_but_keeps_answer_text():
+    """模型把 DSML/XML 工具调用作为正文输出时，聊天不得展示原始标记。"""
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const raw = '先说明走势。<｜DSML｜ calls><｜DSML｜ invoke name="stock_prices">'
+          + '<｜DSML｜ parameter name="symbol" string="true">600900</｜DSML｜ parameter>'
+          + '</｜DSML｜ invoke></｜DSML｜ calls>再说明风险。';
+        console.log(JSON.stringify({{normalized: rendering.normalizeAssistantMarkdown(raw)}}));
+        """
+    )
+
+    assert result["normalized"] == "先说明走势。再说明风险。"
+
+
 def test_chat_renderer_keeps_only_web_source_citation_fields():
     """网页来源的展示数据不得携带用于模型核验的长摘要正文。"""
     result = _run_node(
