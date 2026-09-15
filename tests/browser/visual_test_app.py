@@ -27,6 +27,7 @@ import os
 import shutil
 import sys
 import tempfile
+from datetime import date
 
 import requests
 
@@ -36,6 +37,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import webapp.server as server  # noqa: E402  （必须先定位仓库根目录再导入）
+from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType  # noqa: E402
+from financial_report_fetcher.report_identity import build_report_filename  # noqa: E402
 from webapp.chat_store import ChatStore  # noqa: E402
 
 
@@ -87,6 +90,88 @@ class _FakeStockMcp:
         return json.dumps({})
 
 
+class _FixtureRequestLog:
+    """浏览器验收协作方的可读请求记录；只允许 fixture:// 身份。"""
+
+    def __init__(self) -> None:
+        self.path = os.environ.get("BROWSER_FIXTURE_LOG", "")
+        self.entries = []
+
+    def record(self, kind: str, url: str) -> None:
+        self.entries.append({"kind": kind, "url": url})
+        if self.path:
+            with open(self.path, "w", encoding="utf-8") as handle:
+                json.dump(self.entries, handle, ensure_ascii=False)
+
+
+class _SupplementDatasource:
+    """确定性的补报元数据替身，从不向 CNINFO 或其他网络发请求。"""
+
+    def __init__(self, request_log: _FixtureRequestLog) -> None:
+        self.request_log = request_log
+        self.reports = [
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.SEMI_ANNUAL, period=date(2025, 6, 30),
+                download_url="fixture://supplement/2025-semi.pdf",
+                title="农业银行2025年半年度报告", disclosure_date=date(2025, 8, 29),
+            ),
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.ANNUAL, period=date(2024, 12, 31),
+                download_url="fixture://supplement/2024-annual.pdf",
+                title="农业银行2024年年度报告", disclosure_date=date(2025, 3, 28),
+            ),
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.QUARTERLY, period=date(2024, 9, 30),
+                download_url="fixture://supplement/2024-q3.pdf",
+                title="农业银行2024年第三季度报告", disclosure_date=date(2024, 10, 30),
+            ),
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.SEMI_ANNUAL, period=date(2024, 6, 30),
+                download_url="fixture://supplement/2024-semi.pdf",
+                title="农业银行2024年半年度报告", disclosure_date=date(2024, 8, 29),
+            ),
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.ANNUAL, period=date(2023, 12, 31),
+                download_url="fixture://supplement/2023-annual.pdf",
+                title="农业银行2023年年度报告", disclosure_date=date(2024, 3, 28),
+            ),
+        ]
+
+    def fetch_reports(self, **kwargs):
+        self.request_log.record("candidate_metadata", "fixture://supplement/candidates")
+        return list(self.reports)
+
+
+class _SupplementDownloader:
+    """只写最小本地 PDF 的下载替身；记录调用而绝不读取 report.download_url。"""
+
+    def __init__(self, request_log: _FixtureRequestLog) -> None:
+        self.request_log = request_log
+
+    def download_one(self, report, storage_dir):
+        self.request_log.record("download", "fixture://supplement/download")
+        os.makedirs(storage_dir, exist_ok=True)
+        with open(os.path.join(storage_dir, build_report_filename(report)), "wb") as handle:
+            handle.write(_MINIMAL_PDF)
+        return DownloadStatus.SUCCESS
+
+
+class _SupplementIngestion:
+    """不建立真实 RAG 索引的 PDF 摄取替身。"""
+
+    def __init__(self, request_log: _FixtureRequestLog) -> None:
+        self.request_log = request_log
+
+    def auto_ingest_pdf(self, pdf_path):
+        self.request_log.record("ingest", "fixture://supplement/ingest")
+        return True
+
+
 class _FakeRagQA:
     """可控 RAG 问答替身：产出确定性的 Scope 证据/网页来源/停止运行事件。
 
@@ -105,6 +190,33 @@ class _FakeRagQA:
         scope=None,
     ):
         question = str(question or "").strip()
+        if "补报验收" in question and not getattr(self, "_supplement_requested", False):
+            self._supplement_requested = True
+            yield {
+                "type": "supplement_request",
+                "reason": "需要补充财报原文以核对经营现金流。",
+                "needs": [{"period": "2025-06-30", "report_type": "semi_annual"}],
+            }
+            return
+        if "补报验收" in question:
+            supplemented = "601288:2025-06-30:semi_annual" in tuple(getattr(scope, "report_ids", ()) or ())
+            answer = (
+                "已基于补充财报原文恢复回答。"
+                if supplemented else "未补充财报，已基于现有信息回答。"
+            )
+            yield {"type": "delta", "text": answer}
+            yield {
+                "type": "done", "answer": answer,
+                "citations": ([{
+                    "source": "pdf", "report_id": "601288:2025-06-30:semi_annual",
+                    "section": "现金流量表", "page": 40,
+                    "snippet": "补充财报原文已索引",
+                }] if supplemented else []),
+                "web_sources": [], "tools_used": [],
+                "retrieval_report_ids": (["601288:2025-06-30:semi_annual"] if supplemented else []),
+                "retrieval_degraded": False, "model": "browser-acceptance-fake",
+            }
+            return
         if question.endswith("停止"):
             yield {"type": "delta", "text": "经营活动现金流量净额为 -621.69 亿元"}
             yield {"type": "delta", "text": "（最后一步尚未完成）"}
@@ -148,13 +260,17 @@ def build_app():
     with open(os.path.join(reports_dir, FIXTURE_PDF_FILENAME), "wb") as handle:
         handle.write(_MINIMAL_PDF)
 
-    server.rag_service = None                       # 不触发真实 RAG 摄取
+    request_log = _FixtureRequestLog()
     server.rag_store = _FakeRagStore()              # 固定本地报告身份
     server.rag_qa = _FakeRagQA()                    # 可控 answer_stream
     server.stock_index = _FakeStockIndex()          # 固定公司名
     server.stock_mcp = _FakeStockMcp()              # 固定行业分类
     server.ai_client.api_key = "browser-acceptance"  # _require_ai 通过；fake 不真正调模型
-    server.datasource = _OfflineDatasource()
+    server.datasource = _SupplementDatasource(request_log)
+    server.downloader = _SupplementDownloader(request_log)
+    server.rag_service = _SupplementIngestion(request_log)
+    server.supplement_registry = server.SupplementRegistry()
+    server._supplement_reports = {}
     server.REPORTS_DIR = reports_dir
     server.ANALYSIS_DIR = analysis_dir
     server.chat_store = ChatStore(os.path.join(tmp_dir, "chat_sessions.json"))
