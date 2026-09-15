@@ -682,6 +682,34 @@ class TestChat:
         history_arg = env["fake_analyzer"].qa.call_args.kwargs["history"]
         assert len(history_arg) == 2
 
+    def test_report_chat_rag_fallback_log_is_redacted_and_report_correlated(self, client, env, monkeypatch, caplog):
+        """旧单报告问答的 RAG 回退日志可按报告定位，且不泄露用户问题。"""
+        secret_question = "仅用于旧问答日志泄露测试的用户问题"
+
+        class BrokenRagQA:
+            def try_answer_report(self, *args, **kwargs):
+                raise RuntimeError(secret_question)
+
+        monkeypatch.setattr(server, "rag_qa", BrokenRagQA())
+        caplog.set_level(logging.INFO, logger=server.__name__)
+        response = client.post(
+            "/api/reports/600900/2025-12-31/chat",
+            json={"question": secret_question},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["answer"] == "测试 AI 回答"
+        assert secret_question not in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "chat_rag_fallback" in message
+            and "report_code=600900" in message
+            and "report_period=2025-12-31" in message
+            and "RuntimeError" in message
+            for message in messages
+        )
+
     def test_chat_requires_ai_key(self, client, env):
         env["fake_ai"].api_key = ""
         r = client.post(
@@ -1441,6 +1469,8 @@ class TestChatSessionsApi:
 
         assert error["run"]["status"] == "failed"
         assert run_id
+        assert error["error"] == f"流式问答失败，请重试（诊断 ID：{run_id}）"
+        assert secret_question not in error["error"]
         assert secret_question not in caplog.text
         assert all(record.exc_info is None for record in caplog.records), "诊断日志不得附带 traceback"
         messages = [record.getMessage() for record in caplog.records]
