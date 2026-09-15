@@ -110,6 +110,7 @@
 
 - `6276701`：可信问答 M1，加入范围、证据包、运行状态和持久化。
 - `60f281c`：紧凑证据与来源展示；新增折叠、去重、三页阈值和无头浏览器回归。
+- `b1cd505`：过滤模型误写进正文的 DSML 工具调用标记，保留其余回答文字。
 - 后续可信 Agent M2–M4 尚未实现；状态以[设计台账](superpowers/DESIGN-REGISTRY.md#trusted-chat-agent)为准。
 
 <a id="market-mcp"></a>
