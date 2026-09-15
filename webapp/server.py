@@ -1362,7 +1362,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         return
                     _safe_put(evt)
             except Exception as exc:
-                logger.exception("流式问答生产失败")
+                logger.exception("chat_run_producer_failed run_id=%s", run_id)
                 if not stop_producer.is_set():
                     _safe_put({"type": "error", "error": f"流式问答失败：{exc}"})
             finally:
@@ -1404,9 +1404,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             run = _make_run(status, content)
             chat_store.append_turn(sid, question=body.question, run=run)
             saved = True
+            logger.info("chat_run_finished run_id=%s status=%s", run_id, status)
             return run
 
         try:
+            logger.info("chat_run_started run_id=%s", run_id)
             yield _sse("session", {"session_id": sid})
             yield _sse("scope_resolved", {"scope": scope.to_dict()})
             yield _sse("run_started", {"run_id": run_id})
@@ -1520,7 +1522,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     })
                     return
         except Exception as exc:
-            logger.exception("流式问答失败")
+            logger.exception("chat_run_failed run_id=%s", run_id)
             if not saved:
                 _persist("failed", "".join(answer_parts).strip())
             yield _sse("error", {

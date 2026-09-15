@@ -314,7 +314,7 @@ def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
         const stopped = rendering.renderRunStatus({{status: 'stopped'}});
         const partial = rendering.renderRunStatus({{status: 'partial'}});
         const failed = rendering.renderRunStatus({{status: 'failed'}});
-        const completed = rendering.renderRunStatus({{status: 'completed'}});
+        const completed = rendering.renderRunStatus({{status: 'completed', id: 'run-debug-123'}});
         const legacy = rendering.renderRunStatus({{status: 'completed', legacy_evidence_unavailable: true}});
         console.log(JSON.stringify({{stopped, partial, failed, completed, legacy}}));
         """
@@ -329,6 +329,9 @@ def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
     assert "失败" in result["failed"]
     assert "重新生成" in result["failed"]
     assert "已完成" in result["completed"]
+    assert "诊断 ID：<code>run-debug-123</code>" in result["completed"]
+    assert 'data-chat-action="copy-run-id"' in result["completed"]
+    assert 'data-chat-run-id="run-debug-123"' in result["completed"]
     assert "重新生成" not in result["completed"]
     assert "历史回答，未保留证据包" in result["legacy"]
 

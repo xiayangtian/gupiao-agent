@@ -280,6 +280,13 @@
       html += '<button type="button" class="chat-run-action chat-run-regenerate"'
         + ' data-chat-action="regenerate">重新生成</button>';
     }
+    var runId = String(run.id || '');
+    if (runId) {
+      html += '<span class="chat-run-diagnostic">诊断 ID：<code>' + escapeHtml(runId) + '</code></span>'
+        + '<button type="button" class="chat-run-action chat-run-copy-id"'
+        + ' data-chat-action="copy-run-id" data-chat-run-id="' + escapeHtml(runId) + '"'
+        + ' aria-label="复制诊断 ID" title="复制诊断 ID">复制</button>';
+    }
     return html + '</div>';
   }
 

@@ -1,6 +1,7 @@
 """webapp.server API 测试（TestClient + monkeypatch 替换模块级组件）"""
 
 import json
+import logging
 import os
 import threading
 import time
@@ -1345,7 +1346,7 @@ class TestChatSessionsApi:
         assert by_id[empty["id"]]["message_count"] == 0
         assert sorted(s["message_count"] for s in sessions) == [0, 2]
 
-    def test_chat_stream_sse_and_session_persist(self, client, env, monkeypatch, tmp_path):
+    def test_chat_stream_sse_and_session_persist(self, client, env, monkeypatch, tmp_path, caplog):
         """流式端点：SSE 事件含 session/delta/done；会话消息持久化"""
         from webapp.chat_store import ChatStore
 
@@ -1361,6 +1362,7 @@ class TestChatSessionsApi:
                        "usage": {"total_tokens": 5}}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
+        caplog.set_level(logging.INFO, logger=server.__name__)
         r = client.post("/api/chat/stream", json={"question": "营收如何？"})
         assert r.status_code == 200
         body = r.text
@@ -1370,6 +1372,10 @@ class TestChatSessionsApi:
         assert "event: done" in body
         done_data = json.loads(body.split("event: done\ndata: ", 1)[1].split("\n\n", 1)[0])
         assert done_data["elapsed_seconds"] >= 0
+        run_id = done_data["run"]["id"]
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("chat_run_started" in message and run_id in message for message in messages)
+        assert any("chat_run_finished" in message and run_id in message and "completed" in message for message in messages)
         # 会话已持久化（user + assistant）
         sessions = store.list_sessions()
         assert len(sessions) == 1

@@ -2471,6 +2471,21 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .chat-run-status-failed .chat-run-status-label { color: var(--danger); }
 .chat-run-status-legacy .chat-run-status-label { color: var(--text-muted); }
 
+.chat-run-diagnostic {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.chat-run-diagnostic code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 .chat-run-action {
   padding: 3px 10px;
   font-size: 12px;
