@@ -112,6 +112,7 @@
 - `60f281c`：紧凑证据与来源展示；新增折叠、去重、三页阈值和无头浏览器回归。
 - `b1cd505`：过滤模型误写进正文的 DSML 工具调用标记，保留其余回答文字。
 - `9e9f2ff`：兼容真实提供方的双分隔符 `｜｜DSML｜｜` 格式，并以现场结构回归覆盖。
+- `64d62b9`：复用 `AnswerRun.id` 作为可复制诊断 ID，并以该 ID 关联问答开始/终态日志。
 - 后续可信 Agent M2–M4 尚未实现；状态以[设计台账](superpowers/DESIGN-REGISTRY.md#trusted-chat-agent)为准。
 
 <a id="market-mcp"></a>
