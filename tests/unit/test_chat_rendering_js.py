@@ -311,9 +311,9 @@ def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
     result = _run_node(
         f"""
         const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
-        const stopped = rendering.renderRunStatus({{status: 'stopped'}});
-        const partial = rendering.renderRunStatus({{status: 'partial'}});
-        const failed = rendering.renderRunStatus({{status: 'failed'}});
+        const stopped = rendering.renderRunStatus({{status: 'stopped', id: 'run-stopped'}});
+        const partial = rendering.renderRunStatus({{status: 'partial', id: 'run-partial'}});
+        const failed = rendering.renderRunStatus({{status: 'failed', id: 'run-failed'}});
         const completed = rendering.renderRunStatus({{status: 'completed', id: 'run-debug-123'}});
         const legacy = rendering.renderRunStatus({{status: 'completed', legacy_evidence_unavailable: true}});
         console.log(JSON.stringify({{stopped, partial, failed, completed, legacy}}));
@@ -321,12 +321,16 @@ def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
     )
 
     assert "已停止" in result["stopped"]
+    assert "诊断 ID：<code>run-stopped</code>" in result["stopped"]
+    assert 'data-chat-action="copy-run-id"' in result["stopped"]
     assert "重新生成" in result["stopped"]
     assert 'data-chat-action="continue"' in result["stopped"]
     assert "disabled" in result["stopped"]
     assert "部分完成" in result["partial"]
+    assert "诊断 ID：<code>run-partial</code>" in result["partial"]
     assert "重新生成" in result["partial"]
     assert "失败" in result["failed"]
+    assert "诊断 ID：<code>run-failed</code>" in result["failed"]
     assert "重新生成" in result["failed"]
     assert "已完成" in result["completed"]
     assert "诊断 ID：<code>run-debug-123</code>" in result["completed"]

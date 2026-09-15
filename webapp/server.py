@@ -1362,7 +1362,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         return
                     _safe_put(evt)
             except Exception as exc:
-                logger.exception("chat_run_producer_failed run_id=%s", run_id)
+                logger.warning("chat_run_producer_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
                 if not stop_producer.is_set():
                     _safe_put({"type": "error", "error": f"流式问答失败：{exc}"})
             finally:
@@ -1522,7 +1522,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     })
                     return
         except Exception as exc:
-            logger.exception("chat_run_failed run_id=%s", run_id)
+            logger.error("chat_run_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
             if not saved:
                 _persist("failed", "".join(answer_parts).strip())
             yield _sse("error", {

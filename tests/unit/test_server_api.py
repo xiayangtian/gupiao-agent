@@ -1389,6 +1389,33 @@ class TestChatSessionsApi:
         assert detail["messages"][1]["run"]["scope"]["mode"] == "whole_corpus"
         assert detail["messages"][1]["run"]["artifacts"] == []
 
+    def test_chat_stream_failure_logs_run_id_without_question_or_traceback(self, client, env, monkeypatch, tmp_path, caplog):
+        """诊断日志只保留 run_id/异常类型，绝不写入问题正文或 traceback。"""
+        from webapp.chat_store import ChatStore
+
+        secret_question = "仅用于日志泄露测试的用户问题"
+        store = ChatStore(str(tmp_path / "sessions.json"))
+        monkeypatch.setattr(server, "chat_store", store)
+
+        class FakeRagQA:
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+                raise RuntimeError(question)
+                yield  # pragma: no cover - 保持为生成器
+
+        monkeypatch.setattr(server, "rag_qa", FakeRagQA())
+        caplog.set_level(logging.INFO, logger=server.__name__)
+        response = client.post("/api/chat/stream", json={"question": secret_question})
+        events = _read_sse(response)
+        error = next(data for event, data in events if event == "error")
+        run_id = error["run"]["id"]
+
+        assert error["run"]["status"] == "failed"
+        assert run_id
+        assert secret_question not in caplog.text
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("chat_run_producer_failed" in message and run_id in message and "RuntimeError" in message for message in messages)
+        assert any("chat_run_finished" in message and run_id in message and "failed" in message for message in messages)
+
     def test_chat_stream_never_exposes_model_reasoning(self, client, env, monkeypatch, tmp_path):
         """SSE 只发送回答内容与可解释工具阶段，不发送模型私有推理。"""
         from webapp.chat_store import ChatStore
