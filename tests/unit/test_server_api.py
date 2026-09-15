@@ -2255,10 +2255,12 @@ def _supplement_meta(period, report_type):
 class _SupplementRagQA:
     """首轮提交受控补报需求；恢复轮产出普通回答，并记录每次调用的范围。"""
 
-    def __init__(self, needs=None, answer="补充后回答", handler=None, resume_error=""):
+    def __init__(self, needs=None, answer="补充后回答", handler=None, resume_error="",
+                 resume_empty=False):
         self.answer = answer
         self.handler = handler
         self.resume_error = resume_error
+        self.resume_empty = resume_empty
         self.handler_accepted = None
         self.needs = list(needs) if needs is not None else [
             {"period": "2025-06-30", "report_type": "semi_annual"},
@@ -2287,6 +2289,9 @@ class _SupplementRagQA:
             return
         if self.resume_error:
             yield {"type": "error", "error": self.resume_error}
+            return
+        if self.resume_empty:
+            yield {"type": "empty"}
             return
         yield {"type": "delta", "text": self.answer, "reasoning": ""}
         yield {"type": "done", "answer": self.answer, "reasoning": "",
@@ -2384,6 +2389,13 @@ def _resolve_supplement(client, supplement_id, body):
     return _read_sse(client.post(
         f"/api/chat/supplements/{supplement_id}/resolve", json=body,
     ))
+
+
+def _ask_in_same_session(client, session_id, question):
+    """在同一会话继续提问；授权卡绑定的是提出问题的那次问答。"""
+    return _read_sse(client.post("/api/chat/stream", json={
+        "session_id": session_id, "question": question,
+    }))
 
 
 def _candidate_ids(payload):
@@ -2534,6 +2546,88 @@ class TestChatSupplementApi:
 
         assert response.status_code == 422
         assert supplement_env["downloader"].calls == []
+
+    def test_approve_rejects_question_changed_after_card_was_proposed(
+        self, client, supplement_env,
+    ):
+        """授权只对提出问题的那次问答有效：期间再提问则拒绝，且不下载、不消费授权。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        _ask_in_same_session(client, session_id, "600519 2024 年报的分红情况？")
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": session_id, "action": "approve",
+                  "candidate_ids": _candidate_ids(needed)},
+        )
+
+        assert response.status_code == 409
+        assert supplement_env["downloader"].calls == []
+        assert supplement_env["ingestion"].calls == []
+        stored = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored["status"] == "proposed"
+        assert stored["consumed_at"] == ""
+        assert server.supplement_registry.get(needed["supplement_id"]).status == "proposed"
+
+        # 回到原问题后授权仍可正常使用，证明上一步确实没有消费授权。
+        _ask_in_same_session(client, session_id, _supplement_question()["question"])
+        ok = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": session_id, "action": "approve",
+                  "candidate_ids": _candidate_ids(needed)},
+        )
+        assert ok.status_code == 200
+        assert supplement_env["downloader"].calls == [_SUPPLEMENT_REQUESTED]
+
+    def test_decline_also_requires_the_original_question(self, client, supplement_env):
+        """拒绝同样不能跨问题复用授权；校验必须在状态机之前。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        _ask_in_same_session(client, session_id, "600519 2024 年报的分红情况？")
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": session_id, "action": "decline"},
+        )
+
+        assert response.status_code == 409
+        assert supplement_env["downloader"].calls == []
+        stored = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored["status"] == "proposed"
+
+    def test_identical_question_keeps_card_approvable(self, client, supplement_env):
+        """同一问题（含首尾空白）沿用同一摘要归一化，授权行为不变。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        _ask_in_same_session(client, session_id, f"  {_supplement_question()['question']}  ")
+
+        events = _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": session_id, "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        assert supplement_env["downloader"].calls == [_SUPPLEMENT_REQUESTED]
+        assert _event(events, "done")["run"]["supplement"]["status"] == "completed"
+
+    def test_empty_resume_advances_registry_to_completed(self, client, supplement_env):
+        """摄取成功但检索为空：登记表推进到 completed，与运行摘要保持一致。"""
+        _, needed = _propose_supplement(client)
+        supplement_env["rag"].resume_empty = True
+
+        events = _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": supplement_env["store"].list_sessions()[0]["id"],
+            "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        assert [name for name, _ in events][-1] == "done"
+        done = _event(events, "done")
+        assert done["run"]["status"] == "partial"
+        assert done["run"]["supplement"]["status"] == "completed"
+        assert done["run"]["supplement"]["ingested_report_ids"] == [_SUPPLEMENT_REQUESTED]
+        assert server.supplement_registry.get(needed["supplement_id"]).status == "completed"
+        stored = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored["status"] == "completed"
 
     def test_partial_failure_resumes_with_only_ingested_report_ids(
         self, client, supplement_env, monkeypatch,

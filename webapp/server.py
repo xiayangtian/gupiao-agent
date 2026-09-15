@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -1592,6 +1592,21 @@ def _last_user_question(session: Dict[str, Any]) -> str:
     return ""
 
 
+def _supplement_question_matches(record: Mapping[str, Any], question: str) -> bool:
+    """授权只能恢复到提出问题的那次问答。
+
+    复用登记表创建授权时的同一摘要算法（同一归一化）；摘要缺失或比对失败一律
+    视为不匹配，由调用方 fail-closed 拒绝。
+    """
+    stored = str(record.get("question_digest") or "")
+    if not stored:
+        return False
+    try:
+        return SupplementRegistry._digest(question) == stored
+    except ValueError:
+        return False
+
+
 def _run_supplement_executor(
     supplement_id: str, pending: SupplementRequest,
 ) -> SupplementOutcome:
@@ -1995,6 +2010,10 @@ async def resolve_chat_supplement(
     question = _last_user_question(session)
     if not question.strip():
         raise HTTPException(409, "会话中找不到原问题，无法恢复回答")
+    if not _supplement_question_matches(record, question):
+        # 提出问题后又问了别的（会话末条用户消息已被替换），或摘要缺失：
+        # fail-closed 拒绝，绝不触碰登记表、下载器与执行器。
+        raise HTTPException(409, "补充请求与当前问题不匹配，请重新提问后再补充")
 
     try:
         if body.action == "decline":
@@ -2129,7 +2148,8 @@ async def resolve_chat_supplement(
                 evt = await pump.queue.get()
                 if evt is pump.sentinel:
                     break
-                # 客户端已断开（点击「停止」）：保留已产出部分
+                # 客户端已断开（点击「停止」）：保留已产出部分；授权已一次性消费，
+                # 登记表停在此后的状态，断开也不能重放。
                 if await request.is_disconnected():
                     break
                 for frame in _relay_rag_event(evt, state, normalizer):
@@ -2142,6 +2162,10 @@ async def resolve_chat_supplement(
                         if body.action == "approve" and not ingested
                         else "知识库中未检索到相关内容，请补充更多报告或更换问法。"
                     )
+                    if supplement_status == "completed":
+                        # 已摄取完成但没有可用答题证据：登记表同步推进到 completed，
+                        # 避免停在 resuming 与运行摘要不一致。
+                        _advance("completed")
                     run = _persist("partial", answer)
                     yield _sse("done", {
                         "answer": answer,
@@ -2183,6 +2207,9 @@ async def resolve_chat_supplement(
             })
         finally:
             pump.stop()
+            # 未正常完成（停止/断开/没有 done）：保存为 stopped，不伪装完整。
+            # 断开时登记表停留在 resuming/failed，绝不回到 proposed：授权已一次性
+            # 消费，断开也不能重放或重新下载。
             if not saved:
                 _persist("stopped", "".join(state.answer_parts).strip())
 
