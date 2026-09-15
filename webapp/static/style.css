@@ -2444,6 +2444,30 @@ input, select, button { font-family: inherit; font-size: inherit; }
   gap: var(--space-xs);
 }
 
+.chat-supplement-summary {
+  align-self: flex-start;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  font-size: 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-light);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.chat-supplement-summary p { margin: 0; }
+.chat-supplement-summary-head { color: var(--text-primary); font-weight: 600; }
+.chat-supplement-summary-periods,
+.chat-supplement-summary-skipped { color: var(--text-secondary); margin-top: 2px !important; }
+.chat-supplement-summary-failures {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+  color: var(--text-secondary);
+}
+.chat-supplement-summary-failures li { overflow-wrap: anywhere; }
+
 .chat-artifacts {
   align-self: flex-start;
   max-width: 92%;

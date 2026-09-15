@@ -3060,6 +3060,47 @@ function appendChatElapsed(sel, elapsedSeconds) {
 
 // ── 可信回答块：范围首部 + 正文 + 证据/来源 + 运行状态，统一由 ChatRendering 渲染 ──
 
+// 补充财报摘要：只渲染服务端持久化的 run.supplement，全部文本用 textContent 写入。
+function appendSupplementSummary(box, run) {
+  var rendering = window.ChatRendering;
+  if (!box || !rendering || !rendering.supplementSummaryView) return;
+  var view = rendering.supplementSummaryView(run);
+  if (!view || !view.headline) return;
+  var section = document.createElement('section');
+  section.className = 'chat-supplement-summary';
+  section.setAttribute('role', 'status');
+  section.setAttribute('aria-live', 'polite');
+  var head = document.createElement('p');
+  head.className = 'chat-supplement-summary-head';
+  head.textContent = view.headline;
+  section.appendChild(head);
+  if (view.periods && view.periods.length) {
+    var periods = document.createElement('p');
+    periods.className = 'chat-supplement-summary-periods';
+    periods.textContent = (view.waiting ? '待补充报告：' : '补充报告：') + view.periods.join('、');
+    section.appendChild(periods);
+  }
+  if (view.skippedCount) {
+    var skipped = document.createElement('p');
+    skipped.className = 'chat-supplement-summary-skipped';
+    skipped.textContent = '另有 ' + view.skippedCount + ' 份报告已存在，未重复下载';
+    section.appendChild(skipped);
+  }
+  if (view.failures && view.failures.length) {
+    var list = document.createElement('ul');
+    list.className = 'chat-supplement-summary-failures';
+    list.setAttribute('aria-label', '未能补充的财报');
+    view.failures.forEach(function (item) {
+      var li = document.createElement('li');
+      var who = [item.company, item.period].filter(Boolean).join(' ');
+      li.textContent = (who ? who + '：' : '') + item.reason;
+      list.appendChild(li);
+    });
+    section.appendChild(list);
+  }
+  box.appendChild(section);
+}
+
 function appendAssistantRun(sel, message) {
   var box = $(sel);
   if (!box) return;
@@ -3078,12 +3119,14 @@ function appendAssistantRun(sel, message) {
   if (rendering) {
     var artifactsHtml = rendering.renderRunArtifacts(run);
     if (artifactsHtml) parts.push(artifactsHtml);
-    var statusHtml = rendering.renderRunStatus(run);
-    if (statusHtml) parts.push(statusHtml);
   }
+  var statusHtml = rendering ? rendering.renderRunStatus(run) : '';
   var wrapper = document.createElement('div');
   wrapper.className = 'chat-run';
   wrapper.innerHTML = parts.join('');
+  // 补充摘要紧跟证据之后、运行状态之前，重载历史与实时完成走同一条路径。
+  appendSupplementSummary(wrapper, run);
+  if (statusHtml) wrapper.insertAdjacentHTML('beforeend', statusHtml);
   box.appendChild(wrapper);
   box.scrollTop = box.scrollHeight;
 }

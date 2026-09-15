@@ -85,6 +85,106 @@
     return escapeHtml(name || code) + (code ? '（' + escapeHtml(code) + '）' : '');
   }
 
+  // 补充授权状态：等待类状态不渲染任何“确认”按钮，重载后无法再授权。
+  var SUPPLEMENT_WAITING_STATUSES = {
+    proposed: true, approved: true, downloading: true, ingesting: true, resuming: true,
+  };
+  // 失败原因只暴露受控分类，绝不展示原始错误码、URL 或堆栈。
+  var SUPPLEMENT_FAILURE_REASONS = { download_failed: '下载失败', ingest_failed: '索引失败' };
+
+  function supplementPeriodLabel(entry) {
+    if (!entry || typeof entry !== 'object') return '';
+    var label = String(entry.label || '');
+    if (label) return label;
+    var reportId = String(entry.report_id || '');
+    var parts = reportId.split(':');
+    if (parts.length < 3) return '';
+    var year = parts[1].slice(0, 4);
+    var typeLabel = PERIOD_TYPE_LABELS[parts[2]];
+    return (year && typeLabel) ? year + ' ' + typeLabel : '';
+  }
+
+  function uniqueLabels(labels) {
+    var seen = {};
+    var result = [];
+    labels.forEach(function (label) {
+      if (!label || seen[label]) return;
+      seen[label] = true;
+      result.push(label);
+    });
+    return result;
+  }
+
+  /* 把已持久化的 run.supplement 摘要转成可渲染的数据；无法诚实表达时返回 null。
+
+  只使用服务端控白的摘要字段（状态/候选身份/已摄取报告 id/受控失败分类），
+  不引用模型正文，也不回传候选 id、报告 id、URL 或异常文本。
+  */
+  function supplementSummaryView(run) {
+    if (!run || typeof run !== 'object') return null;
+    var supplement = run.supplement;
+    if (!supplement || typeof supplement !== 'object' || Array.isArray(supplement)) return null;
+    var status = String(supplement.status || '');
+    if (!status) return null;
+
+    var candidates = Array.isArray(supplement.candidates) ? supplement.candidates : [];
+    var byCandidateId = {};
+    candidates.forEach(function (candidate) {
+      if (!candidate || typeof candidate !== 'object') return;
+      byCandidateId[String(candidate.id || '')] = candidate;
+    });
+    var waiting = !!SUPPLEMENT_WAITING_STATUSES[status];
+    var periods;
+    if (waiting) {
+      periods = uniqueLabels(candidates.map(supplementPeriodLabel));
+    } else {
+      var ingested = Array.isArray(supplement.ingested_report_ids)
+        ? supplement.ingested_report_ids : [];
+      periods = uniqueLabels(ingested.map(function (reportId) {
+        return supplementPeriodLabel({ report_id: reportId });
+      }));
+    }
+
+    var failures = [];
+    (Array.isArray(supplement.failed) ? supplement.failed : []).forEach(function (item) {
+      if (!item || typeof item !== 'object') return;
+      var candidate = byCandidateId[String(item.candidate_id || '')] || {};
+      var entry = { reason: SUPPLEMENT_FAILURE_REASONS[String(item.reason || '')] || '补充未成功' };
+      var company = String(candidate.company || '');
+      var period = supplementPeriodLabel(candidate);
+      if (company) entry.company = company;
+      if (period) entry.period = period;
+      failures.push(entry);
+    });
+
+    var headline;
+    if (waiting) {
+      headline = status === 'proposed' ? '等待你确认是否补充以下财报' : '正在补充财报原文';
+    } else if (status === 'completed') {
+      headline = periods.length
+        ? '本次经授权补充 ' + periods.length + ' 份财报'
+        : '本次补充未取得可核验的财报原文';
+    } else if (status === 'declined') {
+      headline = '本次未补充财报，已基于现有信息回答';
+    } else if (status === 'expired') {
+      headline = '本次补充授权已过期，已基于现有信息回答';
+    } else if (status === 'failed') {
+      headline = '本次补充未成功，已基于现有信息回答';
+    } else {
+      return null;
+    }
+
+    return {
+      status: status,
+      waiting: waiting,
+      headline: headline,
+      periods: periods,
+      skippedCount: Array.isArray(supplement.skipped_report_ids)
+        ? supplement.skipped_report_ids.length : 0,
+      failures: failures,
+    };
+  }
+
   function renderScope(scope) {
     if (!scope || typeof scope !== 'object') return '';
     var mode = String(scope.mode || '');
@@ -262,6 +362,7 @@
       partial: '⚠️ 部分完成',
       stopped: '⏹ 已停止',
       failed: '❌ 失败',
+      waiting_consent: '⏸ 等待授权补充财报',
     }[status];
     if (!label) return '';
 
@@ -286,5 +387,6 @@
     renderScope: renderScope,
     renderRunArtifacts: renderRunArtifacts,
     renderRunStatus: renderRunStatus,
+    supplementSummaryView: supplementSummaryView,
   };
 }));

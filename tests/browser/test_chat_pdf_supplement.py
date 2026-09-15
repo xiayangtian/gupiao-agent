@@ -226,3 +226,79 @@ def test_supplement_consent_has_no_horizontal_overflow_or_browser_errors(browser
     assert layout["card"] is True
     assert layout["scrollWidth"] <= layout["innerWidth"]
     _assert_clean_browser(browser_session)
+
+
+def _reopen_session(session, url, session_id, wait_for_selector):
+    """刷新页面后重新打开既有会话，等待指定补充摘要节点出现。"""
+    _run_browser(session, "open", url + "/#/chat")
+    return _eval(session, """
+(async () => {
+  const ready = Date.now() + 10000;
+  while (typeof openChatSession !== 'function' && Date.now() < ready) await new Promise(r => setTimeout(r, 50));
+  await openChatSession(%s);
+  const deadline = Date.now() + 5000;
+  while (!document.querySelector(%s) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+  const summaries = [...document.querySelectorAll('.chat-supplement-summary')];
+  const statuses = [...document.querySelectorAll('.chat-run-status-waiting_consent')];
+  return JSON.stringify({
+    waitingStatuses: statuses.map(node => node.textContent),
+    summaries: summaries.map(node => node.textContent),
+    lastSummary: summaries.length ? summaries[summaries.length - 1].textContent : '',
+    hasSummary: summaries.length > 0,
+    waitingStatus: status ? status.textContent : '',
+    approveButtons: document.querySelectorAll('#chat-history .chat-supplement-approve').length,
+    historyText: document.querySelector('#chat-history').textContent,
+  });
+})()
+""" % (json.dumps(session_id), json.dumps(wait_for_selector)))
+
+
+def test_reloaded_history_shows_authorized_supplement_summary(browser_session, actual_app_url):
+    """刷新页面后重开会话，仍能看到经授权补充了几份财报与期次。"""
+    _start_observing(browser_session)
+    _open_supplement_card(browser_session)
+    session_id = _eval(browser_session, """
+(async () => {
+  const card = document.querySelector('.chat-supplement-consent');
+  card.querySelector('input[type=checkbox]').click();
+  card.querySelector('.chat-supplement-approve').click();
+  const deadline = Date.now() + 10000;
+  while (document.querySelector('.chat-supplement-consent') && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+  return JSON.stringify({sid: chatSessionId});
+})()
+""")["sid"]
+    assert session_id, "授权流程必须落在真实会话上"
+
+    rendered = _reopen_session(
+        browser_session, actual_app_url[0], session_id, ".chat-supplement-summary",
+    )
+
+    assert rendered["hasSummary"] is True
+    # 历史按轮次渲染：先暂停的等待轮，再是补充完成后的恢复回答。
+    assert any("等待授权补充财报" in text for text in rendered["waitingStatuses"])
+    assert "本次经授权补充 1 份财报" in rendered["lastSummary"]
+    assert "2025 半年报" in rendered["lastSummary"]
+    assert "已完成" in rendered["historyText"]
+    _assert_fixture_only(actual_app_url[1], downloaded=True)
+    _assert_clean_browser(browser_session)
+
+
+def test_reloaded_waiting_consent_shows_honest_state_without_confirm_action(
+    browser_session, actual_app_url,
+):
+    """未授权的等待状态在重载后如实可见，且不提供无法工作的确认入口。"""
+    _start_observing(browser_session)
+    _open_supplement_card(browser_session)
+    session_id = _eval(browser_session, "JSON.stringify({sid: chatSessionId})")["sid"]
+    assert session_id
+
+    rendered = _reopen_session(
+        browser_session, actual_app_url[0], session_id, ".chat-run-status-waiting_consent",
+    )
+
+    assert any("等待授权补充财报" in text for text in rendered["waitingStatuses"])
+    assert rendered["hasSummary"] is True
+    assert "待补充报告" in rendered["lastSummary"]
+    assert rendered["approveButtons"] == 0
+    _assert_fixture_only(actual_app_url[1], downloaded=False)
+    _assert_clean_browser(browser_session)
