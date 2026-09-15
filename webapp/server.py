@@ -1199,7 +1199,10 @@ def chat(code: str, period: str, body: ChatRequest) -> Dict[str, Any]:
             )
         except Exception as exc:
             # 异常文本可能包含用户问题，只记录受控诊断信息。
-            logger.warning("chat_rag_fallback error_type=%s", type(exc).__name__)
+            logger.warning(
+                "chat_rag_fallback report_code=%s report_period=%s error_type=%s",
+                code, p.isoformat(), type(exc).__name__,
+            )
             rag_result = None
     if rag_result is not None:
         answer = rag_result["answer"]
@@ -1387,7 +1390,7 @@ class _SseEventPump:
                     self._run_id or "-", type(exc).__name__,
                 )
                 if not self._stop.is_set():
-                    self.put({"type": "error", "error": f"{self._label}失败：{exc}"})
+                    self.put({"type": "error", "error_type": type(exc).__name__})
             finally:
                 if not self._stop.is_set():
                     self.put(self.sentinel)
@@ -1963,7 +1966,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 if state.error_text:
                     run = _persist("failed", "".join(state.answer_parts).strip())
                     yield _sse("error", {
-                        "error": state.error_text,
+                        "error": f"流式问答失败，请重试（诊断 ID：{run_id}）",
                         "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
@@ -1995,7 +1998,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             if not saved:
                 _persist("failed", "".join(state.answer_parts).strip())
             yield _sse("error", {
-                "error": f"流式问答失败：{exc}",
+                "error": f"流式问答失败，请重试（诊断 ID：{run_id}）",
                 "elapsed_seconds": round(time.perf_counter() - started_at, 3),
             })
         finally:
@@ -2208,7 +2211,7 @@ async def resolve_chat_supplement(
                         supplement_status = "failed"
                     run = _persist("failed", "".join(state.answer_parts).strip())
                     yield _sse("error", {
-                        "error": state.error_text,
+                        "error": f"恢复问答失败，请重试（诊断 ID：{run_id}）",
                         "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
@@ -2224,11 +2227,14 @@ async def resolve_chat_supplement(
                     )
                     return
         except Exception as exc:
-            logger.exception("补充授权恢复回答失败")
+            logger.warning(
+                "chat_supplement_resume_failed run_id=%s error_type=%s",
+                run_id, type(exc).__name__,
+            )
             if not saved:
                 _persist("failed", "".join(state.answer_parts).strip())
             yield _sse("error", {
-                "error": f"恢复回答失败：{exc}",
+                "error": f"恢复问答失败，请重试（诊断 ID：{run_id}）",
                 "elapsed_seconds": round(time.perf_counter() - started_at, 3),
             })
         finally:

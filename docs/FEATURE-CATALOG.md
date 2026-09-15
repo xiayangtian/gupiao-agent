@@ -114,6 +114,7 @@
 - `9e9f2ff`：兼容真实提供方的双分隔符 `｜｜DSML｜｜` 格式，并以现场结构回归覆盖。
 - `64d62b9`：复用 `AnswerRun.id` 作为可复制诊断 ID，并以该 ID 关联问答开始/终态日志。
 - `55c3189`：诊断失败日志仅保留 `run_id`、状态和异常类型，不记录问题正文或 traceback。
+- `9e8abed`：流式异常响应改为安全提示与诊断 ID；旧单报告问答回退日志补充报告代码与期间。
 - 后续可信 Agent M2–M4 尚未实现；状态以[设计台账](superpowers/DESIGN-REGISTRY.md#trusted-chat-agent)为准。
 
 <a id="market-mcp"></a>
