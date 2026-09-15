@@ -1334,6 +1334,18 @@ _SUPPLEMENT_UNAVAILABLE_TEXT = (
     "本地现有财报证据不足，且未找到可补充下载的报告；"
     "以下回答仅基于当前可核验的信息，请谨慎参考。"
 )
+# 模型申请补库但问题本身不在单公司财报范围内：不得声称“不存在可下载报告”。
+_SUPPLEMENT_OUT_OF_SCOPE_TEXT = (
+    "当前问题不属于单公司财报范围，无法自动补充财报原文；"
+    "以下回答仅基于当前可核验的信息，请谨慎参考。"
+)
+
+
+def _supplement_unavailable_text(scope: Optional[Scope]) -> str:
+    """按真实原因给出补报不可用的诚实说明。"""
+    if scope is not None and scope.mode == "company_only":
+        return _SUPPLEMENT_UNAVAILABLE_TEXT
+    return _SUPPLEMENT_OUT_OF_SCOPE_TEXT
 
 
 class _SseEventPump:
@@ -1912,10 +1924,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                             "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                         })
                         return
-                    # 无可用候选：给出诚实的缺口回答，不假装可以补充。
-                    run = _persist("partial", _SUPPLEMENT_UNAVAILABLE_TEXT)
+                    # 无可用候选：按真实原因给出诚实说明，不假装可以补充。
+                    unavailable = _supplement_unavailable_text(scope)
+                    run = _persist("partial", unavailable)
                     yield _sse("done", {
-                        "answer": _SUPPLEMENT_UNAVAILABLE_TEXT,
+                        "answer": unavailable,
                         "citations": [],
                         "session_id": sid,
                         "run": run.to_dict(),

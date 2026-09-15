@@ -2826,19 +2826,23 @@ class TestChatSupplementApi:
         assert len(supplement_env["downloader"].calls) == 5
         assert len(supplement_env["rag"].calls[-1]["scope"].report_ids) == 6
 
-    def test_whole_corpus_scope_does_not_offer_supplement(self, client, supplement_env):
-        """没有公司上下文的泛问题不提供自动补库，按现有证据回答。"""
+    def test_whole_corpus_proposal_is_rejected_with_out_of_scope_text(
+        self, client, supplement_env,
+    ):
+        """范围外的泛问题不提供自动补库，且说明真实原因是问题不在公司范围内。"""
         events = _read_sse(client.post("/api/chat/stream", json={"question": "经营现金流怎么看？"}))
 
         names = [name for name, _ in events]
         assert "supplement_needed" not in names
-        assert "done" in names
+        done = _event(events, "done")
+        assert done["answer"] == server._SUPPLEMENT_OUT_OF_SCOPE_TEXT
+        assert done["run"]["status"] == "partial"
         assert supplement_env["downloader"].calls == []
 
     def test_supplement_request_without_candidates_answers_with_gap_note(
         self, client, supplement_env,
     ):
-        """数据源查不到可下载报告时，不显示授权卡，直接给出缺口说明。"""
+        """单公司范围内查不到可下载报告时，说明真实原因是不存在可补充的报告。"""
         supplement_env["metas"].clear()
 
         events = _read_sse(client.post("/api/chat/stream", json=_supplement_question()))
@@ -2846,7 +2850,8 @@ class TestChatSupplementApi:
         names = [name for name, _ in events]
         assert "supplement_needed" not in names
         done = _event(events, "done")
-        assert "补充" in done["answer"] or "未检索到" in done["answer"] or "不足" in done["answer"]
+        assert done["answer"] == server._SUPPLEMENT_UNAVAILABLE_TEXT
+        assert done["run"]["status"] == "partial"
         assert supplement_env["downloader"].calls == []
 
     def test_chat_tool_defs_includes_supplement_request_tool(self, monkeypatch):
