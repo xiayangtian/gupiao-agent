@@ -1991,7 +1991,12 @@ async def resolve_chat_supplement(
 
     try:
         if body.action == "decline":
+            # 拒绝不接受任何候选字段：连空数组也视为畸形授权请求，不能静默忽略。
+            if body.candidate_ids is not None:
+                raise ValueError("拒绝补充请求不接受 candidate_ids")
             pending = supplement_registry.decline(supplement_id, body.session_id)
+            # decline 是终态转换，必须在生成回答前写入审计存储。
+            _persist_supplement_status(supplement_id, pending.status)
         else:
             pending = supplement_registry.approve(
                 supplement_id, body.session_id, body.candidate_ids or [],

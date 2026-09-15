@@ -2511,6 +2511,29 @@ class TestChatSupplementApi:
         assert done["run"]["supplement"]["ingested_report_ids"] == []
         assert done["run"]["status"] == "partial"
         assert supplement_env["rag"].calls[-1]["scope"].report_ids == (_SUPPLEMENT_INDEXED,)
+        # 拒绝也必须即时落盘：重开会话/审计读取到的状态不能仍是 proposed。
+        stored_request = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored_request["session_id"] == session_id
+        assert stored_request["status"] == "declined"
+
+    @pytest.mark.parametrize("supplied_ids", [[], ["candidate-not-allowed"]])
+    def test_decline_rejects_any_supplied_candidate_ids_without_download(
+        self, client, supplement_env, supplied_ids,
+    ):
+        """decline 不接受 candidate_ids；空数组也不能绕过请求形状校验。"""
+        proposal_events, needed = _propose_supplement(client)
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={
+                "session_id": _propose_session_id(proposal_events),
+                "action": "decline",
+                "candidate_ids": supplied_ids,
+            },
+        )
+
+        assert response.status_code == 409
+        assert supplement_env["downloader"].calls == []
 
     def test_partial_failure_resumes_with_only_ingested_report_ids(
         self, client, supplement_env, monkeypatch,
