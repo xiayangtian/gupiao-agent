@@ -1,22 +1,28 @@
-"""浏览器验收专用启动器：真实 FastAPI 应用，但关闭 RAG 摄取与外部行情请求。
+"""浏览器验收专用启动器：真实 FastAPI 应用，但注入本地 fake 协作方。
 
 验收目标是前端可视化生命周期与可信问答的端到端契约，与真实 RAG 检索无关。
 真实 PDF 摄取会在应用关闭时长时间等待后台线程，使验收结果依赖开发者本地的
-``reports/`` 内容；外部行情接口则让测试依赖网络。两者都在这里移除，应用本身
-仍是 ``webapp.server:app``。
+``reports/`` 内容；外部行情接口则让测试依赖网络。两者都在这里换成不联网的
+本地 fake，应用本身仍是 ``webapp.server:app``。
 
-可信问答回归（tests/browser/test_chat_trust_flow.py）需要一个可控的
-``rag_qa.answer_stream`` 来产出确定性的 Scope/PDF 证据/网页证据/停止运行，
-避免消耗模型配额或依赖真实网络。因此这里注入：
+可信问答回归（tests/browser/test_chat_trust_flow.py）与补报授权回归
+（tests/browser/test_chat_pdf_supplement.py）需要一个可控的
+``rag_qa.answer_stream`` 来产出确定性的 Scope/PDF 证据/网页证据/停止运行与
+补报请求，避免消耗模型配额或依赖真实网络。因此这里注入：
 
 - ``_FakeRagStore``：提供固定本地报告身份，供 Scope 解析与同业样本判定；
 - ``_FakeStockIndex`` / ``_FakeStockMcp``：固定公司名与行业分类，杜绝联网；
-- ``_FakeRagQA``：确定性 ``answer_stream``；问题以「停止」结尾时不出 done，
-  让服务端按 ``stopped`` 持久化，而不是伪装完整；
+- ``_FakeRagQA``：确定性 ``answer_stream``；含「补报验收」的问题产出受控补报
+  请求并在恢复轮据 Scope 是否包含补充报告给出答案；以「停止」结尾的问题不出
+done，让服务端按 ``stopped`` 持久化，而不是伪装完整；
+- ``_SupplementDatasource``：只对 fixture 公司返回补报元数据，其余身份失败快；
+- ``_SupplementDownloader`` / ``_SupplementIngestion``：只写本地最小 PDF 并记录
+  调用，不读取真实下载地址、不建立真实索引；
 - 固定 reports/analysis fixture（含第 40 页来源 PDF），并重定向
   ``REPORTS_DIR``/``ANALYSIS_DIR``，保证 PDF 跳页 URL 指向真实存在的本地 PDF。
 
-每个进程启动都创建独立临时目录与 ``ChatStore``，避免跨测试/历史运行残留。
+所有协作方身份均为 ``fixture://``，仅在测试进程内生效。每个进程启动都创建独立
+临时目录与 ``ChatStore``，避免跨测试/历史运行残留。
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ import os
 import shutil
 import sys
 import tempfile
+from datetime import date
 
 import requests
 
@@ -36,6 +43,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import webapp.server as server  # noqa: E402  （必须先定位仓库根目录再导入）
+from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType  # noqa: E402
+from financial_report_fetcher.report_identity import build_report_filename  # noqa: E402
 from webapp.chat_store import ChatStore  # noqa: E402
 
 
@@ -52,13 +61,6 @@ _MINIMAL_PDF = (
     b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n"
     b"trailer\n<< /Root 1 0 R >>\n%%EOF\n"
 )
-
-
-class _OfflineDatasource:
-    """外部行情查询立即失败，使 PDF 端点快速返回错误而不是联网下载。"""
-
-    def fetch_reports(self, **kwargs):
-        raise requests.exceptions.RequestException("浏览器验收不访问外部数据源")
 
 
 class _FakeRagStore:
@@ -87,6 +89,119 @@ class _FakeStockMcp:
         return json.dumps({})
 
 
+class _FixtureRequestLog:
+    """浏览器验收协作方的可读请求记录；只允许 fixture:// 身份。"""
+
+    def __init__(self) -> None:
+        self.path = os.environ.get("BROWSER_FIXTURE_LOG", "")
+        self.entries = []
+
+    def record(self, kind: str, url: str) -> None:
+        self.entries.append({"kind": kind, "url": url})
+        if self.path:
+            with open(self.path, "w", encoding="utf-8") as handle:
+                json.dump(self.entries, handle, ensure_ascii=False)
+
+
+class _SupplementDatasource:
+    """仅对 fixture 公司返回确定性补报元数据；其余公司保持失败快（绝不联网）。
+
+    真实数据源不会为任意股票代码凭空给出报告，因此这里也不得为任意代码返回行
+    数据：否则其他浏览器回归会因夹具行被替换而侜幸通过。
+    """
+
+    FIXTURE_CODE = "601288"
+
+    def __init__(self, request_log: _FixtureRequestLog) -> None:
+        self.request_log = request_log
+        self.reports = [
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.SEMI_ANNUAL, period=date(2025, 6, 30),
+                download_url="fixture://supplement/2025-semi.pdf",
+                title="农业银行2025年半年度报告", disclosure_date=date(2025, 8, 29),
+            ),
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.ANNUAL, period=date(2024, 12, 31),
+                download_url="fixture://supplement/2024-annual.pdf",
+                title="农业银行2024年年度报告", disclosure_date=date(2025, 3, 28),
+            ),
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.QUARTERLY, period=date(2024, 9, 30),
+                download_url="fixture://supplement/2024-q3.pdf",
+                title="农业银行2024年第三季度报告", disclosure_date=date(2024, 10, 30),
+            ),
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.SEMI_ANNUAL, period=date(2024, 6, 30),
+                download_url="fixture://supplement/2024-semi.pdf",
+                title="农业银行2024年半年度报告", disclosure_date=date(2024, 8, 29),
+            ),
+            ReportMeta(
+                company_id="601288", company_name="农业银行",
+                report_type=ReportType.ANNUAL, period=date(2023, 12, 31),
+                download_url="fixture://supplement/2023-annual.pdf",
+                title="农业银行2023年年度报告", disclosure_date=date(2024, 3, 28),
+            ),
+        ]
+
+    def fetch_reports(self, stock_code, report_types=None, start_date=None, end_date=None):
+        if stock_code != self.FIXTURE_CODE:
+            # 非 fixture 公司：与真实离线数据源一致地失败快，绝不凭空返回报告。
+            raise requests.exceptions.RequestException(
+                "浏览器验收只提供 fixture 公司报告，不访问外部数据源"
+            )
+        self.request_log.record("candidate_metadata", "fixture://supplement/candidates")
+        wanted_types = {getattr(item, "value", item) for item in (report_types or [])}
+        selected = []
+        for report in self.reports:
+            if wanted_types and report.report_type.value not in wanted_types:
+                continue
+            if start_date is not None and report.period < start_date:
+                continue
+            if end_date is not None and report.period > end_date:
+                continue
+            selected.append(report)
+        return selected
+
+
+class _SupplementDownloader:
+    """只写最小本地 PDF 的下载替身；记录调用而绝不读取 report.download_url。"""
+
+    def __init__(self, request_log: _FixtureRequestLog) -> None:
+        self.request_log = request_log
+
+    def download_one(self, report, storage_dir):
+        self.request_log.record("download", "fixture://supplement/download")
+        os.makedirs(storage_dir, exist_ok=True)
+        with open(os.path.join(storage_dir, build_report_filename(report)), "wb") as handle:
+            handle.write(_MINIMAL_PDF)
+        return DownloadStatus.SUCCESS
+
+
+class _SupplementIngestion:
+    """不建立真实 RAG 索引的 PDF 摄取替身。
+
+    仍需实现只读的 ``status``/``list_files``：共享启动器的 ``/api/rag/status`` 与
+    ``/api/rag/files`` 会直接调用它们，缺方法会使页面请求变成 500。
+    """
+
+    def __init__(self, request_log: _FixtureRequestLog) -> None:
+        self.request_log = request_log
+
+    def auto_ingest_pdf(self, pdf_path):
+        self.request_log.record("ingest", "fixture://supplement/ingest")
+        return True
+
+    def status(self):
+        return {"store_path": "", "reports": {}, "total_chunks": 0, "warnings": []}
+
+    def list_files(self):
+        return []
+
+
 class _FakeRagQA:
     """可控 RAG 问答替身：产出确定性的 Scope 证据/网页来源/停止运行事件。
 
@@ -106,6 +221,33 @@ class _FakeRagQA:
         run_id=None,
     ):
         question = str(question or "").strip()
+        if "补报验收" in question and not getattr(self, "_supplement_requested", False):
+            self._supplement_requested = True
+            yield {
+                "type": "supplement_request",
+                "reason": "需要补充财报原文以核对经营现金流。",
+                "needs": [{"period": "2025-06-30", "report_type": "semi_annual"}],
+            }
+            return
+        if "补报验收" in question:
+            supplemented = "601288:2025-06-30:semi_annual" in tuple(getattr(scope, "report_ids", ()) or ())
+            answer = (
+                "已基于补充财报原文恢复回答。"
+                if supplemented else "未补充财报，已基于现有信息回答。"
+            )
+            yield {"type": "delta", "text": answer}
+            yield {
+                "type": "done", "answer": answer,
+                "citations": ([{
+                    "source": "pdf", "report_id": "601288:2025-06-30:semi_annual",
+                    "section": "现金流量表", "page": 40,
+                    "snippet": "补充财报原文已索引",
+                }] if supplemented else []),
+                "web_sources": [], "tools_used": [],
+                "retrieval_report_ids": (["601288:2025-06-30:semi_annual"] if supplemented else []),
+                "retrieval_degraded": False, "model": "browser-acceptance-fake",
+            }
+            return
         if question.endswith("停止"):
             yield {"type": "delta", "text": "经营活动现金流量净额为 -621.69 亿元"}
             yield {"type": "delta", "text": "（最后一步尚未完成）"}
@@ -149,13 +291,17 @@ def build_app():
     with open(os.path.join(reports_dir, FIXTURE_PDF_FILENAME), "wb") as handle:
         handle.write(_MINIMAL_PDF)
 
-    server.rag_service = None                       # 不触发真实 RAG 摄取
+    request_log = _FixtureRequestLog()
     server.rag_store = _FakeRagStore()              # 固定本地报告身份
     server.rag_qa = _FakeRagQA()                    # 可控 answer_stream
     server.stock_index = _FakeStockIndex()          # 固定公司名
     server.stock_mcp = _FakeStockMcp()              # 固定行业分类
     server.ai_client.api_key = "browser-acceptance"  # _require_ai 通过；fake 不真正调模型
-    server.datasource = _OfflineDatasource()
+    server.datasource = _SupplementDatasource(request_log)
+    server.downloader = _SupplementDownloader(request_log)
+    server.rag_service = _SupplementIngestion(request_log)
+    server.supplement_registry = server.SupplementRegistry()
+    server._supplement_reports = {}
     server.REPORTS_DIR = reports_dir
     server.ANALYSIS_DIR = analysis_dir
     server.chat_store = ChatStore(os.path.join(tmp_dir, "chat_sessions.json"))

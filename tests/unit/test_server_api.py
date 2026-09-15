@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,6 +17,7 @@ import webapp.server as server
 from financial_report_fetcher.analysis_pipeline import analysis_output_stem
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
 from financial_report_fetcher.rag.ingest import IngestResult
+from financial_report_fetcher.report_identity import build_report_filename, build_report_id
 
 
 def _read_sse(response):
@@ -1859,7 +1860,8 @@ class TestMcpToolDefs:
         monkeypatch.setattr(server, "_mcp_tool_defs", lambda: [])
         cfg = type("C", (), {"mcp_tools": False, "web_search": True, "web_search_timeout": 15})()
         defs = server._build_chat_tool_defs(cfg)
-        assert [item["function"]["name"] for item in defs] == ["web_search"]
+        # 补报工具只申请授权、由服务端解析候选，因此始终随问答工具一起提供。
+        assert [item["function"]["name"] for item in defs] == ["web_search", "request_missing_reports"]
 
     def test_chat_tool_defs_does_not_expose_removed_news_tool(self, monkeypatch):
         """新闻 MCP 被下线后，问答模型仍可获得网页搜索作为时效性信息来源。"""
@@ -1878,7 +1880,9 @@ class TestMcpToolDefs:
 
         defs = server._build_chat_tool_defs(cfg)
 
-        assert [item["function"]["name"] for item in defs] == ["get_realtime_quote", "web_search"]
+        assert [item["function"]["name"] for item in defs] == [
+            "get_realtime_quote", "web_search", "request_missing_reports",
+        ]
 
     def test_mcp_tool_defs_built_when_available(self, monkeypatch):
         """MCP 可用时构建工具定义并缓存"""
@@ -2285,3 +2289,705 @@ class TestFocusReport:
         r = client.post("/api/chat/stream", json={"question": "营收如何？"})
         assert r.status_code == 200
         assert captured["priority"] is None
+
+
+# ── 智能问答财报补充下载（授权 / 恢复回答）─────────────────────
+
+_SUPPLEMENT_CODE = "601288"
+_SUPPLEMENT_NAME = "农业银行"
+_SUPPLEMENT_INDEXED = "601288:2024-12-31:annual"
+_SUPPLEMENT_REQUESTED = "601288:2025-06-30:semi_annual"
+
+
+def _supplement_question():
+    """问题显式包含本地已索引的公司代码 → company_only 范围。"""
+    return {"question": "601288 的 2025 半年报经营现金流变化？"}
+
+
+def _supplement_meta(period, report_type):
+    return ReportMeta(
+        company_id=_SUPPLEMENT_CODE,
+        company_name=_SUPPLEMENT_NAME,
+        report_type=report_type,
+        period=period,
+        download_url="http://cninfo.example/secret-report.pdf",
+        title=f"{_SUPPLEMENT_NAME}{period.year}年报告",
+        disclosure_date=period,
+    )
+
+
+class _SupplementRagQA:
+    """首轮提交受控补报需求；恢复轮产出普通回答，并记录每次调用的范围。"""
+
+    def __init__(self, needs=None, answer="补充后回答", handler=None, resume_error="",
+                 resume_empty=False):
+        self.answer = answer
+        self.handler = handler
+        self.resume_error = resume_error
+        self.resume_empty = resume_empty
+        self.handler_accepted = None
+        self.needs = list(needs) if needs is not None else [
+            {"period": "2025-06-30", "report_type": "semi_annual"},
+        ]
+        self.calls = []
+
+    def answer_stream(self, question, history=None, filters=None, tools=None,
+                      priority_report_id=None, scope=None, run_id=None):
+        self.calls.append({"question": question, "scope": scope, "tools": tools,
+                           "history": history})
+        if len(self.calls) == 1:
+            # 模拟 RagQA：补报处理器在生产线程内被回调，只有它接受需求才上交模型请求。
+            if self.handler is not None:
+                self.handler_accepted = bool(self.handler({
+                    "reason": "本地缺少 2025 年半年报原文", "needs": list(self.needs),
+                }))
+            if self.handler is None or self.handler_accepted:
+                yield {"type": "supplement_request", "reason": "本地缺少 2025 年半年报原文",
+                       "needs": list(self.needs)}
+            else:
+                yield {"type": "delta", "text": "本地证据不足。", "reasoning": ""}
+                yield {"type": "done", "answer": "本地证据不足。", "reasoning": "",
+                       "citations": [], "model": "m", "usage": {},
+                       "tools_used": [], "web_sources": [],
+                       "retrieval_report_ids": [], "retrieval_degraded": False}
+            return
+        if self.resume_error:
+            yield {"type": "error", "error": self.resume_error}
+            return
+        if self.resume_empty:
+            yield {"type": "empty"}
+            return
+        yield {"type": "delta", "text": self.answer, "reasoning": ""}
+        yield {"type": "done", "answer": self.answer, "reasoning": "",
+               "citations": [], "model": "m", "usage": {},
+               "tools_used": [], "web_sources": [],
+               "retrieval_report_ids": [], "retrieval_degraded": False}
+
+
+class _SupplementDownloader:
+    """受控下载器替身：按报告身份返回状态，成功时写出最小合法 PDF。"""
+
+    def __init__(self, statuses=None):
+        self.statuses = dict(statuses or {})
+        self.calls = []
+
+    def download_one(self, report, storage_dir):
+        report_id = build_report_id(report.company_id, report.period, report.report_type)
+        self.calls.append(report_id)
+        status = self.statuses.get(report_id, DownloadStatus.SUCCESS)
+        if status in (DownloadStatus.SUCCESS, DownloadStatus.SKIPPED):
+            os.makedirs(storage_dir, exist_ok=True)
+            with open(os.path.join(storage_dir, build_report_filename(report)), "wb") as handle:
+                handle.write(b"%PDF-1.4 fake")
+        return status
+
+
+class _SupplementIngestionService:
+    """摄取服务替身：默认产出 PDF 索引证据；可指定某些文件摄取失败。"""
+
+    def __init__(self, failing_filenames=()):
+        self.failing = set(failing_filenames)
+        self.calls = []
+
+    def auto_ingest_pdf(self, pdf_path):
+        self.calls.append(pdf_path)
+        return os.path.basename(pdf_path) not in self.failing
+
+
+@pytest.fixture()
+def supplement_env(env, monkeypatch, tmp_path):
+    """隔离补报协作方：会话存储、报告目录、报告元数据、下载器与摄取服务。"""
+    from webapp.chat_store import ChatStore
+    from webapp.chat_supplement import SupplementRegistry
+
+    reports_dir = tmp_path / "supplement-reports"
+    reports_dir.mkdir()
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    # handler 传入真实处理器：验证生产线程内补报上下文确实可达。
+    rag = _SupplementRagQA(handler=server._handle_supplement_request)
+    downloader = _SupplementDownloader()
+    ingestion = _SupplementIngestionService()
+    metas = [_supplement_meta(date(2025, 6, 30), ReportType.SEMI_ANNUAL)]
+    env["fake_ds"].fetch_reports.side_effect = (
+        lambda stock_code, report_types, start_date, end_date: [
+            meta for meta in metas
+            if meta.company_id == stock_code and meta.report_type in list(report_types)
+        ]
+    )
+
+    class FakeRagStore:
+        def list_report_ids(self):
+            return [_SUPPLEMENT_INDEXED]
+
+    monkeypatch.setattr(server, "chat_store", store)
+    monkeypatch.setattr(server, "supplement_registry", SupplementRegistry())
+    monkeypatch.setattr(server, "_supplement_reports", {})
+    monkeypatch.setattr(server, "REPORTS_DIR", str(reports_dir))
+    monkeypatch.setattr(server, "rag_qa", rag)
+    monkeypatch.setattr(server, "rag_store", FakeRagStore())
+    monkeypatch.setattr(server, "downloader", downloader)
+    monkeypatch.setattr(server, "rag_service", ingestion)
+
+    return {
+        "store": store,
+        "rag": rag,
+        "downloader": downloader,
+        "ingestion": ingestion,
+        "metas": metas,
+        "reports_dir": reports_dir,
+    }
+
+
+def _propose_supplement(client, question=None):
+    """经真实流式端点提出补报请求，返回 (事件列表, supplement_needed 数据)。"""
+    events = _read_sse(client.post("/api/chat/stream", json=question or _supplement_question()))
+    return events, _event(events, "supplement_needed")
+
+
+def _propose_session_id(proposal_events):
+    """从提出补报的 SSE 事件里取会话 id（授权必须绑定到同一会话）。"""
+    return _event(proposal_events, "session")["session_id"]
+
+
+def _resolve_supplement(client, supplement_id, body):
+    return _read_sse(client.post(
+        f"/api/chat/supplements/{supplement_id}/resolve", json=body,
+    ))
+
+
+def _ask_in_same_session(client, session_id, question):
+    """在同一会话继续提问；授权卡绑定的是提出问题的那次问答。"""
+    return _read_sse(client.post("/api/chat/stream", json={
+        "session_id": session_id, "question": question,
+    }))
+
+
+def _candidate_ids(payload):
+    return [candidate["id"] for candidate in payload["candidates"]]
+
+
+class TestChatSupplementApi:
+    def test_stream_supplement_needs_consent_and_does_not_download(self, client, supplement_env):
+        """缺证据时只提出候选清单并暂停；未经授权不调用下载器。"""
+        events, needed = _propose_supplement(client)
+
+        assert needed["limit"] == 5
+        assert needed["reason"] == "本地缺少 2025 年半年报原文"
+        assert [candidate["code"] for candidate in needed["candidates"]] == [_SUPPLEMENT_CODE]
+        assert [candidate["period"] for candidate in needed["candidates"]] == ["2025-06-30"]
+        assert needed["candidates"][0]["label"] == "2025 半年报"
+        assert supplement_env["downloader"].calls == []
+        assert supplement_env["ingestion"].calls == []
+        assert [name for name, _ in events] == ["session", "scope_resolved", "run_started",
+                                                "supplement_needed"]
+
+    def test_supplement_handler_is_reachable_from_the_streaming_producer_thread(
+        self, client, supplement_env,
+    ):
+        """补报处理器必须在模型调用线程内可用，否则模型永远申请不到授权。"""
+        _propose_supplement(client)
+
+        assert supplement_env["rag"].handler_accepted is True
+
+    def test_proposed_supplement_persists_waiting_consent_and_keeps_only_safe_fields(
+        self, client, supplement_env,
+    ):
+        """授权前保存 waiting_consent 运行；摘要不含 URL、文件路径或异常文本。"""
+        proposal_events, needed = _propose_supplement(client)
+
+        sessions = supplement_env["store"].list_sessions()
+        detail = supplement_env["store"].get_session(sessions[0]["id"])
+        run = detail["messages"][-1]["run"]
+        assert run["status"] == "waiting_consent"
+        assert run["supplement"]["status"] == "proposed"
+        assert run["supplement"]["limit"] == 5
+        assert len(run["supplement"]["candidates"]) == 1
+
+        raw = json.dumps(detail, ensure_ascii=False)
+        assert "cninfo.example" not in raw
+        assert "secret-report.pdf" not in raw
+        assert str(supplement_env["reports_dir"]) not in raw
+        assert needed["candidates"][0]["id"] in raw
+        # 候选载荷同样不含下载地址
+        assert "cninfo.example" not in json.dumps(needed, ensure_ascii=False)
+
+    def test_approved_supplement_downloads_ingests_and_resumes_answer(
+        self, client, supplement_env,
+    ):
+        """授权后下载并摄取，随后用同一问题恢复回答；范围只追加已摄取报告。"""
+        proposal_events, needed = _propose_supplement(client)
+        supplement_id = needed["supplement_id"]
+
+        events = _resolve_supplement(client, supplement_id, {
+            "session_id": _propose_session_id(proposal_events),
+            "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        names = [name for name, _ in events]
+        assert names == [
+            "session", "supplement_download_started", "supplement_downloaded",
+            "supplement_ingested", "run_started", "delta", "done",
+        ]
+        assert supplement_env["downloader"].calls == [_SUPPLEMENT_REQUESTED]
+        assert [os.path.basename(path) for path in supplement_env["ingestion"].calls] == [
+            "农业银行_601288_半年报_2025.pdf"
+        ]
+
+        done = _event(events, "done")
+        assert done["answer"] == "补充后回答"
+        supplement = done["run"]["supplement"]
+        assert supplement["status"] == "completed"
+        assert supplement["ingested_report_ids"] == [_SUPPLEMENT_REQUESTED]
+        assert supplement["skipped_report_ids"] == []
+        assert supplement["failed"] == []
+        datetime.fromisoformat(supplement["resumed_at"])
+
+        # 恢复回答使用原问题，并在受控范围内追加已摄取报告
+        resumed = supplement_env["rag"].calls[-1]
+        assert resumed["question"] == _supplement_question()["question"]
+        assert resumed["scope"].mode == "company_only"
+        assert resumed["scope"].report_ids == (_SUPPLEMENT_INDEXED, _SUPPLEMENT_REQUESTED)
+
+    def test_approved_supplement_run_is_persisted_after_resume(self, client, supplement_env):
+        """恢复回答同样落盘，历史重开可复核授权与来源。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": session_id, "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        detail = supplement_env["store"].get_session(session_id)
+        last = detail["messages"][-1]["run"]
+        assert last["status"] == "completed"
+        assert last["supplement"]["ingested_report_ids"] == [_SUPPLEMENT_REQUESTED]
+        stored_request = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored_request["session_id"] == session_id
+        assert stored_request["status"] == "completed"
+        assert stored_request["consumed_at"]
+
+    def test_declined_supplement_answers_with_existing_evidence_without_download(
+        self, client, supplement_env,
+    ):
+        """拒绝授权时不下钻下载，仍基于现有证据给出回答。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+
+        events = _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": session_id, "action": "decline",
+        })
+
+        assert supplement_env["downloader"].calls == []
+        assert supplement_env["ingestion"].calls == []
+        names = [name for name, _ in events]
+        assert names == ["session", "run_started", "delta", "done"]
+        done = _event(events, "done")
+        assert done["run"]["supplement"]["status"] == "declined"
+        assert done["run"]["supplement"]["ingested_report_ids"] == []
+        assert done["run"]["status"] == "partial"
+        assert supplement_env["rag"].calls[-1]["scope"].report_ids == (_SUPPLEMENT_INDEXED,)
+        # 拒绝也必须即时落盘：重开会话/审计读取到的状态不能仍是 proposed。
+        stored_request = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored_request["session_id"] == session_id
+        assert stored_request["status"] == "declined"
+
+    @pytest.mark.parametrize("supplied_ids", [None, [], ["candidate-not-allowed"]])
+    def test_decline_rejects_any_present_candidate_ids_without_download(
+        self, client, supplement_env, supplied_ids,
+    ):
+        """decline 只允许省略 candidate_ids；显式 null、空或非空数组均为畸形请求。"""
+        proposal_events, needed = _propose_supplement(client)
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={
+                "session_id": _propose_session_id(proposal_events),
+                "action": "decline",
+                "candidate_ids": supplied_ids,
+            },
+        )
+
+        assert response.status_code == 422
+        assert supplement_env["downloader"].calls == []
+
+    def test_approve_rejects_question_changed_after_card_was_proposed(
+        self, client, supplement_env,
+    ):
+        """授权只对提出问题的那次问答有效：期间再提问则拒绝，且不下载、不消费授权。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        _ask_in_same_session(client, session_id, "600519 2024 年报的分红情况？")
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": session_id, "action": "approve",
+                  "candidate_ids": _candidate_ids(needed)},
+        )
+
+        assert response.status_code == 409
+        assert supplement_env["downloader"].calls == []
+        assert supplement_env["ingestion"].calls == []
+        stored = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored["status"] == "proposed"
+        assert stored["consumed_at"] == ""
+        assert server.supplement_registry.get(needed["supplement_id"]).status == "proposed"
+
+        # 回到原问题后授权仍可正常使用，证明上一步确实没有消费授权。
+        _ask_in_same_session(client, session_id, _supplement_question()["question"])
+        ok = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": session_id, "action": "approve",
+                  "candidate_ids": _candidate_ids(needed)},
+        )
+        assert ok.status_code == 200
+        assert supplement_env["downloader"].calls == [_SUPPLEMENT_REQUESTED]
+
+    def test_decline_also_requires_the_original_question(self, client, supplement_env):
+        """拒绝同样不能跨问题复用授权；校验必须在状态机之前。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        _ask_in_same_session(client, session_id, "600519 2024 年报的分红情况？")
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": session_id, "action": "decline"},
+        )
+
+        assert response.status_code == 409
+        assert supplement_env["downloader"].calls == []
+        stored = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored["status"] == "proposed"
+
+    def test_identical_question_keeps_card_approvable(self, client, supplement_env):
+        """同一问题（含首尾空白）沿用同一摘要归一化，授权行为不变。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        _ask_in_same_session(client, session_id, f"  {_supplement_question()['question']}  ")
+
+        events = _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": session_id, "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        assert supplement_env["downloader"].calls == [_SUPPLEMENT_REQUESTED]
+        assert _event(events, "done")["run"]["supplement"]["status"] == "completed"
+
+    def test_empty_resume_advances_registry_to_completed(self, client, supplement_env):
+        """摄取成功但检索为空：登记表推进到 completed，与运行摘要保持一致。"""
+        _, needed = _propose_supplement(client)
+        supplement_env["rag"].resume_empty = True
+
+        events = _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": supplement_env["store"].list_sessions()[0]["id"],
+            "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        assert [name for name, _ in events][-1] == "done"
+        done = _event(events, "done")
+        assert done["run"]["status"] == "partial"
+        assert done["run"]["supplement"]["status"] == "completed"
+        assert done["run"]["supplement"]["ingested_report_ids"] == [_SUPPLEMENT_REQUESTED]
+        assert server.supplement_registry.get(needed["supplement_id"]).status == "completed"
+        stored = supplement_env["store"].get_supplement(needed["supplement_id"])
+        assert stored["status"] == "completed"
+
+    def test_partial_failure_resumes_with_only_ingested_report_ids(
+        self, client, supplement_env, monkeypatch,
+    ):
+        """部分候选失败：只用摄取成功的报告恢复回答，并列出失败项。"""
+        failed_report = "601288:2024-06-30:semi_annual"
+        supplement_env["downloader"].statuses[failed_report] = DownloadStatus.FAILED
+        supplement_env["metas"].append(_supplement_meta(date(2024, 6, 30), ReportType.SEMI_ANNUAL))
+        supplement_env["rag"].needs = [
+            {"period": "2025-06-30", "report_type": "semi_annual"},
+            {"period": "2024-06-30", "report_type": "semi_annual"},
+        ]
+        proposal_events, needed = _propose_supplement(client)
+        assert len(needed["candidates"]) == 2
+
+        events = _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": _propose_session_id(proposal_events),
+            "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        supplement = _event(events, "done")["run"]["supplement"]
+        assert supplement["ingested_report_ids"] == [_SUPPLEMENT_REQUESTED]
+        assert [item["reason"] for item in supplement["failed"]] == ["download_failed"]
+        assert failed_report not in json.dumps(supplement, ensure_ascii=False)
+        resumed = supplement_env["rag"].calls[-1]
+        assert resumed["scope"].report_ids == (_SUPPLEMENT_INDEXED, _SUPPLEMENT_REQUESTED)
+        assert _event(events, "supplement_failed")["reason"] == "download_failed"
+
+    def test_ingest_failure_does_not_enter_resumed_scope(self, client, supplement_env):
+        """下载成功但没有 PDF 索引证据时不算补充成功，不进入恢复范围。"""
+        supplement_env["ingestion"].failing = {"农业银行_601288_半年报_2025.pdf"}
+        proposal_events, needed = _propose_supplement(client)
+
+        events = _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": _propose_session_id(proposal_events),
+            "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        names = [name for name, _ in events]
+        assert "supplement_ingested" not in names
+        assert _event(events, "supplement_failed")["reason"] == "ingest_failed"
+        done = _event(events, "done")
+        assert done["run"]["supplement"]["status"] == "failed"
+        assert done["run"]["supplement"]["ingested_report_ids"] == []
+        assert supplement_env["rag"].calls[-1]["scope"].report_ids == (_SUPPLEMENT_INDEXED,)
+
+    def test_all_failures_still_produce_truthful_answer_not_500(
+        self, client, supplement_env,
+    ):
+        """全部失败也必须给出可读回答与失败说明，而不是 500。"""
+        supplement_env["downloader"].statuses[_SUPPLEMENT_REQUESTED] = DownloadStatus.FAILED
+        proposal_events, needed = _propose_supplement(client)
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={
+                "session_id": _propose_session_id(proposal_events),
+                "action": "approve",
+                "candidate_ids": _candidate_ids(needed),
+            },
+        )
+
+        assert response.status_code == 200
+        events = _read_sse(response)
+        done = _event(events, "done")
+        assert done["run"]["status"] == "partial"
+        assert done["run"]["supplement"]["status"] == "failed"
+        assert [item["reason"] for item in done["run"]["supplement"]["failed"]] == ["download_failed"]
+
+    def test_resume_error_marks_supplement_failed_and_never_500(
+        self, client, supplement_env,
+    ):
+        """摄取成功后恢复回答报错：返回 error 事件，补充摘要据实记为失败。"""
+        proposal_events, needed = _propose_supplement(client)
+        supplement_env["rag"].resume_error = "模型服务不可用"
+
+        events = _resolve_supplement(client, needed["supplement_id"], {
+            "session_id": _propose_session_id(proposal_events),
+            "action": "approve",
+            "candidate_ids": _candidate_ids(needed),
+        })
+
+        assert [name for name, _ in events][-1] == "error"
+        run = _event(events, "error")["run"]
+        assert run["status"] == "failed"
+        assert run["supplement"]["status"] == "failed"
+        assert run["supplement"]["ingested_report_ids"] == [_SUPPLEMENT_REQUESTED]
+
+    def test_cross_session_approval_returns_409_without_download(
+        self, client, supplement_env,
+    ):
+        """其他会话不能消费本会话的补报授权。"""
+        proposal_events, needed = _propose_supplement(client)
+        other = supplement_env["store"].create_session()
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": other["id"], "action": "approve",
+                  "candidate_ids": _candidate_ids(needed)},
+        )
+
+        assert response.status_code == 409
+        assert supplement_env["downloader"].calls == []
+
+    def test_replayed_approval_returns_409_without_second_download(
+        self, client, supplement_env,
+    ):
+        """一次性授权：重复提交不得再次下载。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        body = {"session_id": session_id, "action": "approve",
+                "candidate_ids": _candidate_ids(needed)}
+
+        first = client.post(f"/api/chat/supplements/{needed['supplement_id']}/resolve", json=body)
+        assert first.status_code == 200
+        downloads_after_first = list(supplement_env["downloader"].calls)
+
+        second = client.post(f"/api/chat/supplements/{needed['supplement_id']}/resolve", json=body)
+        assert second.status_code == 409
+        assert supplement_env["downloader"].calls == downloads_after_first
+
+    def test_expired_supplement_returns_409_without_download(self, client, supplement_env, monkeypatch):
+        """超过有效期的授权不能下载。"""
+        from datetime import datetime as _datetime
+
+        from webapp.chat_supplement import SupplementRegistry
+
+        clock = {"now": _datetime(2026, 9, 14, 10, 0, 0)}
+        monkeypatch.setattr(server, "supplement_registry",
+                            SupplementRegistry(clock=lambda: clock["now"], ttl_seconds=600))
+        proposal_events, needed = _propose_supplement(client)
+        clock["now"] = _datetime(2026, 9, 14, 12, 0, 0)
+
+        response = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": _propose_session_id(proposal_events),
+                  "action": "approve", "candidate_ids": _candidate_ids(needed)},
+        )
+
+        assert response.status_code == 409
+        assert supplement_env["downloader"].calls == []
+
+    def test_tampered_and_empty_and_duplicate_selections_return_409(
+        self, client, supplement_env,
+    ):
+        """候选篡改、空选择与重复选择都不得下载。"""
+        proposal_events, needed = _propose_supplement(client)
+        session_id = _propose_session_id(proposal_events)
+        candidate_id = _candidate_ids(needed)[0]
+
+        for selection in (["not-a-candidate"], [], [candidate_id, candidate_id]):
+            response = client.post(
+                f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+                json={"session_id": session_id, "action": "approve", "candidate_ids": selection},
+            )
+            assert response.status_code == 409, selection
+
+        assert supplement_env["downloader"].calls == []
+
+    def test_unknown_supplement_id_returns_404_without_download(self, client, supplement_env):
+        """未知授权请求不得触发下载。"""
+        response = client.post(
+            "/api/chat/supplements/unknown-id/resolve",
+            json={"session_id": "whatever", "action": "approve", "candidate_ids": ["c1"]},
+        )
+
+        assert response.status_code == 404
+        assert supplement_env["downloader"].calls == []
+
+    def test_candidates_are_capped_at_five(self, client, supplement_env):
+        """候选与授权上限都是 5 份。"""
+        many = [
+            _supplement_meta(date(2023, 6, 30), ReportType.SEMI_ANNUAL),
+            _supplement_meta(date(2022, 6, 30), ReportType.SEMI_ANNUAL),
+            _supplement_meta(date(2021, 6, 30), ReportType.SEMI_ANNUAL),
+            _supplement_meta(date(2020, 6, 30), ReportType.SEMI_ANNUAL),
+            _supplement_meta(date(2019, 6, 30), ReportType.SEMI_ANNUAL),
+            _supplement_meta(date(2018, 6, 30), ReportType.SEMI_ANNUAL),
+            _supplement_meta(date(2017, 6, 30), ReportType.SEMI_ANNUAL),
+        ]
+        supplement_env["metas"].extend(many)
+
+        proposal_events, needed = _propose_supplement(client)
+
+        assert len(needed["candidates"]) == 5
+        assert needed["limit"] == 5
+        session_id = _propose_session_id(proposal_events)
+        ok = client.post(
+            f"/api/chat/supplements/{needed['supplement_id']}/resolve",
+            json={"session_id": session_id, "action": "approve",
+                  "candidate_ids": _candidate_ids(needed)},
+        )
+        assert ok.status_code == 200
+        assert len(supplement_env["downloader"].calls) == 5
+        assert len(supplement_env["rag"].calls[-1]["scope"].report_ids) == 6
+
+    def test_whole_corpus_proposal_is_rejected_with_out_of_scope_text(
+        self, client, supplement_env,
+    ):
+        """范围外的泛问题不提供自动补库，且说明真实原因是问题不在公司范围内。"""
+        events = _read_sse(client.post("/api/chat/stream", json={"question": "经营现金流怎么看？"}))
+
+        names = [name for name, _ in events]
+        assert "supplement_needed" not in names
+        done = _event(events, "done")
+        assert done["answer"] == server._SUPPLEMENT_OUT_OF_SCOPE_TEXT
+        assert done["run"]["status"] == "partial"
+        assert supplement_env["downloader"].calls == []
+
+    def test_supplement_request_without_candidates_answers_with_gap_note(
+        self, client, supplement_env,
+    ):
+        """单公司范围内查不到可下载报告时，说明真实原因是不存在可补充的报告。"""
+        supplement_env["metas"].clear()
+
+        events = _read_sse(client.post("/api/chat/stream", json=_supplement_question()))
+
+        names = [name for name, _ in events]
+        assert "supplement_needed" not in names
+        done = _event(events, "done")
+        assert done["answer"] == server._SUPPLEMENT_UNAVAILABLE_TEXT
+        assert done["run"]["status"] == "partial"
+        assert supplement_env["downloader"].calls == []
+
+    def test_chat_tool_defs_includes_supplement_request_tool(self, monkeypatch):
+        """问答工具定义必须包含受控补报工具，否则模型无法申请授权。"""
+        class FakeSearch:
+            available = False
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(server, "TavilyWebSearch", FakeSearch)
+        monkeypatch.setattr(server, "_mcp_tool_defs", lambda: None)
+        cfg = type("C", (), {"mcp_tools": True, "web_search": True, "web_search_timeout": 15})()
+
+        defs = server._build_chat_tool_defs(cfg)
+
+        assert [item["function"]["name"] for item in defs] == ["request_missing_reports"]
+
+    def test_supplement_handler_rejects_calls_outside_a_stream(self):
+        """没有请求上下文时补报处理器必须拒绝，避免全局状态误授权。"""
+        assert server._handle_supplement_request({"reason": "x", "needs": []}) is False
+
+    def test_init_rag_keeps_a_tool_executor_when_mcp_and_web_unavailable(
+        self, monkeypatch, tmp_path,
+    ):
+        """MCP 与网页搜索都不可用时仍保留执行器占位，补报工具才可达。"""
+        from types import SimpleNamespace
+
+        fake_cfg = SimpleNamespace(
+            enabled=True, store_path=str(tmp_path), chunk_size=800, chunk_overlap=100,
+            top_k=8, embedding_model="fake-model", auto_ingest=True, enhanced_analysis=False,
+            mcp_tools=True, web_search=True, web_search_timeout=15,
+        )
+        monkeypatch.setattr(server, "RagConfig", type("C", (), {"load": staticmethod(lambda: fake_cfg)}))
+
+        captured = {}
+
+        class FakeEmbedder:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class FakeRagStore:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class FakeSvc:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class FakeQA:
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+
+        class FakeSearch:
+            available = False
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(server, "LocalEmbedder", FakeEmbedder)
+        monkeypatch.setattr(server, "RagStore", FakeRagStore)
+        monkeypatch.setattr(server, "IngestionService", FakeSvc)
+        monkeypatch.setattr(server, "RagQA", FakeQA)
+        monkeypatch.setattr(server, "TavilyWebSearch", FakeSearch)
+        monkeypatch.setattr(server, "_mcp_tool_defs", lambda: None)
+
+        orig = (server.rag_store, server.rag_service, server.rag_qa)
+        try:
+            server._init_rag()
+        finally:
+            server.rag_store, server.rag_service, server.rag_qa = orig
+
+        assert captured["tool_executor"] is not None
+        assert captured["tool_executor"]("get_realtime_quote", {}) != ""
+        assert captured["supplement_request_handler"] is server._handle_supplement_request

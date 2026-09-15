@@ -2257,6 +2257,42 @@ input, select, button { font-family: inherit; font-size: inherit; }
   border: 1px solid var(--border);
 }
 
+.chat-supplement-consent {
+  align-self: flex-start;
+  width: min(100%, 520px);
+  box-sizing: border-box;
+  padding: var(--space-md);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.chat-supplement-consent h3 { margin: 0 0 var(--space-xs); font-size: 14px; }
+.chat-supplement-consent p { margin: 0; }
+.chat-supplement-reason { color: var(--text-primary); }
+.chat-supplement-hint, .chat-supplement-status { margin-top: var(--space-xs) !important; font-size: 12px; color: var(--text-secondary); }
+.chat-supplement-candidates { display: flex; flex-direction: column; gap: var(--space-xs); margin-top: var(--space-sm); }
+.chat-supplement-candidate {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.chat-supplement-candidate input { width: 18px; height: 18px; flex: 0 0 auto; }
+.chat-supplement-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); margin-top: var(--space-md); }
+.chat-supplement-actions button { min-height: 44px; }
+.chat-supplement-consent button:focus-visible,
+.chat-supplement-candidate:has(input:focus-visible) {
+  outline: 3px solid rgb(59 130 246 / 30%);
+  outline-offset: 2px;
+}
+.chat-supplement-actions button:disabled { cursor: not-allowed; opacity: .55; }
+
 .chat-draft-bar {
   border: 1px dashed var(--accent-border);
   background: rgba(59, 130, 246, 0.05);
@@ -2407,6 +2443,30 @@ input, select, button { font-family: inherit; font-size: inherit; }
   flex-direction: column;
   gap: var(--space-xs);
 }
+
+.chat-supplement-summary {
+  align-self: flex-start;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  font-size: 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-light);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.chat-supplement-summary p { margin: 0; }
+.chat-supplement-summary-head { color: var(--text-primary); font-weight: 600; }
+.chat-supplement-summary-periods,
+.chat-supplement-summary-skipped { color: var(--text-secondary); margin-top: 2px !important; }
+.chat-supplement-summary-failures {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+  color: var(--text-secondary);
+}
+.chat-supplement-summary-failures li { overflow-wrap: anywhere; }
 
 .chat-artifacts {
   align-self: flex-start;
@@ -2662,6 +2722,13 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 }
 
 /* 窄屏（390px）：范围选择、状态与证据块换行，避免横向滚动。 */
+@media (max-width: 640px) {
+  .chat-supplement-consent { width: 100%; padding: var(--space-sm); }
+  /* DOM order is decline then confirm, and visual/tab order stays identical. */
+  .chat-supplement-actions { flex-direction: column; }
+  .chat-supplement-actions button { width: 100%; }
+}
+
 @media (max-width: 390px) {
   .chat-scope-bar { gap: 4px; padding: 6px 8px; }
   .chat-scope-options { gap: 6px; }

@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from webapp.chat_models import AnswerRun, EvidenceArtifact, Scope
 from webapp.chat_store import ChatStore
 
@@ -121,3 +123,118 @@ def test_summary_and_model_messages_use_run_without_exposing_run_metadata(tmp_pa
         {"role": "assistant", "content": "已停止"},
         {"role": "user", "content": "失败问题"},
     ]
+
+
+def _supplement_request(sid: str) -> dict:
+    return {
+        "id": "sup-1",
+        "session_id": sid,
+        "status": "proposed",
+        "question_digest": "digest-1",
+        "candidates": [{
+            "id": "candidate-1",
+            "report_id": "601288:2025-06-30:semi_annual",
+            "code": "601288",
+            "company": "农业银行",
+            "period": "2025-06-30",
+            "report_type": "semi_annual",
+            "source": "巨潮资讯",
+        }],
+    }
+
+
+def test_saved_supplement_survives_reload_and_stays_bound_to_its_session(tmp_path):
+    path = tmp_path / "sessions.json"
+    store = ChatStore(str(path))
+    sid = store.create_session()["id"]
+
+    saved = store.save_supplement(_supplement_request(sid))
+
+    assert saved["session_id"] == sid
+    reloaded = ChatStore(str(path))
+    assert reloaded.get_supplement("sup-1")["session_id"] == sid
+    assert reloaded.get_supplement("sup-1")["status"] == "proposed"
+    assert reloaded.get_supplement("missing") is None
+
+
+def test_supplement_requires_existing_session_and_cannot_be_rebound(tmp_path):
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    other = store.create_session()["id"]
+    assert store.save_supplement(_supplement_request("nope")) is None
+
+    sid = store.create_session()["id"]
+    assert store.save_supplement(_supplement_request(sid))["session_id"] == sid
+    with pytest.raises(ValueError, match="session"):
+        store.save_supplement(_supplement_request(other))
+    with pytest.raises(ValueError):
+        store.save_supplement({"session_id": sid})
+
+
+def test_delete_session_removes_its_supplements(tmp_path):
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    sid = store.create_session()["id"]
+    store.save_supplement(_supplement_request(sid))
+
+    assert store.delete_session(sid) is True
+
+    assert store.get_supplement("sup-1") is None
+
+
+def test_waiting_consent_run_with_supplement_summary_survives_reload(tmp_path):
+    path = tmp_path / "sessions.json"
+    store = ChatStore(str(path))
+    sid = store.create_session()["id"]
+    run = AnswerRun(
+        content="",
+        status="waiting_consent",
+        scope=Scope.company_only("601288", "农业银行", ["601288:2024-12-31:annual"]),
+        supplement={
+            "status": "proposed",
+            "reason": "缺少 2025 半年报",
+            "candidates": [{
+                "id": "candidate-1", "company": "农业银行", "code": "601288",
+                "period": "2025-06-30", "report_type": "semi_annual",
+            }],
+        },
+    )
+    store.append_turn(sid, question="2025 上半年情况？", run=run)
+
+    reloaded = ChatStore(str(path)).get_session(sid)
+
+    assert reloaded["messages"][1]["run"]["status"] == "waiting_consent"
+    assert reloaded["messages"][1]["run"]["supplement"]["status"] == "proposed"
+    assert reloaded["messages"][1]["run"]["supplement"]["candidates"][0]["code"] == "601288"
+
+
+def test_load_survives_non_mapping_supplements_field(tmp_path):
+    """supplements 是非空数组时也不影响会话读取（`or {}` 兜不住真值列表）。"""
+    path = tmp_path / "sessions.json"
+    path.write_text(
+        json.dumps({
+            "sessions": [{
+                "id": "s1",
+                "title": "旧会话",
+                "messages": [
+                    {"role": "user", "content": "问题"},
+                    {"role": "assistant", "content": "旧回答"},
+                ],
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+            }],
+            "supplements": [{"id": "sup-1", "session_id": "s-x"}],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    store = ChatStore(str(path))
+
+    assert [session["id"] for session in store.list_sessions()] == ["s1"]
+    assert store.get_session("s1")["messages"][0]["content"] == "问题"
+    assert store.get_supplement("sup-1") is None
+
+    sid = store.create_session()["id"]
+    assert store.save_supplement(_supplement_request(sid))["session_id"] == sid
+
+    reloaded = ChatStore(str(path))
+    assert sorted(session["id"] for session in reloaded.list_sessions()) == sorted(["s1", sid])
+    assert reloaded.get_supplement("sup-1")["session_id"] == sid

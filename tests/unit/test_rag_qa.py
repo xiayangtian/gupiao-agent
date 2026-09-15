@@ -1,7 +1,9 @@
 import logging
 
+import pytest
+
 from financial_report_fetcher.rag.config import RagConfig
-from financial_report_fetcher.rag.qa import RagQA
+from financial_report_fetcher.rag.qa import SUPPLEMENT_REQUEST_TOOL, RagQA
 from financial_report_fetcher.rag.store import RagStore
 from financial_report_fetcher.rag.chunking import Chunk
 from webapp.chat_models import Scope
@@ -559,3 +561,176 @@ def test_build_report_id_preserves_report_periods():
     assert RagQA.build_report_id("600900", "2025-06-30") == "600900:2025-06-30:semi_annual"
     assert RagQA.build_report_id("600900", "2025-03-31") == "600900:2025-03-31:quarterly"
     assert RagQA.build_report_id("600900", "2025-09-30") == "600900:2025-09-30:quarterly"
+
+
+def test_supplement_request_tool_stops_round_without_executing_or_downloading(tmp_path, fake_embedder):
+    """受控补报请求：不执行工具、不消耗额度，直接上交补充需求并结束本轮。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容S")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{
+            "id": "c1", "name": "request_missing_reports",
+            "arguments": (
+                '{"reason":"本地缺少 2025 半年报",'
+                '"needs":[{"period":"2025-06-30","report_type":"semi_annual"}]}'
+            ),
+        }])],
+        [_done_event("不应到达最终回答")],
+    ])
+    executed = []
+    handled = []
+    qa = RagQA(store, ai, top_k=4,
+               tool_executor=lambda name, args: executed.append((name, args)) or "不应调用",
+               supplement_request_handler=lambda payload: handled.append(payload))
+
+    events = list(qa.answer_stream("2025 上半年情况？", tools=[SUPPLEMENT_REQUEST_TOOL]))
+
+    request = next(event for event in events if event["type"] == "supplement_request")
+    assert request["reason"] == "本地缺少 2025 半年报"
+    assert request["needs"] == [{"period": "2025-06-30", "report_type": "semi_annual"}]
+    assert executed == []
+    assert handled == [{
+        "reason": "本地缺少 2025 半年报",
+        "needs": [{"period": "2025-06-30", "report_type": "semi_annual"}],
+    }]
+    assert not any(event["type"] == "done" for event in events)
+    assert len(ai.calls) == 1
+
+
+def test_supplement_request_rejected_by_handler_keeps_answering(tmp_path, fake_embedder):
+    """上层拒绝补充时：不发出补报事件，把可控失败回传给模型继续回答。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容T")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{
+            "id": "c1", "name": "request_missing_reports",
+            "arguments": '{"reason":"缺少半年报","needs":[{"period":"2025-06-30","report_type":"semi_annual"}]}',
+        }])],
+        [_done_event("基于已有信息的回答")],
+    ])
+    executed = []
+    qa = RagQA(store, ai, top_k=4,
+               tool_executor=lambda name, args: executed.append((name, args)) or "不应调用",
+               supplement_request_handler=lambda payload: False)
+
+    events = list(qa.answer_stream("2025 上半年情况？", tools=[SUPPLEMENT_REQUEST_TOOL]))
+
+    assert not any(event["type"] == "supplement_request" for event in events)
+    assert events[-1]["type"] == "done"
+    assert executed == []
+    tool_messages = [m for m in ai.calls[1]["messages"] if m["role"] == "tool"]
+    assert tool_messages and tool_messages[0]["content"].startswith("工具调用失败")
+
+
+@pytest.mark.parametrize("arguments", [
+    '{"reason":"缺少半年报"}',
+    '{"reason":"缺少半年报","needs":[]}',
+    '{"reason":"","needs":[{"period":"2025-06-30","report_type":"semi_annual"}]}',
+    '{"reason":"缺少半年报","needs":[{"period":"2025-06-30","report_type":"monthly"}]}',
+    '{"reason":"缺少半年报","needs":[{"period":"2025-06-30不合法","report_type":"semi_annual"}]}',
+    '{"reason":"缺少半年报","needs":[{"period":"2025-06-30","report_type":"semi_annual"},'
+    '{"period":"2025-03-31","report_type":"quarterly"},{"period":"2024-12-31","report_type":"annual"},'
+    '{"period":"2024-09-30","report_type":"quarterly"},{"period":"2024-06-30","report_type":"semi_annual"},'
+    '{"period":"2024-03-31","report_type":"quarterly"}]}',
+])
+def test_invalid_supplement_request_is_reported_back_without_download(tmp_path, fake_embedder, arguments):
+    """非法补报参数：只回传可控失败，不发出补报事件、不执行任何工具。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容U")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{"id": "c1", "name": "request_missing_reports", "arguments": arguments}])],
+        [_done_event("基于已有信息的回答")],
+    ])
+    executed = []
+    handled = []
+    qa = RagQA(store, ai, top_k=4,
+               tool_executor=lambda name, args: executed.append((name, args)) or "不应调用",
+               supplement_request_handler=lambda payload: handled.append(payload))
+
+    events = list(qa.answer_stream("2025 上半年情况？", tools=[SUPPLEMENT_REQUEST_TOOL]))
+
+    assert not any(event["type"] == "supplement_request" for event in events)
+    assert handled == []
+    assert executed == []
+    tool_messages = [m for m in ai.calls[1]["messages"] if m["role"] == "tool"]
+    assert tool_messages and tool_messages[0]["content"].startswith("工具调用失败")
+
+
+def test_supplement_request_without_handler_is_controlled_failure(tmp_path, fake_embedder):
+    """未启用补充授权时保持兼容：不得执行工具，也不得发出补报事件。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容V")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{
+            "id": "c1", "name": "request_missing_reports",
+            "arguments": '{"reason":"缺少半年报","needs":[{"period":"2025-06-30","report_type":"semi_annual"}]}',
+        }])],
+        [_done_event("基于已有信息的回答")],
+    ])
+    executed = []
+    qa = RagQA(store, ai, top_k=4,
+               tool_executor=lambda name, args: executed.append((name, args)) or "不应调用")
+
+    events = list(qa.answer_stream("2025 上半年情况？", tools=[SUPPLEMENT_REQUEST_TOOL]))
+
+    assert not any(event["type"] == "supplement_request" for event in events)
+    assert events[-1]["type"] == "done"
+    assert executed == []
+
+
+def test_accepted_supplement_request_consumes_no_tool_call_budget(tmp_path, fake_embedder):
+    """已被接受的补报请求不执行工具、不消耗 max_tool_calls 额度。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容W")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{
+            "id": "c1", "name": "request_missing_reports",
+            "arguments": '{"reason":"缺少半年报","needs":[{"period":"2025-06-30","report_type":"semi_annual"}]}',
+        }])],
+    ])
+    executed = []
+    qa = RagQA(store, ai, top_k=4, max_tool_calls=1,
+               tool_executor=lambda name, args: executed.append((name, args)) or "不应调用",
+               supplement_request_handler=lambda payload: None)
+
+    events = list(qa.answer_stream("2025 上半年情况？", tools=[SUPPLEMENT_REQUEST_TOOL]))
+
+    assert events[-1]["type"] == "supplement_request"
+    assert executed == []
+    assert not any(event["type"] == "tool_result" for event in events)
+    assert qa.max_tool_calls == 1  # 额度未被消耗或改写
+
+
+def test_rejected_supplement_request_keeps_tool_call_budget_usable(tmp_path, fake_embedder):
+    """处理器拒绝（参数合法）时也不占额度：随后的真实工具在 max_tool_calls=1 下仍可执行。"""
+    store = RagStore(str(tmp_path), fake_embedder)
+    store.upsert([_chunk("内容X")])
+    ai = FakeToolAI([
+        [_tool_calls_event([{
+            "id": "c1", "name": "request_missing_reports",
+            "arguments": (
+                '{"reason":"缺少半年报",'
+                '"needs":[{"period":"2025-06-30","report_type":"semi_annual"}]}'
+            ),
+        }])],
+        [_tool_calls_event([{
+            "id": "c2", "name": "stock_prices", "arguments": '{"symbol":"600519"}',
+        }])],
+        [_done_event("基于工具数据的回答")],
+    ])
+    executed = []
+    handled = []
+    qa = RagQA(store, ai, top_k=4, max_tool_calls=1,
+               tool_executor=lambda name, args: executed.append(name) or "价格 1 元",
+               supplement_request_handler=lambda payload: handled.append(payload) or False)
+
+    events = list(qa.answer_stream("现在价格？", tools=[SUPPLEMENT_REQUEST_TOOL]))
+
+    # 参数合法，确实到达处理器；处理器返回 False 才被拒。
+    assert handled == [{
+        "reason": "缺少半年报",
+        "needs": [{"period": "2025-06-30", "report_type": "semi_annual"}],
+    }]
+    assert not any(event["type"] == "supplement_request" for event in events)
+    assert executed == ["stock_prices"]
+    assert events[-1]["type"] == "done"

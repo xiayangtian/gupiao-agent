@@ -23,14 +23,14 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import asdict
-from typing import Any, Callable, Dict, List, Literal, Optional
+from dataclasses import asdict, dataclass, field, replace
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from financial_report_fetcher.ai_client import AIClient
 from financial_report_fetcher.analysis_ai import build_progressive_pipeline
@@ -58,15 +58,28 @@ from financial_report_fetcher.rag.mcp_tools import (
 from financial_report_fetcher.rag.config import RagConfig
 from financial_report_fetcher.rag.embedding import LocalEmbedder
 from financial_report_fetcher.rag.ingest import IngestionService
-from financial_report_fetcher.rag.qa import RagQA
+from financial_report_fetcher.rag.qa import (
+    SUPPLEMENT_REASON_MAX_CHARS,
+    SUPPLEMENT_REQUEST_TOOL,
+    SUPPLEMENT_REQUEST_TOOL_NAME,
+    RagQA,
+)
 from financial_report_fetcher.rag.store import RagStore
 from financial_report_fetcher.rag.web_search import TavilyWebSearch
 
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
-from .chat_models import AnswerRun, IndustryRef, Scope
+from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, IndustryRef, Scope
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
+from .chat_supplement import (
+    SupplementCandidate,
+    SupplementCandidateResolver,
+    SupplementExecutor,
+    SupplementOutcome,
+    SupplementRegistry,
+    SupplementRequest,
+)
 from .mcp_guard import McpCircuitBreaker
 from .history import (
     analyzed_periods_for_code,
@@ -187,7 +200,7 @@ def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
 
 
 def _build_chat_tool_defs(cfg: Any) -> Optional[List[Dict[str, Any]]]:
-    """组合 MCP 与内部网页搜索工具，网页搜索不受 MCP 熔断影响。"""
+    """组合 MCP、内部网页搜索与受控补报工具；网页搜索不受 MCP 熔断影响。"""
     definitions = list(_mcp_tool_defs() or []) if getattr(cfg, "mcp_tools", False) else []
     # 防御性过滤：即使 MCP 定义来自旧进程缓存，也不能再暴露已下线工具。
     definitions = [
@@ -197,7 +210,22 @@ def _build_chat_tool_defs(cfg: Any) -> Optional[List[Dict[str, Any]]]:
     web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
     if getattr(cfg, "web_search", True) and web.available:
         definitions.extend(to_openai_tools([WEB_SEARCH_TOOL]))
+    # 补报工具只申请授权，不执行下载；由服务端解析候选并等待用户确认。
+    definitions.append(SUPPLEMENT_REQUEST_TOOL)
     return definitions or None
+
+
+def _unavailable_tool_executor() -> Callable[[str, Dict[str, Any]], str]:
+    """MCP 与网页搜索都不可用时的占位执行器。
+
+    RagQA 的工具编排路径只在 ``tool_executor is not None`` 时进入；补报工具必须
+    经由该路径才能到达模型，因此这里保留一个只返回受控失败说明的执行器。
+    任何真实工具都不会被调用，``use_mcp=false`` 的纯 RAG 路径也不受影响。
+    """
+    def _executor(name: str, arguments: Dict[str, Any]) -> str:
+        return f"工具调用失败：{name} 当前不可用"
+
+    return _executor
 
 
 # 股票名称 → 代码 词典缓存（来源：MCP get_stock_a_code_name，加载一次复用）
@@ -405,7 +433,9 @@ def _init_rag() -> None:
             rag_store,
             ai_client,
             top_k=cfg.top_k,
-            tool_executor=_build_chat_tool_executor(cfg),
+            # 补报工具需要工具编排路径，工具全不可用时用占位执行器保底。
+            tool_executor=_build_chat_tool_executor(cfg) or _unavailable_tool_executor(),
+            supplement_request_handler=_handle_supplement_request,
             max_tool_rounds=getattr(cfg, "mcp_max_tool_rounds", 3),
             max_tool_calls=getattr(cfg, "mcp_max_tool_calls", 6),
             reranker=reranker,
@@ -1292,18 +1322,517 @@ def _sse(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# ── 智能问答财报补充下载：候选解析、一次性授权与恢复回答 ──────────
+
+# 一次性授权请求表（进程内），与持久化记录共同构成授权边界。
+supplement_registry = SupplementRegistry()
+# 候选 → 受控报告元数据；与授权表同生命周期，重启后失效（fail-closed）。
+_supplement_reports: Dict[str, Dict[str, ReportMeta]] = {}
+_supplement_reports_lock = threading.Lock()
+# 请求线程私有的补报上下文：模型只能提交需求，不能决定候选或触发下载。
+_supplement_context = threading.local()
+
+_SUPPLEMENT_TYPE_LABELS = {"annual": "年报", "semi_annual": "半年报", "quarterly": "季报"}
+# 等待授权与无可用候选时的受控回答文案（不含模型猜测）。
+_SUPPLEMENT_WAITING_TEXT = "已申请补充财报原文，等待你选择要下载的报告。"
+_SUPPLEMENT_UNAVAILABLE_TEXT = (
+    "本地现有财报证据不足，且未找到可补充下载的报告；"
+    "以下回答仅基于当前可核验的信息，请谨慎参考。"
+)
+# 模型申请补库但问题本身不在单公司财报范围内：不得声称“不存在可下载报告”。
+_SUPPLEMENT_OUT_OF_SCOPE_TEXT = (
+    "当前问题不属于单公司财报范围，无法自动补充财报原文；"
+    "以下回答仅基于当前可核验的信息，请谨慎参考。"
+)
+
+
+def _supplement_unavailable_text(scope: Optional[Scope]) -> str:
+    """按真实原因给出补报不可用的诚实说明。"""
+    if scope is not None and scope.mode == "company_only":
+        return _SUPPLEMENT_UNAVAILABLE_TEXT
+    return _SUPPLEMENT_OUT_OF_SCOPE_TEXT
+
+
+class _SseEventPump:
+    """把同步事件源（阻塞式模型调用）放到生产者线程，经 asyncio.Queue 转发。
+
+    多个会话的流式请求因此真正并行；一个会话的模型调用不会阻塞其他会话的
+    响应。事件循环关闭（客户端断开后清理）时丢弃剩余事件而不报错。
+    """
+
+    def __init__(self, loop: "asyncio.AbstractEventLoop", label: str, run_id: str = "") -> None:
+        self.queue: "asyncio.Queue" = asyncio.Queue(maxsize=64)
+        self.sentinel = object()
+        self._loop = loop
+        self._label = label
+        self._run_id = run_id
+        self._stop = threading.Event()
+
+    def put(self, item: Any) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(self.queue.put(item), self._loop)
+        except RuntimeError:
+            pass
+
+    def start(self, source: Callable[[], Any]) -> None:
+        def _run() -> None:
+            try:
+                for item in source():
+                    if self._stop.is_set():
+                        return
+                    self.put(item)
+            except Exception as exc:
+                logger.warning(
+                    "chat_run_producer_failed run_id=%s error_type=%s",
+                    self._run_id or "-", type(exc).__name__,
+                )
+                if not self._stop.is_set():
+                    self.put({"type": "error", "error": f"{self._label}失败：{exc}"})
+            finally:
+                if not self._stop.is_set():
+                    self.put(self.sentinel)
+
+        threading.Thread(target=_run, daemon=True, name=f"{self._label}-producer").start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+class ResolveSupplementRequest(BaseModel):
+    """用户对一次补充授权请求的决定。"""
+
+    session_id: str
+    action: Literal["approve", "decline"]
+    candidate_ids: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def _decline_must_omit_candidate_ids(self) -> "ResolveSupplementRequest":
+        """拒绝操作不接受候选字段；显式 null 与省略字段的语义不同。"""
+        if self.action == "decline" and "candidate_ids" in self.model_fields_set:
+            raise ValueError("拒绝补充请求不接受 candidate_ids")
+        return self
+
+
+def _report_id_of(meta: ReportMeta) -> str:
+    return build_report_id(meta.company_id, meta.period, meta.report_type)
+
+
+def _supplement_label(period: str, report_type: str) -> str:
+    return f"{period[:4]} {_SUPPLEMENT_TYPE_LABELS.get(report_type, report_type)}"
+
+
+def _indexed_report_ids() -> List[str]:
+    if rag_store is None:
+        return []
+    try:
+        return list(rag_store.list_report_ids())
+    except Exception:
+        logger.warning("读取本地索引报告失败，补充候选可能重复", exc_info=True)
+        return []
+
+
+def _fetch_supplement_reports(scope: Scope, needs: List[Dict[str, Any]]) -> List[ReportMeta]:
+    """按受控披露需求查询目标公司的报告元数据。
+
+    只查询当前 Scope 的公司；查询失败或需求非法时返回空列表（按现有证据回答，
+    不下载、不向调用方抛异常）。
+    """
+    if scope.mode != "company_only" or not scope.companies:
+        return []
+    periods: List[dt.date] = []
+    report_types: List[ReportType] = []
+    for need in needs or []:
+        if not isinstance(need, dict):
+            continue
+        try:
+            periods.append(dt.date.fromisoformat(str(need.get("period"))))
+            report_types.append(ReportType(str(need.get("report_type"))))
+        except (TypeError, ValueError):
+            continue
+    if not periods or not report_types:
+        return []
+    try:
+        return list(datasource.fetch_reports(
+            stock_code=scope.companies[0].code,
+            report_types=sorted(set(report_types), key=lambda item: item.value),
+            # 需求期次通常要求“最新”，向前放宽若干年以便解析同公司其他可补披露。
+            start_date=dt.date(min(period.year for period in periods) - 2, 1, 1),
+            end_date=max(periods),
+        ))
+    except Exception:
+        logger.warning("补充财报候选查询失败，按现有证据回答", exc_info=True)
+        return []
+
+
+def _handle_supplement_request(payload: Dict[str, Any]) -> bool:
+    """RagQA 补报处理器：仅在请求线程上下文内登记受控需求，绝不下载。"""
+    context = getattr(_supplement_context, "current", None)
+    if not context:
+        return False
+    context["payload"] = payload
+    return True
+
+
+def _remember_supplement_reports(
+    request_id: str, candidates: List[SupplementCandidate], metas: List[ReportMeta],
+) -> None:
+    """记住候选 → 报告元数据，供已授权后的下载执行器使用。"""
+    by_report_id = {_report_id_of(meta): meta for meta in metas}
+    by_candidate = {
+        candidate.id: by_report_id[candidate.report_id]
+        for candidate in candidates
+        if candidate.report_id in by_report_id
+    }
+    with _supplement_reports_lock:
+        _supplement_reports[request_id] = by_candidate
+
+
+def _supplement_reports_for(request_id: str) -> Dict[str, ReportMeta]:
+    with _supplement_reports_lock:
+        return dict(_supplement_reports.get(request_id) or {})
+
+
+def _supplement_candidate_payload(candidate: SupplementCandidate) -> Dict[str, str]:
+    """候选对外载荷：只有可读报告身份，不含下载地址、本地路径或模型参数。"""
+    return {
+        "id": candidate.id,
+        "company": candidate.company,
+        "code": candidate.code,
+        "period": candidate.period,
+        "report_type": candidate.report_type,
+        "label": _supplement_label(candidate.period, candidate.report_type),
+        "source": candidate.source,
+    }
+
+
+def _persist_supplement_status(request_id: str, status: str) -> None:
+    """同步授权状态到会话存储；以登记表为准，存储不可用时只记日志。"""
+    record = chat_store.get_supplement(request_id)
+    if record is None:
+        return
+    record["status"] = status
+    live = supplement_registry.get(request_id)
+    if live is not None:
+        record["status"] = live.status
+        record["selected_ids"] = list(live.selected_ids)
+        record["consumed_at"] = live.consumed_at
+    try:
+        chat_store.save_supplement(record)
+    except Exception:
+        logger.warning("补充授权状态无法落盘：%s", status, exc_info=True)
+
+
+def _propose_supplement(
+    sid: str, question: str, scope: Scope, payload: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """把模型需求解析为受控候选并保存待授权请求；不可用时返回 None。
+
+    返回 None 表示不得向用户发出授权卡（无候选、范围不符或会话不可绑定），调用
+    方继续按现有证据给出回答。
+    """
+    if scope.mode != "company_only":
+        return None
+    needs = payload.get("needs") or []
+    metas = _fetch_supplement_reports(scope, needs)
+    if not metas:
+        return None
+    try:
+        candidates = SupplementCandidateResolver().resolve(
+            scope, needs, metas, _pdf_file_exists, _indexed_report_ids,
+        )
+    except Exception:
+        logger.warning("补充候选解析失败，按现有证据回答", exc_info=True)
+        return None
+    if not candidates:
+        return None
+
+    request = supplement_registry.create(sid, question, scope, candidates)
+    stored = chat_store.save_supplement({
+        "id": request.id,
+        "session_id": sid,
+        "question_digest": request.question_digest,
+        "scope": scope.to_dict(),
+        "candidates": [candidate.to_dict() for candidate in candidates],
+        "reason": str(payload.get("reason") or "")[:SUPPLEMENT_REASON_MAX_CHARS],
+        "status": request.status,
+        "selected_ids": list(request.selected_ids),
+        "created_at": request.created_at,
+        "expires_at": request.expires_at,
+        "consumed_at": request.consumed_at,
+    })
+    if stored is None:
+        # 会话不存在：授权无法绑定，视为不可用（不下载）。
+        logger.warning("补充请求无法绑定会话，按现有证据回答：%s", sid)
+        return None
+    _remember_supplement_reports(request.id, candidates, metas)
+    return {
+        # 发给浏览器的授权事件载荷：只有可读报告身份，不含下载地址与本地路径。
+        "event": {
+            "supplement_id": request.id,
+            "reason": str(payload.get("reason") or "")[:SUPPLEMENT_REASON_MAX_CHARS],
+            "limit": SUPPLEMENT_MAX_CANDIDATES,
+            "candidates": [_supplement_candidate_payload(c) for c in candidates],
+        },
+        # 随 waiting_consent 运行落盘的摘要
+        "summary": _supplement_summary(
+            status="proposed",
+            reason=str(payload.get("reason") or ""),
+            candidates=candidates,
+        ),
+    }
+
+
+def _supplement_summary(
+    *,
+    status: str,
+    reason: str,
+    candidates: List[SupplementCandidate],
+    ingested: Optional[List[str]] = None,
+    skipped: Optional[List[str]] = None,
+    failed: Optional[List[Dict[str, str]]] = None,
+    resumed_at: str = "",
+) -> Dict[str, Any]:
+    """构造 AnswerRun 的补充摘要；字段集受 chat_models 白名单约束。"""
+    return {
+        "status": status,
+        "reason": reason[:SUPPLEMENT_REASON_MAX_CHARS],
+        "limit": SUPPLEMENT_MAX_CANDIDATES,
+        "candidates": [_supplement_candidate_payload(candidate) for candidate in candidates],
+        "ingested_report_ids": list(ingested or []),
+        "skipped_report_ids": list(skipped or []),
+        "resumed_at": resumed_at,
+        "failed": list(failed or []),
+    }
+
+
+def _last_user_question(session: Dict[str, Any]) -> str:
+    """从会话中取回原问题：恢复回答必须重放同一问题，从历史消息里读。"""
+    for message in reversed(session.get("messages", [])):
+        if message.get("role") == "user" and message.get("content"):
+            return str(message["content"])
+    return ""
+
+
+def _supplement_question_matches(record: Mapping[str, Any], question: str) -> bool:
+    """授权只能恢复到提出问题的那次问答。
+
+    复用登记表创建授权时的同一摘要算法（同一归一化）；摘要缺失或比对失败一律
+    视为不匹配，由调用方 fail-closed 拒绝。
+    """
+    stored = str(record.get("question_digest") or "")
+    if not stored:
+        return False
+    try:
+        return SupplementRegistry._digest(question) == stored
+    except ValueError:
+        return False
+
+
+def _run_supplement_executor(
+    supplement_id: str, pending: SupplementRequest,
+) -> SupplementOutcome:
+    """在受控路径上顺序下载并摄取已授权候选。
+
+    不向上抛异常：协作方不可用或执行失败都转为只含候选 ID 与受控原因类别的最小
+    安全摘要，调用方据此给出诚实说明。
+    """
+    selected = tuple(pending.selected_ids)
+    if downloader is None or rag_service is None:
+        reason = "download_unavailable" if downloader is None else "ingest_unavailable"
+        return SupplementOutcome(
+            failed=selected,
+            failure_reasons=tuple((candidate_id, reason) for candidate_id in selected),
+        )
+    executor = SupplementExecutor(
+        downloader, rag_service, REPORTS_DIR, _supplement_reports_for(supplement_id),
+    )
+    try:
+        return executor.run(pending)
+    except PermissionError:
+        reason = "not_approved"
+    except Exception:
+        logger.warning("补充财报下载失败", exc_info=True)
+        reason = "download_failed"
+    return SupplementOutcome(
+        failed=selected,
+        failure_reasons=tuple((candidate_id, reason) for candidate_id in selected),
+    )
+
+
+def _resume_history(session: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """恢复回答的上下文：剔除等待授权的占位轮，也不重复传入原问题。"""
+    messages = [
+        message for message in session.get("messages", [])
+        if not (message.get("role") == "assistant"
+                and (message.get("run") or {}).get("status") == "waiting_consent")
+    ]
+    if messages and messages[-1].get("role") == "user":
+        messages = messages[:-1]
+    return messages[-8:]
+
+
+def _resume_chat_tools() -> Optional[List[Dict[str, Any]]]:
+    """恢复回答的工具集：去掉补报工具，一个问题的生命周期内只申请一次授权。"""
+    try:
+        definitions = _build_chat_tool_defs(RagConfig.load()) or []
+    except Exception:
+        logger.warning("恢复回答工具加载失败，按纯 RAG 回答", exc_info=True)
+        return None
+    remaining = [
+        item for item in definitions
+        if item.get("function", {}).get("name") != SUPPLEMENT_REQUEST_TOOL_NAME
+    ]
+    return remaining or None
+
+
+@dataclass
+class _RagRunState:
+    """一次流式问答运行的可变累积状态（SSE 转发与运行持久化共用）。"""
+
+    scope: Optional[Scope] = None
+    answer_parts: List[str] = field(default_factory=list)
+    pending_tool_args: List[Dict[str, Any]] = field(default_factory=list)
+    tool_artifacts: List[Any] = field(default_factory=list)
+    facts: List[Any] = field(default_factory=list)
+    evidence_artifacts: List[Any] = field(default_factory=list)
+    retrieval_report_ids: List[str] = field(default_factory=list)
+    model_name: str = ""
+    had_external_failure: bool = False
+    retrieval_degraded: bool = False
+    done_payload: Optional[Dict[str, Any]] = None
+    error_text: str = ""
+    empty: bool = False
+    supplement_request: Optional[Dict[str, Any]] = None
+
+
+def _relay_rag_event(
+    evt: Dict[str, Any], state: _RagRunState, normalizer: EvidenceNormalizer,
+) -> List[str]:
+    """把 RagQA 事件翻译为 SSE 帧，并把可持久化证据累积到 state。
+
+    ``/api/chat/stream`` 与补充授权恢复流共用本函数，避免事件语义分叉。
+    """
+    etype = evt.get("type")
+    frames: List[str] = []
+
+    if etype == "delta":
+        text = evt.get("text", "")
+        if text:
+            state.answer_parts.append(text)
+            frames.append(_sse("delta", {"text": text}))
+    elif etype == "tool_call":
+        state.pending_tool_args.append(evt.get("arguments", {}))
+        frames.append(_sse("tool_call", {
+            "name": evt.get("name", ""), "arguments": evt.get("arguments", {}),
+        }))
+    elif etype == "reasoning_stage":
+        frames.append(_sse("reasoning_stage", {
+            "stage": evt.get("stage", ""), "round": evt.get("round", 0),
+            "message": evt.get("message", ""),
+        }))
+    elif etype == "tool_result":
+        name = evt.get("name", "")
+        summary = evt.get("summary", "")
+        ok = bool(evt.get("ok", True))
+        args = state.pending_tool_args.pop(0) if state.pending_tool_args else {}
+        provider = "web_search" if name == "web_search" else "stock-data-mcp"
+        as_of = dt.datetime.now().isoformat(timespec="seconds")
+        try:
+            artifact = normalizer.normalize_tool_event(
+                name, args, summary, provider=provider, as_of=as_of, ok=ok,
+            )
+        except Exception:
+            state.had_external_failure = True
+        else:
+            state.tool_artifacts.append(artifact)
+            if not ok:
+                state.had_external_failure = True
+            try:
+                new_facts = normalizer.facts_from_structured_tool_payload(summary, artifact)
+            except ValueError:
+                # 非有限数值等受控字段异常：降级为 partial，不向上抛
+                state.had_external_failure = True
+                new_facts = ()
+            state.facts.extend(new_facts)
+            frames.append(_sse("artifact", {"artifact": artifact.to_dict()}))
+        frames.append(_sse("tool_result", {"name": name, "summary": summary, "ok": ok}))
+    elif etype == "supplement_request":
+        # 仅登记受控需求；候选解析、授权与下载都由服务端处理。
+        state.supplement_request = {
+            "reason": str(evt.get("reason") or ""),
+            "needs": list(evt.get("needs") or []),
+        }
+    elif etype == "empty":
+        state.empty = True
+    elif etype == "error":
+        state.error_text = str(evt.get("error") or "未知错误")
+    elif etype == "done":
+        state.retrieval_report_ids.extend(evt.get("retrieval_report_ids", []) or [])
+        state.retrieval_degraded = bool(evt.get("retrieval_degraded", False))
+        state.model_name = evt.get("model") or ""
+        legacy_citations = evt.get("citations", []) or []
+        legacy_web_sources = evt.get("web_sources", []) or []
+        # 标准化 PDF/网页证据（analysis 引用只保留在旧 citations 字段一个版本）
+        state.evidence_artifacts.extend(normalizer.normalize_rag_citations(
+            legacy_citations,
+            analysis_dir=ANALYSIS_DIR,
+            reports_dir=REPORTS_DIR,
+            jump_version=int(time.time() * 1000),
+        ))
+        state.evidence_artifacts.extend(normalizer.normalize_web_sources(
+            legacy_web_sources,
+            fetched_at=dt.datetime.now().isoformat(timespec="seconds"),
+        ))
+        for artifact in state.evidence_artifacts:
+            frames.append(_sse("artifact", {"artifact": artifact.to_dict()}))
+        state.done_payload = evt
+
+    return frames
+
+
+def _make_answer_run(
+    state: _RagRunState,
+    *,
+    run_id: str,
+    created_at: str,
+    started_at: float,
+    status: str,
+    content: str,
+    supplement: Optional[Dict[str, Any]] = None,
+) -> AnswerRun:
+    """按累积状态构造可持久化的 AnswerRun。"""
+    return AnswerRun(
+        content=content,
+        status=status,
+        scope=state.scope,
+        facts=tuple(state.facts),
+        artifacts=tuple(state.evidence_artifacts),
+        tool_artifacts=tuple(state.tool_artifacts),
+        retrieval_report_ids=tuple(state.retrieval_report_ids),
+        id=run_id,
+        created_at=created_at,
+        completed_at=dt.datetime.now().isoformat(timespec="seconds"),
+        elapsed_seconds=round(time.perf_counter() - started_at, 3),
+        model=state.model_name,
+        supplement=supplement,
+    )
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingResponse:
     """流式全局问答（SSE）。
 
     事件：session / scope_resolved / run_started / delta / artifact /
-    tool_call / tool_result / reasoning_stage / done / error。
+    tool_call / tool_result / reasoning_stage / supplement_needed / done / error。
 
     - session:        会话 id（新建或沿用 body.session_id）
     - scope_resolved: 冻结的 Scope（范围合同）
     - run_started:    本次 AnswerRun 的 id
     - delta:          模型回答内容增量 {text}
     - artifact:       标准化证据/工具 artifact
+    - supplement_needed: 模型申请补充财报原文；载荷是受控候选清单
+                      {supplement_id, reason, limit, candidates}，此轮以
+                      waiting_consent 保存并结束，用户确认后走补充授权接口
     - done:           完整 AnswerRun（scope/facts/artifacts/status），同时保留
                       answer/citations/tools_used/web_sources/retrieval_degraded
                       旧字段一个版本
@@ -1346,73 +1875,35 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         # 同步生成器（rag_qa.answer_stream 内部为阻塞式 requests 流）放在独立
         # 生产者线程执行，经 asyncio.Queue 转发到事件循环 —— 这样多个会话的
         # 流式请求真正并行，一个会话的模型调用不会阻塞其他会话的响应。
-        q: "asyncio.Queue" = asyncio.Queue(maxsize=64)
-        SENTINEL = object()
-        stop_producer = threading.Event()
-        loop = asyncio.get_running_loop()
-
-        def _safe_put(item: Any) -> None:
-            """从生产者线程安全地把事件调度到事件循环（asyncio.Queue 非线程安全）"""
-            try:
-                asyncio.run_coroutine_threadsafe(q.put(item), loop)
-            except RuntimeError:
-                # 事件循环已关闭（客户端断开后清理）
-                pass
-
-        def _produce() -> None:
-            try:
-                for evt in rag_qa.answer_stream(body.question, history=history,
-                                                filters=body.filters, tools=tools,
-                                                priority_report_id=priority_report_id,
-                                                scope=scope, run_id=run_id):
-                    if stop_producer.is_set():
-                        return
-                    _safe_put(evt)
-            except Exception as exc:
-                logger.warning("chat_run_producer_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
-                if not stop_producer.is_set():
-                    _safe_put({"type": "error", "error": f"流式问答失败：{exc}"})
-            finally:
-                if not stop_producer.is_set():
-                    _safe_put(SENTINEL)
-
-        producer = threading.Thread(target=_produce, daemon=True, name="chat-stream-producer")
-        producer.start()
-
+        state = _RagRunState(scope=scope)
         normalizer = EvidenceNormalizer()
-        answer_parts: List[str] = []
-        pending_tool_args: List[Dict[str, Any]] = []
-        tool_artifacts: List[Any] = []
-        facts: List[Any] = []
-        evidence_artifacts: List[Any] = []
-        retrieval_report_ids: List[str] = []
-        model_name = ""
-        had_external_failure = False
+        pump = _SseEventPump(asyncio.get_running_loop(), "流式问答", run_id=run_id)
         saved = False
 
-        def _make_run(status: str, content: str) -> AnswerRun:
-            return AnswerRun(
-                content=content,
-                status=status,
-                scope=scope,
-                facts=tuple(facts),
-                artifacts=tuple(evidence_artifacts),
-                tool_artifacts=tuple(tool_artifacts),
-                retrieval_report_ids=tuple(retrieval_report_ids),
-                id=run_id,
-                created_at=created_at,
-                completed_at=dt.datetime.now().isoformat(timespec="seconds"),
-                elapsed_seconds=round(time.perf_counter() - started_at, 3),
-                model=model_name,
-            )
-
-        def _persist(status: str, content: str = "") -> AnswerRun:
+        def _persist(status: str, content: str = "", supplement=None) -> AnswerRun:
             nonlocal saved
-            run = _make_run(status, content)
+            run = _make_answer_run(
+                state, run_id=run_id, created_at=created_at, started_at=started_at,
+                status=status, content=content, supplement=supplement,
+            )
             chat_store.append_turn(sid, question=body.question, run=run)
             saved = True
             logger.info("chat_run_finished run_id=%s status=%s", run_id, status)
             return run
+
+        def _produce() -> Any:
+            # 补报上下文必须落在生产线程（模型调用所在线程）：RagQA 的补报处理器
+            # 由该线程回调，只能提交需求，不能决定候选或触发下载。
+            _supplement_context.current = {"session_id": sid, "payload": None}
+            try:
+                yield from rag_qa.answer_stream(
+                    body.question, history=history, filters=body.filters, tools=tools,
+                    priority_report_id=priority_report_id, scope=scope, run_id=run_id,
+                )
+            finally:
+                _supplement_context.current = None
+
+        pump.start(_produce)
 
         try:
             logger.info("chat_run_started run_id=%s", run_id)
@@ -1420,60 +1911,45 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             yield _sse("scope_resolved", {"scope": scope.to_dict()})
             yield _sse("run_started", {"run_id": run_id})
             while True:
-                evt = await q.get()
-                if evt is SENTINEL:
+                evt = await pump.queue.get()
+                if evt is pump.sentinel:
                     break
                 # 客户端已断开（点击「停止」）：终止生成，保留已产出部分
                 if await request.is_disconnected():
                     break
-                etype = evt.get("type")
-                if etype == "delta":
-                    text = evt.get("text", "")
-                    if text:
-                        answer_parts.append(text)
-                        yield _sse("delta", {"text": text})
-                elif etype == "tool_call":
-                    pending_tool_args.append(evt.get("arguments", {}))
-                    yield _sse("tool_call", {
-                        "name": evt.get("name", ""),
-                        "arguments": evt.get("arguments", {}),
-                    })
-                elif etype == "reasoning_stage":
-                    yield _sse("reasoning_stage", {
-                        "stage": evt.get("stage", ""), "round": evt.get("round", 0),
-                        "message": evt.get("message", ""),
-                    })
-                elif etype == "tool_result":
-                    name = evt.get("name", "")
-                    summary = evt.get("summary", "")
-                    ok = bool(evt.get("ok", True))
-                    args = pending_tool_args.pop(0) if pending_tool_args else {}
-                    provider = "web_search" if name == "web_search" else "stock-data-mcp"
-                    as_of = dt.datetime.now().isoformat(timespec="seconds")
-                    try:
-                        artifact = normalizer.normalize_tool_event(
-                            name, args, summary, provider=provider, as_of=as_of, ok=ok,
+                for frame in _relay_rag_event(evt, state, normalizer):
+                    yield frame
+
+                if state.supplement_request is not None:
+                    # 模型申请补充财报：解析受控候选并暂停等待用户授权。
+                    proposal = _propose_supplement(
+                        sid, body.question, scope, state.supplement_request
+                    )
+                    if proposal is not None:
+                        run = _persist(
+                            "waiting_consent", _SUPPLEMENT_WAITING_TEXT,
+                            supplement=proposal["summary"],
                         )
-                    except Exception:
-                        had_external_failure = True
-                    else:
-                        tool_artifacts.append(artifact)
-                        if not ok:
-                            had_external_failure = True
-                        try:
-                            new_facts = normalizer.facts_from_structured_tool_payload(
-                                summary, artifact
-                            )
-                        except ValueError:
-                            # 非有限数值等受控字段异常：降级为 partial，不向上抛
-                            had_external_failure = True
-                            new_facts = ()
-                        facts.extend(new_facts)
-                        yield _sse("artifact", {"artifact": artifact.to_dict()})
-                    yield _sse("tool_result", {
-                        "name": name, "summary": summary, "ok": ok,
+                        yield _sse("supplement_needed", {
+                            **proposal["event"],
+                            "session_id": sid,
+                            "run": run.to_dict(),
+                            "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                        })
+                        return
+                    # 无可用候选：按真实原因给出诚实说明，不假装可以补充。
+                    unavailable = _supplement_unavailable_text(scope)
+                    run = _persist("partial", unavailable)
+                    yield _sse("done", {
+                        "answer": unavailable,
+                        "citations": [],
+                        "session_id": sid,
+                        "run": run.to_dict(),
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
-                elif etype == "empty":
+                    return
+
+                if state.empty:
                     default = "知识库中未检索到相关内容，请补充更多报告或更换问法。"
                     run = _persist("completed", default)
                     yield _sse("done", {
@@ -1484,38 +1960,24 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
                     return
-                elif etype == "error":
-                    run = _persist("failed", "".join(answer_parts).strip())
+                if state.error_text:
+                    run = _persist("failed", "".join(state.answer_parts).strip())
                     yield _sse("error", {
-                        "error": evt.get("error", "未知错误"),
+                        "error": state.error_text,
                         "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
                     return
-                elif etype == "done":
-                    answer = evt.get("answer") or ""
-                    legacy_citations = evt.get("citations", []) or []
-                    legacy_web_sources = evt.get("web_sources", []) or []
-                    legacy_tools_used = evt.get("tools_used", []) or []
-                    retrieval_report_ids.extend(evt.get("retrieval_report_ids", []) or [])
-                    retrieval_degraded = bool(evt.get("retrieval_degraded", False))
-                    model_name = evt.get("model") or ""
-
-                    # 标准化 PDF/网页证据（analysis 引用只保留在旧 citations 字段一个版本）
-                    evidence_artifacts.extend(normalizer.normalize_rag_citations(
-                        legacy_citations,
-                        analysis_dir=ANALYSIS_DIR,
-                        reports_dir=REPORTS_DIR,
-                        jump_version=int(time.time() * 1000),
-                    ))
-                    evidence_artifacts.extend(normalizer.normalize_web_sources(
-                        legacy_web_sources,
-                        fetched_at=dt.datetime.now().isoformat(timespec="seconds"),
-                    ))
-                    for artifact in evidence_artifacts:
-                        yield _sse("artifact", {"artifact": artifact.to_dict()})
-
-                    status = "partial" if (had_external_failure or retrieval_degraded) else "completed"
+                if state.done_payload is not None:
+                    done_evt = state.done_payload
+                    answer = done_evt.get("answer") or ""
+                    legacy_citations = done_evt.get("citations", []) or []
+                    legacy_web_sources = done_evt.get("web_sources", []) or []
+                    legacy_tools_used = done_evt.get("tools_used", []) or []
+                    status = (
+                        "partial" if (state.had_external_failure or state.retrieval_degraded)
+                        else "completed"
+                    )
                     run = _persist(status, answer)
                     yield _sse("done", {
                         "answer": answer,
@@ -1523,7 +1985,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         "session_id": sid,
                         "tools_used": legacy_tools_used,
                         "web_sources": legacy_web_sources,
-                        "retrieval_degraded": retrieval_degraded,
+                        "retrieval_degraded": state.retrieval_degraded,
                         "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
@@ -1531,16 +1993,251 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         except Exception as exc:
             logger.error("chat_run_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
             if not saved:
-                _persist("failed", "".join(answer_parts).strip())
+                _persist("failed", "".join(state.answer_parts).strip())
             yield _sse("error", {
                 "error": f"流式问答失败：{exc}",
                 "elapsed_seconds": round(time.perf_counter() - started_at, 3),
             })
         finally:
-            stop_producer.set()
+            pump.stop()
             # 未正常完成（停止/断开/没有 done）：保存为 stopped，不伪装完整
             if not saved:
-                _persist("stopped", "".join(answer_parts).strip())
+                _persist("stopped", "".join(state.answer_parts).strip())
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/api/chat/supplements/{supplement_id}/resolve")
+async def resolve_chat_supplement(
+    supplement_id: str, body: ResolveSupplementRequest, request: Request,
+) -> StreamingResponse:
+    """用户对补充财报授权请求的决定，SSE 返回恢复后的回答。
+
+    事件：session / supplement_download_started / supplement_downloaded /
+    supplement_ingested / supplement_failed / run_started / delta / artifact /
+    tool_call / tool_result / reasoning_stage / done / error。
+
+    授权只在一次性登记表中生效且与会话绑定：跨会话、重放、过期、超限、篡改
+    候选都返回 409 且不调用下载器；拒绝或全部失败仍基于现有证据给出回答。
+    """
+    started_at = time.perf_counter()
+    _require_ai()
+    if rag_qa is None:
+        raise HTTPException(503, "RAG 知识库未初始化：请配置 rag.enabled 并执行索引")
+
+    record = chat_store.get_supplement(supplement_id)
+    if record is None:
+        raise HTTPException(404, f"未知补充请求：{supplement_id}")
+    if record.get("session_id") != body.session_id:
+        raise HTTPException(409, "补充请求不属于当前会话")
+    session = chat_store.get_session(body.session_id)
+    if session is None:
+        raise HTTPException(409, "补充请求所属会话不存在")
+    question = _last_user_question(session)
+    if not question.strip():
+        raise HTTPException(409, "会话中找不到原问题，无法恢复回答")
+    if not _supplement_question_matches(record, question):
+        # 提出问题后又问了别的（会话末条用户消息已被替换），或摘要缺失：
+        # fail-closed 拒绝，绝不触碰登记表、下载器与执行器。
+        raise HTTPException(409, "补充请求与当前问题不匹配，请重新提问后再补充")
+
+    try:
+        if body.action == "decline":
+            pending = supplement_registry.decline(supplement_id, body.session_id)
+            # decline 是终态转换，必须在生成回答前写入审计存储。
+            _persist_supplement_status(supplement_id, pending.status)
+        else:
+            pending = supplement_registry.approve(
+                supplement_id, body.session_id, body.candidate_ids or [],
+            )
+    except KeyError:
+        # 一次性登记表已失效（如进程重启）：fail-closed，不凭落盘记录放开下载。
+        raise HTTPException(404, f"未知补充请求：{supplement_id}")
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(409, f"补充请求不可用：{exc}")
+
+    sid = body.session_id
+    candidates = list(pending.candidates)
+    reason = str(record.get("reason") or "")
+    history = _resume_history(session)
+    run_id = uuid.uuid4().hex
+    created_at = dt.datetime.now().isoformat(timespec="seconds")
+    state = _RagRunState(scope=pending.scope)
+    ingested: List[str] = []
+    skipped: List[str] = []
+    failed: List[Dict[str, str]] = []
+    resumed_at = ""
+    saved = False
+    # 授权有效化但尚未取得证据时先记为失败；成功摄取后置为 completed。
+    supplement_status = "declined" if body.action == "decline" else "failed"
+
+    def _summary(status: str) -> Dict[str, Any]:
+        return _supplement_summary(
+            status=status, reason=reason, candidates=candidates,
+            ingested=ingested, skipped=skipped, failed=failed, resumed_at=resumed_at,
+        )
+
+    def _advance(status: str) -> None:
+        """推进登记表状态并落盘；失败只记日志，不影响回答产出。"""
+        try:
+            supplement_registry.transition(supplement_id, status)
+        except (KeyError, ValueError):
+            logger.warning("补充请求状态推进失败：%s", status, exc_info=True)
+        _persist_supplement_status(supplement_id, status)
+
+    async def gen():
+        nonlocal saved, supplement_status, resumed_at
+        normalizer = EvidenceNormalizer()
+        pump = _SseEventPump(asyncio.get_running_loop(), "恢复回答", run_id=run_id)
+
+        def _persist(status: str, content: str = "") -> AnswerRun:
+            nonlocal saved
+            run = _make_answer_run(
+                state, run_id=run_id, created_at=created_at, started_at=started_at,
+                status=status, content=content, supplement=_summary(supplement_status),
+            )
+            chat_store.append_turn(sid, question=question, run=run)
+            saved = True
+            return run
+
+        def _run_status() -> str:
+            if (body.action == "decline" or failed
+                    or state.had_external_failure or state.retrieval_degraded):
+                return "partial"
+            return "completed"
+
+        def _done(answer: str, citations: List[Any], done_evt: Dict[str, Any]) -> str:
+            run = _persist(_run_status(), answer)
+            return _sse("done", {
+                "answer": answer,
+                "citations": citations,
+                "session_id": sid,
+                "tools_used": done_evt.get("tools_used", []) or [],
+                "web_sources": done_evt.get("web_sources", []) or [],
+                "retrieval_degraded": state.retrieval_degraded,
+                "run": run.to_dict(),
+                "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+            })
+
+        try:
+            yield _sse("session", {"session_id": sid})
+
+            if body.action == "approve":
+                # 已授权：下载 → 摄取 → 恢复回答；候选已在提出阶段受控解析。
+                yield _sse("supplement_download_started", {
+                    "supplement_id": supplement_id,
+                    "candidate_ids": list(pending.selected_ids),
+                })
+                _advance("downloading")
+                outcome = await asyncio.to_thread(
+                    _run_supplement_executor, supplement_id, pending
+                )
+                ingested.extend(outcome.ingested_report_ids)
+                skipped.extend(outcome.skipped_report_ids)
+                failed.extend(
+                    {"candidate_id": candidate_id, "reason": reason_text}
+                    for candidate_id, reason_text in outcome.failure_reasons
+                )
+                for report_id in outcome.downloaded_report_ids:
+                    yield _sse("supplement_downloaded", {"report_id": report_id, "skipped": False})
+                for report_id in outcome.skipped_report_ids:
+                    yield _sse("supplement_downloaded", {"report_id": report_id, "skipped": True})
+                for report_id in outcome.ingested_report_ids:
+                    yield _sse("supplement_ingested", {"report_id": report_id})
+                for candidate_id, reason_text in outcome.failure_reasons:
+                    yield _sse("supplement_failed", {
+                        "candidate_id": candidate_id, "reason": reason_text,
+                    })
+                if outcome.ingested_report_ids:
+                    _advance("ingesting")
+                    _advance("resuming")
+                    supplement_status = "completed"
+                    # 只有真正取得 PDF 索引证据的报告才进入恢复范围。
+                    state.scope = replace(
+                        pending.scope,
+                        report_ids=pending.scope.report_ids + tuple(outcome.ingested_report_ids),
+                    )
+                else:
+                    # 未取得任何可用证据：授权无效化，但仍给出诚实回答。
+                    _advance("failed")
+                    logger.info("补充财报未取得可用证据：%s", supplement_id)
+
+            resumed_at = dt.datetime.now().isoformat(timespec="seconds")
+            yield _sse("run_started", {"run_id": run_id})
+
+            resume_scope = state.scope
+            pump.start(lambda: rag_qa.answer_stream(
+                question, history=history, filters=None, tools=_resume_chat_tools(),
+                priority_report_id=None, scope=resume_scope,
+            ))
+            while True:
+                evt = await pump.queue.get()
+                if evt is pump.sentinel:
+                    break
+                # 客户端已断开（点击「停止」）：保留已产出部分；授权已一次性消费，
+                # 登记表停在此后的状态，断开也不能重放。
+                if await request.is_disconnected():
+                    break
+                for frame in _relay_rag_event(evt, state, normalizer):
+                    yield frame
+
+                if state.empty:
+                    # 补充仍未取得证据时，说明这轮回答只覆盖了现有资料。
+                    answer = (
+                        _SUPPLEMENT_UNAVAILABLE_TEXT
+                        if body.action == "approve" and not ingested
+                        else "知识库中未检索到相关内容，请补充更多报告或更换问法。"
+                    )
+                    if supplement_status == "completed":
+                        # 已摄取完成但没有可用答题证据：登记表同步推进到 completed，
+                        # 避免停在 resuming 与运行摘要不一致。
+                        _advance("completed")
+                    run = _persist("partial", answer)
+                    yield _sse("done", {
+                        "answer": answer,
+                        "citations": [],
+                        "session_id": sid,
+                        "run": run.to_dict(),
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                    })
+                    return
+                if state.error_text:
+                    if supplement_status == "completed":
+                        # 已摄取但恢复回答失败：补充摘要据实记为失败，不冒充成功。
+                        _advance("failed")
+                        supplement_status = "failed"
+                    run = _persist("failed", "".join(state.answer_parts).strip())
+                    yield _sse("error", {
+                        "error": state.error_text,
+                        "run": run.to_dict(),
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                    })
+                    return
+                if state.done_payload is not None:
+                    done_evt = state.done_payload
+                    if supplement_status == "completed":
+                        _advance("completed")
+                    yield _done(
+                        done_evt.get("answer") or "",
+                        done_evt.get("citations", []) or [],
+                        done_evt,
+                    )
+                    return
+        except Exception as exc:
+            logger.exception("补充授权恢复回答失败")
+            if not saved:
+                _persist("failed", "".join(state.answer_parts).strip())
+            yield _sse("error", {
+                "error": f"恢复回答失败：{exc}",
+                "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+            })
+        finally:
+            pump.stop()
+            # 未正常完成（停止/断开/没有 done）：保存为 stopped，不伪装完整。
+            # 断开时登记表停留在 resuming/failed，绝不回到 proposed：授权已一次性
+            # 消费，断开也不能重放或重新下载。
+            if not saved:
+                _persist("stopped", "".join(state.answer_parts).strip())
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

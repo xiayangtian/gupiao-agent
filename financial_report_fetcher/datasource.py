@@ -213,6 +213,7 @@ class CNINFODatasource:
                         period=period,
                         download_url=download_url,
                         title=title,
+                        disclosure_date=e.announcement_time.date(),
                     )
                     all_entries.append(report_meta)
 

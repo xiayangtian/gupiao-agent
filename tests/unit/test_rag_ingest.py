@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 
@@ -444,7 +445,7 @@ def test_auto_ingest_pdf_skips_when_disabled(tmp_path, fake_embedder, monkeypatc
                            analysis_dir=str(tmp_path / "analysis"),
                            manifest_path=str(tmp_path / "rag" / "manifest.json"),
                            auto_ingest=False)
-    svc.auto_ingest_pdf(str(pdf))
+    assert svc.auto_ingest_pdf(str(pdf)) is False
     assert store.count_chunks() == 0
 
 
@@ -469,6 +470,52 @@ def test_ingest_file_migrates_legacy_manifest(tmp_path, fake_embedder, monkeypat
 
     assert svc.status()["reports"][rid]["chunks"] == store.count_chunks(rid)
     assert svc.status()["reports"][rid]["chunks"] >= 1
+
+
+def test_auto_ingest_pdf_returns_true_for_new_or_already_indexed_pdf(tmp_path, fake_embedder, monkeypatch):
+    pdf = _write_pdf(tmp_path)
+    monkeypatch.setattr("financial_report_fetcher.rag.chunking.extract_pdf_pages",
+                        lambda p: [(1, "第一节 重要提示\n营业收入862亿元")])
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    svc = IngestionService(store, reports_dir=str(tmp_path),
+                           analysis_dir=str(tmp_path / "analysis"),
+                           manifest_path=str(tmp_path / "rag" / "manifest.json"),
+                           auto_ingest=True)
+    assert svc.auto_ingest_pdf(str(pdf)) is True
+    assert svc.auto_ingest_pdf(str(pdf)) is True
+
+
+def test_auto_ingest_pdf_rejects_empty_pdf_index_including_same_hash_shortcut(tmp_path, fake_embedder, monkeypatch):
+    """有效 PDF 若未产生任何 PDF chunk，不能作为问答补充证据。"""
+    pdf = _write_pdf(tmp_path)
+    monkeypatch.setattr("financial_report_fetcher.rag.chunking.extract_pdf_pages", lambda p: [])
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    svc = IngestionService(store, reports_dir=str(tmp_path),
+                           analysis_dir=str(tmp_path / "analysis"),
+                           manifest_path=str(tmp_path / "rag" / "manifest.json"),
+                           auto_ingest=True)
+
+    assert svc.auto_ingest_pdf(str(pdf)) is False
+    assert svc.auto_ingest_pdf(str(pdf)) is False
+    assert svc.status()["reports"]["600900:2025-12-31:annual"]["pdf_chunks"] == 0
+
+
+def test_auto_ingest_pdf_rejects_analysis_only_index_on_same_hash(tmp_path, fake_embedder):
+    """同一报告即使已有分析 chunk，也不能替代 PDF 原文证据。"""
+    pdf = _write_pdf(tmp_path)
+    analysis = _write_analysis(tmp_path, source_pdf=str(pdf))
+    rid = "600900:2025-12-31:annual"
+    store = RagStore(str(tmp_path / "rag"), fake_embedder)
+    svc = IngestionService(store, reports_dir=str(tmp_path), analysis_dir=str(tmp_path),
+                           manifest_path=str(tmp_path / "rag" / "manifest.json"), auto_ingest=True)
+    svc.ingest_file(rid, "analysis", file_path=str(analysis))
+    svc._manifest[rid]["pdf_hash"] = hashlib.sha1(pdf.read_bytes()).hexdigest()
+    # 模拟遗留 manifest 声称有一段 PDF，但索引实际只残留 analysis 来源。
+    svc._manifest[rid]["pdf_chunks"] = 1
+
+    assert store.count_source_chunks(rid, "analysis") > 0
+    assert store.count_source_chunks(rid, "pdf") == 0
+    assert svc.auto_ingest_pdf(str(pdf)) is False
 
 
 def test_auto_ingest_report_persists_manifest(tmp_path, fake_embedder, monkeypatch):

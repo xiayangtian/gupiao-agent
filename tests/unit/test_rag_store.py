@@ -61,6 +61,18 @@ def test_delete_reports_removes_all_requested_report_chunks(tmp_path, fake_embed
     assert store.list_report_ids() == ["600900:2025-12-31:annual"]
 
 
+def test_count_source_chunks_isolated_by_pdf_and_analysis_source(tmp_path, fake_embedder):
+    store = RagStore(str(tmp_path), fake_embedder)
+    rid = "600900:2025-12-31:annual"
+    store.upsert([
+        _chunk("PDF 原文", rid=rid),
+        Chunk(report_id=rid, source="analysis", text="分析摘要", section="摘要", page=None, chunk_index=0),
+    ])
+
+    assert store.count_source_chunks(rid, "pdf") == 1
+    assert store.count_source_chunks(rid, "analysis") == 1
+
+
 def test_rag_config_load(tmp_path, monkeypatch):
     """读不到配置时默认 disabled；auto_ingest 默认开启"""
     from financial_report_fetcher.rag.config import RagConfig
