@@ -206,8 +206,10 @@ def test_approve_shows_safe_progress_and_resumed_pdf_source(browser_session, act
 })()
 """)
     assert rendered["cardGone"] is True
-    assert any("下载" in message for message in rendered["progress"])
-    assert any("索引" in message for message in rendered["progress"])
+    # 只接受服务端进度帧渲染的文案：初始本地"setBusy"同时含「下载」与「索引」，
+    # 因此不能用这两个词做断言，否则即使没有任何 SSE 帧也会通过。
+    assert any("正在下载所选财报" in message for message in rendered["progress"]), rendered["progress"]
+    assert any("财报已索引" in message for message in rendered["progress"]), rendered["progress"]
     assert "已基于补充财报原文恢复回答" in rendered["text"]
     assert "PDF · 第 40 页" in rendered["pdfText"]
     _assert_fixture_only(actual_app_url[1], downloaded=True)
