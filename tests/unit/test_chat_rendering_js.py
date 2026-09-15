@@ -55,6 +55,22 @@ def test_chat_renderer_removes_leaked_dsml_tool_call_markup_but_keeps_answer_tex
     assert result["normalized"] == "先说明走势。再说明风险。"
 
 
+def test_chat_renderer_removes_double_delimiter_dsml_markup_from_actual_provider_format():
+    """真实提供方使用 `｜｜DSML｜｜` 双竖线包裹，必须同样被完整剥离。"""
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const raw = '图表结论。<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="stock_prices">'
+          + '<｜｜DSML｜｜ parameter name="symbol" string="true">600900</｜｜DSML｜｜ parameter>'
+          + '<｜｜DSML｜｜ parameter name="period" string="true">daily</｜｜DSML｜｜ parameter>'
+          + '</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>请结合数据判断。';
+        console.log(JSON.stringify({{normalized: rendering.normalizeAssistantMarkdown(raw)}}));
+        """
+    )
+
+    assert result["normalized"] == "图表结论。请结合数据判断。"
+
+
 def test_chat_renderer_keeps_only_web_source_citation_fields():
     """网页来源的展示数据不得携带用于模型核验的长摘要正文。"""
     result = _run_node(
