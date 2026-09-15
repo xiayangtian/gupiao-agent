@@ -2557,6 +2557,7 @@ async function consumeSupplementStream(response, handlers) {
   var reader = response.body.getReader();
   var decoder = new TextDecoder();
   var buffer = '';
+  var terminalDone = false;
   while (true) {
     var chunk = await reader.read();
     if (chunk.done) break;
@@ -2565,13 +2566,17 @@ async function consumeSupplementStream(response, handlers) {
     buffer = frames.pop();
     for (var i = 0; i < frames.length; i++) {
       var parsed = parseSseFrame(frames[i]);
+      if (parsed && parsed.event === 'done') terminalDone = true;
       if (parsed && handlers[parsed.event]) handlers[parsed.event](parsed.data);
     }
   }
   if (buffer.trim()) {
     var finalFrame = parseSseFrame(buffer.trim());
+    if (finalFrame && finalFrame.event === 'done') terminalDone = true;
     if (finalFrame && handlers[finalFrame.event]) handlers[finalFrame.event](finalFrame.data);
   }
+  // EOF without done/error is not a successful authorization resolution.
+  if (!terminalDone) throw new Error('补充流未完成');
 }
 
 // 停止当前会话的流式生成（中断 SSE；后端会把已生成部分保存进历史）

@@ -2685,7 +2685,8 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 /* 窄屏（390px）：范围选择、状态与证据块换行，避免横向滚动。 */
 @media (max-width: 640px) {
   .chat-supplement-consent { width: 100%; padding: var(--space-sm); }
-  .chat-supplement-actions { flex-direction: column-reverse; }
+  /* DOM order is decline then confirm, and visual/tab order stays identical. */
+  .chat-supplement-actions { flex-direction: column; }
   .chat-supplement-actions button { width: 100%; }
 }
 
