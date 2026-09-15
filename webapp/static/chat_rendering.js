@@ -9,7 +9,10 @@
   if (root) root.ChatRendering = api;
 }(typeof window !== 'undefined' ? window : globalThis, function () {
   function normalizeAssistantMarkdown(value) {
+    // 某些模型/兼容端会把未执行的工具调用协议误放进 content，而非原生
+    // tool_calls 事件。这些协议标记不是用户可读答案，必须在 Markdown 渲染前剥离。
     return String(value == null ? '' : value)
+      .replace(/<\s*｜DSML｜\s*calls\b[^>]*>[\s\S]*?<\/\s*｜DSML｜\s*calls\s*>/gi, '')
       .replace(/\\?<sup>\s*(\d+)\s*\\?<\/sup>/gi, '[$1]');
   }
 
