@@ -245,7 +245,6 @@ def _reopen_session(session, url, session_id, wait_for_selector):
     summaries: summaries.map(node => node.textContent),
     lastSummary: summaries.length ? summaries[summaries.length - 1].textContent : '',
     hasSummary: summaries.length > 0,
-    waitingStatus: status ? status.textContent : '',
     approveButtons: document.querySelectorAll('#chat-history .chat-supplement-approve').length,
     historyText: document.querySelector('#chat-history').textContent,
   });
@@ -279,6 +278,41 @@ def test_reloaded_history_shows_authorized_supplement_summary(browser_session, a
     assert "本次经授权补充 1 份财报" in rendered["lastSummary"]
     assert "2025 半年报" in rendered["lastSummary"]
     assert "已完成" in rendered["historyText"]
+    _assert_fixture_only(actual_app_url[1], downloaded=True)
+    _assert_clean_browser(browser_session)
+
+
+def test_reloaded_summary_has_no_horizontal_overflow_at_390px(browser_session, actual_app_url):
+    """390px 重载已持久化摘要后，文档和 body 均不能横向溢出或出现浏览器错误。"""
+    _run_browser(browser_session, "set", "viewport", "390", "844")
+    _start_observing(browser_session)
+    _open_supplement_card(browser_session)
+    session_id = _eval(browser_session, """
+(async () => {
+  const card = document.querySelector('.chat-supplement-consent');
+  card.querySelector('input[type=checkbox]').click();
+  card.querySelector('.chat-supplement-approve').click();
+  const deadline = Date.now() + 10000;
+  while (document.querySelector('.chat-supplement-consent') && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+  return JSON.stringify({sid: chatSessionId});
+})()
+""")["sid"]
+    rendered = _reopen_session(
+        browser_session, actual_app_url[0], session_id, ".chat-supplement-summary",
+    )
+    layout = _eval(browser_session, """
+(() => JSON.stringify({
+  summary: !!document.querySelector('.chat-supplement-summary'),
+  documentWidth: document.documentElement.scrollWidth,
+  bodyWidth: document.body.scrollWidth,
+  viewportWidth: window.innerWidth,
+}))()
+""")
+
+    assert rendered["hasSummary"] is True
+    assert layout["summary"] is True
+    assert layout["documentWidth"] <= layout["viewportWidth"]
+    assert layout["bodyWidth"] <= layout["viewportWidth"]
     _assert_fixture_only(actual_app_url[1], downloaded=True)
     _assert_clean_browser(browser_session)
 

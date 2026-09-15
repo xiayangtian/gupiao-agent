@@ -4,11 +4,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 APP_JS = Path(__file__).parents[2] / "webapp/static/app.js"
 STYLE_CSS = Path(__file__).parents[2] / "webapp/static/style.css"
 CHAT_RENDERING_JS = Path(__file__).parents[2] / "webapp/static/chat_rendering.js"
 NODE = shutil.which("node")
+pytestmark = pytest.mark.skipif(NODE is None, reason="前端渲染回归测试需要 Node.js")
 
 
 def _run_node(source: str):
@@ -108,7 +111,7 @@ consumeSupplementStream({
 );
 """,
     ])
-    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout.strip() == "safe EOF rejection"
@@ -215,6 +218,19 @@ def test_ingested_periods_are_derived_from_report_ids_when_candidates_are_missin
 
     assert view["periods"] == ["2025 年报"]
     assert "601288" not in json.dumps(view, ensure_ascii=False)
+
+
+def test_authorized_headline_counts_each_ingested_report_not_unique_labels():
+    view = _supplement_view(_supplement_run(
+        "completed", ingested_report_ids=[
+            "601288:2025-03-31:quarterly",
+            "601288:2025-06-30:quarterly",
+        ],
+    ))
+
+    # 同一年两份季报的可读标签可去重，但经授权补充数量必须忠实计两份。
+    assert view["headline"] == "本次经授权补充 2 份财报"
+    assert view["periods"] == ["2025 季报"]
 
 
 def test_waiting_consent_run_shows_honest_non_actionable_supplement_state():

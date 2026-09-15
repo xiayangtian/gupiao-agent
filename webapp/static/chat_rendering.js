@@ -135,11 +135,14 @@
     });
     var waiting = !!SUPPLEMENT_WAITING_STATUSES[status];
     var periods;
+    var ingestedCount = 0;
     if (waiting) {
       periods = uniqueLabels(candidates.map(supplementPeriodLabel));
     } else {
       var ingested = Array.isArray(supplement.ingested_report_ids)
         ? supplement.ingested_report_ids : [];
+      // 数量忠实反映已摄取报告 ID 的条数；人类可读期次列表仍去重。
+      ingestedCount = ingested.length;
       periods = uniqueLabels(ingested.map(function (reportId) {
         return supplementPeriodLabel({ report_id: reportId });
       }));
@@ -161,8 +164,8 @@
     if (waiting) {
       headline = status === 'proposed' ? '等待你确认是否补充以下财报' : '正在补充财报原文';
     } else if (status === 'completed') {
-      headline = periods.length
-        ? '本次经授权补充 ' + periods.length + ' 份财报'
+      headline = ingestedCount
+        ? '本次经授权补充 ' + ingestedCount + ' 份财报'
         : '本次补充未取得可核验的财报原文';
     } else if (status === 'declined') {
       headline = '本次未补充财报，已基于现有信息回答';
