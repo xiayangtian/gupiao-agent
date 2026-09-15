@@ -2491,13 +2491,14 @@ function renderSupplementConsent(container, payload, handlers) {
       if (checkbox.checked) {
         if (selected.size >= payload.limit) {
           checkbox.checked = false;
+          updateSelectionState();
           return;
         }
         selected.add(candidate.id);
       } else {
         selected.delete(candidate.id);
       }
-      approve.disabled = selected.size === 0;
+      updateSelectionState();
     });
     row.appendChild(checkbox);
     row.appendChild(text);
@@ -2513,7 +2514,11 @@ function renderSupplementConsent(container, payload, handlers) {
   approve.type = 'button';
   approve.className = 'btn primary chat-supplement-approve';
   approve.textContent = '确认补充并继续';
-  approve.disabled = selected.size === 0;
+  function updateSelectionState() {
+    approve.disabled = selected.size === 0;
+    approve.textContent = '确认补充并继续（' + selected.size + '/' + payload.limit + '）';
+  }
+  updateSelectionState();
   var status = document.createElement('p');
   status.className = 'chat-supplement-status';
   status.setAttribute('role', 'status');

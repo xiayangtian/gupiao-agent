@@ -40,6 +40,16 @@ def test_consent_card_is_explicitly_opt_in_and_accessible():
     assert "checkbox.setAttribute('aria-label'" in source
 
 
+def test_selection_count_is_visible_from_zero_and_tracks_every_change():
+    source = _source()
+
+    assert "function updateSelectionState()" in source
+    assert "'确认补充并继续（' + selected.size + '/' + payload.limit + '）'" in source
+    assert "updateSelectionState();" in source
+    # A rejected sixth selection restores its checkbox and still refreshes 5/5.
+    assert "checkbox.checked = false;\n          updateSelectionState();\n          return;" in source
+
+
 def test_consent_actions_preserve_authorization_boundary():
     source = _source()
 
