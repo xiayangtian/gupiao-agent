@@ -2168,7 +2168,7 @@ async def resolve_chat_supplement(
             resume_scope = state.scope
             pump.start(lambda: rag_qa.answer_stream(
                 question, history=history, filters=None, tools=_resume_chat_tools(),
-                priority_report_id=None, scope=resume_scope,
+                priority_report_id=None, scope=resume_scope, run_id=run_id,
             ))
             while True:
                 evt = await pump.queue.get()

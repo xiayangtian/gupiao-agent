@@ -2334,7 +2334,7 @@ class _SupplementRagQA:
     def answer_stream(self, question, history=None, filters=None, tools=None,
                       priority_report_id=None, scope=None, run_id=None):
         self.calls.append({"question": question, "scope": scope, "tools": tools,
-                           "history": history})
+                           "history": history, "run_id": run_id})
         if len(self.calls) == 1:
             # 模拟 RagQA：补报处理器在生产线程内被回调，只有它接受需求才上交模型请求。
             if self.handler is not None:
@@ -2548,6 +2548,7 @@ class TestChatSupplementApi:
         assert resumed["question"] == _supplement_question()["question"]
         assert resumed["scope"].mode == "company_only"
         assert resumed["scope"].report_ids == (_SUPPLEMENT_INDEXED, _SUPPLEMENT_REQUESTED)
+        assert resumed["run_id"] == _event(events, "run_started")["run_id"]
 
     def test_approved_supplement_run_is_persisted_after_resume(self, client, supplement_env):
         """恢复回答同样落盘，历史重开可复核授权与来源。"""
