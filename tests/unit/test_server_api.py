@@ -2516,11 +2516,11 @@ class TestChatSupplementApi:
         assert stored_request["session_id"] == session_id
         assert stored_request["status"] == "declined"
 
-    @pytest.mark.parametrize("supplied_ids", [[], ["candidate-not-allowed"]])
-    def test_decline_rejects_any_supplied_candidate_ids_without_download(
+    @pytest.mark.parametrize("supplied_ids", [None, [], ["candidate-not-allowed"]])
+    def test_decline_rejects_any_present_candidate_ids_without_download(
         self, client, supplement_env, supplied_ids,
     ):
-        """decline 不接受 candidate_ids；空数组也不能绕过请求形状校验。"""
+        """decline 只允许省略 candidate_ids；显式 null、空或非空数组均为畸形请求。"""
         proposal_events, needed = _propose_supplement(client)
 
         response = client.post(
@@ -2532,7 +2532,7 @@ class TestChatSupplementApi:
             },
         )
 
-        assert response.status_code == 409
+        assert response.status_code == 422
         assert supplement_env["downloader"].calls == []
 
     def test_partial_failure_resumes_with_only_ingested_report_ids(

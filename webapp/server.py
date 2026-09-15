@@ -30,7 +30,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from financial_report_fetcher.ai_client import AIClient
 from financial_report_fetcher.analysis_ai import build_progressive_pipeline
@@ -1384,6 +1384,13 @@ class ResolveSupplementRequest(BaseModel):
     action: Literal["approve", "decline"]
     candidate_ids: Optional[List[str]] = None
 
+    @model_validator(mode="after")
+    def _decline_must_omit_candidate_ids(self) -> "ResolveSupplementRequest":
+        """拒绝操作不接受候选字段；显式 null 与省略字段的语义不同。"""
+        if self.action == "decline" and "candidate_ids" in self.model_fields_set:
+            raise ValueError("拒绝补充请求不接受 candidate_ids")
+        return self
+
 
 def _report_id_of(meta: ReportMeta) -> str:
     return build_report_id(meta.company_id, meta.period, meta.report_type)
@@ -1991,9 +1998,6 @@ async def resolve_chat_supplement(
 
     try:
         if body.action == "decline":
-            # 拒绝不接受任何候选字段：连空数组也视为畸形授权请求，不能静默忽略。
-            if body.candidate_ids is not None:
-                raise ValueError("拒绝补充请求不接受 candidate_ids")
             pending = supplement_registry.decline(supplement_id, body.session_id)
             # decline 是终态转换，必须在生成回答前写入审计存储。
             _persist_supplement_status(supplement_id, pending.status)
