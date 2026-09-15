@@ -55,7 +55,7 @@ def _disconnect_after_first_delta(client, monkeypatch, payload, deltas):
     """
     class StalledRagQA:
         def answer_stream(self, question, history=None, filters=None, tools=None,
-                          priority_report_id=None, scope=None):
+                          priority_report_id=None, scope=None, run_id=None):
             for text in deltas:
                 yield {"type": "delta", "text": text, "reasoning": ""}
             # 不再产出 done：模拟停止/断开
@@ -89,7 +89,7 @@ def _configure_scoped_rag_answer(env, citations=None, *, report_ids=None):
 
     class ScopedRagQA:
         def answer_stream(self, question, history=None, filters=None, tools=None,
-                          priority_report_id=None, scope=None):
+                          priority_report_id=None, scope=None, run_id=None):
             yield {"type": "delta", "text": "经营现金流为", "reasoning": ""}
             yield {
                 "type": "done",
@@ -1330,7 +1330,7 @@ class TestChatSessionsApi:
         empty = store.create_session()
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 yield {"type": "delta", "text": "答", "reasoning": ""}
                 yield {"type": "done", "answer": "答",
                        "reasoning": "", "citations": [], "model": "m",
@@ -1346,6 +1346,36 @@ class TestChatSessionsApi:
         assert by_id[empty["id"]]["message_count"] == 0
         assert sorted(s["message_count"] for s in sessions) == [0, 2]
 
+    def test_chat_stream_scope_failure_log_is_run_correlated_and_redacted(self, client, env, monkeypatch, tmp_path, caplog):
+        """Scope 解析失败也必须使用本次 run_id，且日志不包含用户问题或 traceback。"""
+        from webapp.chat_store import ChatStore
+
+        secret_question = "仅用于 Scope 日志泄露测试的用户问题"
+        store = ChatStore(str(tmp_path / "sessions.json"))
+        monkeypatch.setattr(server, "chat_store", store)
+
+        class BrokenResolver:
+            def resolve(self, *args, **kwargs):
+                raise RuntimeError(secret_question)
+
+        class FakeRagQA:
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
+                yield {"type": "done", "answer": "降级回答", "citations": [], "model": "m", "usage": {}}
+
+        monkeypatch.setattr(server, "_build_scope_resolver", lambda: BrokenResolver())
+        monkeypatch.setattr(server, "rag_qa", FakeRagQA())
+        caplog.set_level(logging.INFO, logger=server.__name__)
+        response = client.post("/api/chat/stream", json={"question": secret_question})
+        events = _read_sse(response)
+        done = next(data for event, data in events if event == "done")
+        run_id = done["run"]["id"]
+
+        assert done["run"]["scope"]["fallback_reason"] == "范围解析失败，已回退全库范围"
+        assert secret_question not in caplog.text
+        assert all(record.exc_info is None for record in caplog.records), "Scope 失败日志不得附带 traceback"
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("chat_scope_resolution_failed" in message and run_id in message and "RuntimeError" in message for message in messages)
+
     def test_chat_stream_sse_and_session_persist(self, client, env, monkeypatch, tmp_path, caplog):
         """流式端点：SSE 事件含 session/delta/done；会话消息持久化"""
         from webapp.chat_store import ChatStore
@@ -1354,7 +1384,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 yield {"type": "delta", "text": "营收", "reasoning": ""}
                 yield {"type": "delta", "text": "增长", "reasoning": ""}
                 yield {"type": "done", "answer": "营收增长",
@@ -1398,7 +1428,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 raise RuntimeError(question)
                 yield  # pragma: no cover - 保持为生成器
 
@@ -1412,6 +1442,7 @@ class TestChatSessionsApi:
         assert error["run"]["status"] == "failed"
         assert run_id
         assert secret_question not in caplog.text
+        assert all(record.exc_info is None for record in caplog.records), "诊断日志不得附带 traceback"
         messages = [record.getMessage() for record in caplog.records]
         assert any("chat_run_producer_failed" in message and run_id in message and "RuntimeError" in message for message in messages)
         assert any("chat_run_finished" in message and run_id in message and "failed" in message for message in messages)
@@ -1423,7 +1454,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "sessions.json")))
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 yield {"type": "delta", "text": "", "reasoning": "这是不应暴露的私有推理"}
                 yield {"type": "delta", "text": "公开回答", "reasoning": "另一个私有片段"}
                 yield {"type": "done", "answer": "公开回答",
@@ -1445,7 +1476,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 yield {"type": "empty"}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
@@ -1560,7 +1591,7 @@ class TestChatStreamPartial:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 yield {"type": "delta", "text": "部分回答", "reasoning": ""}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
@@ -1626,7 +1657,7 @@ class TestChatStreamConcurrency:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 _time.sleep(0.3)  # 模拟模型耗时；并发应并行而非串行
                 yield {"type": "delta", "text": question, "reasoning": ""}
                 yield {"type": "done", "answer": question + "答案", "reasoning": "",
@@ -1663,7 +1694,7 @@ class TestMcpChat:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 yield {"type": "tool_call", "name": "get_financial_metrics",
                        "arguments": {"symbol": "600519"}}
                 yield {"type": "tool_result", "name": "get_financial_metrics",
@@ -1688,7 +1719,7 @@ class TestMcpChat:
         monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "sessions.json")))
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 yield {"type": "reasoning_stage", "stage": "assess", "round": 1, "message": "正在判断"}
                 yield {"type": "done", "answer": "答案", "citations": [], "tools_used": ["web_search"],
                        "web_sources": [{"title": "公告", "url": "https://example.com/a", "content": "摘要", "published_date": "2026-09-01"}]}
@@ -1706,7 +1737,7 @@ class TestMcpChat:
         monkeypatch.setattr(server, "chat_store", store)
 
         class FakeRagQA:
-            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None):
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
                 assert tools is None or question != "无工具问题"
                 yield {"type": "delta", "text": "答案", "reasoning": ""}
                 yield {"type": "done", "answer": "答案", "reasoning": "", "citations": [],
@@ -1725,7 +1756,7 @@ class TestMcpChat:
 
         class FakeRagQA:
             def answer_stream(self, question, history=None, filters=None, tools=None,
-                              priority_report_id=None, scope=None):
+                              priority_report_id=None, scope=None, run_id=None):
                 yield {"type": "done", "answer": "降级回答", "citations": [],
                        "tools_used": [], "retrieval_degraded": True}
 
@@ -2221,7 +2252,7 @@ class TestFocusReport:
 
         class FakeRagQA:
             def answer_stream(self, question, history=None, filters=None, tools=None,
-                              priority_report_id=None, scope=None):
+                              priority_report_id=None, scope=None, run_id=None):
                 captured["priority"] = priority_report_id
                 yield {"type": "delta", "text": "x", "reasoning": ""}
                 yield {"type": "done", "answer": "x", "reasoning": "", "citations": [],
@@ -2245,7 +2276,7 @@ class TestFocusReport:
 
         class FakeRagQA:
             def answer_stream(self, question, history=None, filters=None, tools=None,
-                              priority_report_id=None, scope=None):
+                              priority_report_id=None, scope=None, run_id=None):
                 captured["priority"] = priority_report_id
                 yield {"type": "done", "answer": "x", "reasoning": "", "citations": [],
                        "model": "m", "usage": {}, "tools_used": []}

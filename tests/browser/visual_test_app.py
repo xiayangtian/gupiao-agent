@@ -103,6 +103,7 @@ class _FakeRagQA:
         tools=None,
         priority_report_id=None,
         scope=None,
+        run_id=None,
     ):
         question = str(question or "").strip()
         if question.endswith("停止"):
