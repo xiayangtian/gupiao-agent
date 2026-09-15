@@ -1477,6 +1477,30 @@ class TestChatSessionsApi:
         assert any("chat_run_producer_failed" in message and run_id in message and "RuntimeError" in message for message in messages)
         assert any("chat_run_finished" in message and run_id in message and "failed" in message for message in messages)
 
+    def test_chat_stream_error_event_redacts_sensitive_payload(self, client, env, monkeypatch, tmp_path, caplog):
+        """RAG 主动 error 事件的敏感正文也不得进入 SSE 或日志。"""
+        from webapp.chat_store import ChatStore
+
+        secret = "仅用于 SSE error 事件泄露测试的敏感文本"
+        store = ChatStore(str(tmp_path / "sessions.json"))
+        monkeypatch.setattr(server, "chat_store", store)
+
+        class FakeRagQA:
+            def answer_stream(self, question, history=None, filters=None, tools=None, priority_report_id=None, scope=None, run_id=None):
+                yield {"type": "error", "error": secret}
+
+        monkeypatch.setattr(server, "rag_qa", FakeRagQA())
+        caplog.set_level(logging.INFO, logger=server.__name__)
+        response = client.post("/api/chat/stream", json={"question": "普通问题"})
+        events = _read_sse(response)
+        error = next(data for event, data in events if event == "error")
+        run_id = error["run"]["id"]
+
+        assert error["error"] == f"流式问答失败，请重试（诊断 ID：{run_id}）"
+        assert secret not in response.text
+        assert secret not in caplog.text
+        assert error["run"]["status"] == "failed"
+
     def test_chat_stream_never_exposes_model_reasoning(self, client, env, monkeypatch, tmp_path):
         """SSE 只发送回答内容与可解释工具阶段，不发送模型私有推理。"""
         from webapp.chat_store import ChatStore
