@@ -12,7 +12,7 @@
     // 某些模型/兼容端会把未执行的工具调用协议误放进 content，而非原生
     // tool_calls 事件。这些协议标记不是用户可读答案，必须在 Markdown 渲染前剥离。
     return String(value == null ? '' : value)
-      .replace(/<\s*｜DSML｜\s*calls\b[^>]*>[\s\S]*?<\/\s*｜DSML｜\s*calls\s*>/gi, '')
+      .replace(/<\s*｜{1,2}DSML｜{1,2}\s*calls\b[^>]*>[\s\S]*?<\/\s*｜{1,2}DSML｜{1,2}\s*calls\s*>/gi, '')
       .replace(/\\?<sup>\s*(\d+)\s*\\?<\/sup>/gi, '[$1]');
   }
 
@@ -279,6 +279,13 @@
     if (status === 'stopped' || status === 'partial' || status === 'failed') {
       html += '<button type="button" class="chat-run-action chat-run-regenerate"'
         + ' data-chat-action="regenerate">重新生成</button>';
+    }
+    var runId = String(run.id || '');
+    if (runId) {
+      html += '<span class="chat-run-diagnostic">诊断 ID：<code>' + escapeHtml(runId) + '</code></span>'
+        + '<button type="button" class="chat-run-action chat-run-copy-id"'
+        + ' data-chat-action="copy-run-id" data-chat-run-id="' + escapeHtml(runId) + '"'
+        + ' aria-label="复制诊断 ID" title="复制诊断 ID">复制</button>';
     }
     return html + '</div>';
   }

@@ -55,6 +55,22 @@ def test_chat_renderer_removes_leaked_dsml_tool_call_markup_but_keeps_answer_tex
     assert result["normalized"] == "先说明走势。再说明风险。"
 
 
+def test_chat_renderer_removes_double_delimiter_dsml_markup_from_actual_provider_format():
+    """真实提供方使用 `｜｜DSML｜｜` 双竖线包裹，必须同样被完整剥离。"""
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const raw = '图表结论。<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="stock_prices">'
+          + '<｜｜DSML｜｜ parameter name="symbol" string="true">600900</｜｜DSML｜｜ parameter>'
+          + '<｜｜DSML｜｜ parameter name="period" string="true">daily</｜｜DSML｜｜ parameter>'
+          + '</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>请结合数据判断。';
+        console.log(JSON.stringify({{normalized: rendering.normalizeAssistantMarkdown(raw)}}));
+        """
+    )
+
+    assert result["normalized"] == "图表结论。请结合数据判断。"
+
+
 def test_chat_renderer_keeps_only_web_source_citation_fields():
     """网页来源的展示数据不得携带用于模型核验的长摘要正文。"""
     result = _run_node(
@@ -295,24 +311,31 @@ def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
     result = _run_node(
         f"""
         const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
-        const stopped = rendering.renderRunStatus({{status: 'stopped'}});
-        const partial = rendering.renderRunStatus({{status: 'partial'}});
-        const failed = rendering.renderRunStatus({{status: 'failed'}});
-        const completed = rendering.renderRunStatus({{status: 'completed'}});
+        const stopped = rendering.renderRunStatus({{status: 'stopped', id: 'run-stopped'}});
+        const partial = rendering.renderRunStatus({{status: 'partial', id: 'run-partial'}});
+        const failed = rendering.renderRunStatus({{status: 'failed', id: 'run-failed'}});
+        const completed = rendering.renderRunStatus({{status: 'completed', id: 'run-debug-123'}});
         const legacy = rendering.renderRunStatus({{status: 'completed', legacy_evidence_unavailable: true}});
         console.log(JSON.stringify({{stopped, partial, failed, completed, legacy}}));
         """
     )
 
     assert "已停止" in result["stopped"]
+    assert "诊断 ID：<code>run-stopped</code>" in result["stopped"]
+    assert 'data-chat-action="copy-run-id"' in result["stopped"]
     assert "重新生成" in result["stopped"]
     assert 'data-chat-action="continue"' in result["stopped"]
     assert "disabled" in result["stopped"]
     assert "部分完成" in result["partial"]
+    assert "诊断 ID：<code>run-partial</code>" in result["partial"]
     assert "重新生成" in result["partial"]
     assert "失败" in result["failed"]
+    assert "诊断 ID：<code>run-failed</code>" in result["failed"]
     assert "重新生成" in result["failed"]
     assert "已完成" in result["completed"]
+    assert "诊断 ID：<code>run-debug-123</code>" in result["completed"]
+    assert 'data-chat-action="copy-run-id"' in result["completed"]
+    assert 'data-chat-run-id="run-debug-123"' in result["completed"]
     assert "重新生成" not in result["completed"]
     assert "历史回答，未保留证据包" in result["legacy"]
 

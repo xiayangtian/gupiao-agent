@@ -96,7 +96,8 @@ class RagQA:
         try:
             hits = self._query_with_priority(question, scope, priority_report_id, filters)
         except Exception as exc:  # embedding 模型未就绪/网络不可达时降级直答
-            logger.exception("RAG 检索失败，降级为无检索回答：%s", exc)
+            # 只记录受控类型；异常文本可能携带用户问题，不得写入日志。
+            logger.warning("rag_retrieval_failed error_type=%s", type(exc).__name__)
             messages = list(history or [])
             messages.append({"role": "user", "content": question})
             resp = self.ai_client.chat(messages=messages, system=RETRIEVAL_FALLBACK_PROMPT)
@@ -292,6 +293,7 @@ class RagQA:
         tools: Optional[List[Dict[str, Any]]] = None,
         priority_report_id: Optional[str] = None,
         scope: Optional[Scope] = None,
+        run_id: Optional[str] = None,
     ):
         """流式检索回答，可选工具调用编排。事件：
 
@@ -312,7 +314,11 @@ class RagQA:
         try:
             hits = self._query_with_priority(question, scope, priority_report_id, filters)
         except Exception as exc:  # 首次 embedding 下载失败时不让整条流式问答中断
-            logger.exception("RAG 检索失败，降级为无检索流式回答：%s", exc)
+            # 只记录可关联的诊断信息：异常文本可能包含用户问题，绝不写入日志。
+            logger.warning(
+                "rag_retrieval_failed run_id=%s error_type=%s",
+                run_id or "-", type(exc).__name__,
+            )
             hits = []
             retrieval_degraded = True
         retrieval_report_ids = self._retrieval_report_ids(hits)

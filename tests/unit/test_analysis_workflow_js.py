@@ -926,6 +926,16 @@ def test_chat_regenerate_action_rewinds_to_the_preceding_user_question():
     assert "previousElementSibling" in source
 
 
+def test_chat_diagnostic_id_copy_action_is_bound_to_the_existing_run_id():
+    """诊断 ID 必须复制既有 run_id，且按钮事件不能只是静态占位。"""
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "function copyChatRunId" in source
+    assert "copy-run-id" in source
+    assert "navigator.clipboard.writeText" in source
+    assert "st.runId" in source
+
+
 def test_chat_scope_and_pdf_page_styles_are_semantic_and_mobile_safe():
     """范围选择与跳页按钮需要语义化、可见焦点与移动端换行。"""
     css = STYLE_CSS.read_text(encoding="utf-8")

@@ -424,8 +424,8 @@ def _init_rag() -> None:
                 rerank_margin_threshold=getattr(cfg, "rerank_margin_threshold", 0.05),
             ))
         logger.info("RAG 知识库已初始化：%s", cfg.store_path)
-    except Exception:
-        logger.exception("RAG 初始化失败，问答将回退传统模式")
+    except Exception as exc:
+        logger.warning("rag_init_failed error_type=%s", type(exc).__name__)
         rag_store = rag_service = rag_qa = None
 
 
@@ -1167,8 +1167,9 @@ def chat(code: str, period: str, body: ChatRequest) -> Dict[str, Any]:
             rag_result = rag_qa.try_answer_report(
                 code, p.isoformat(), body.question, history=history
             )
-        except Exception:
-            logger.exception("RAG 问答失败，回退传统模式")
+        except Exception as exc:
+            # 异常文本可能包含用户问题，只记录受控诊断信息。
+            logger.warning("chat_rag_fallback error_type=%s", type(exc).__name__)
             rag_result = None
     if rag_result is not None:
         answer = rag_result["answer"]
@@ -1271,15 +1272,19 @@ def _build_scope_resolver() -> ScopeResolver:
     )
 
 
-def _resolve_scope(body: StreamChatRequest) -> Scope:
+def _resolve_scope(body: StreamChatRequest, run_id: str = "") -> Scope:
     """解析并冻结 Scope；任何解析失败回退全库，绝不向上抛出异常。"""
     resolver = _build_scope_resolver()
     request = ScopeRequest(body.scope_mode, body.focus_report)
     try:
         return resolver.resolve(body.question, request)
     except Exception as exc:
-        logger.exception("Scope 解析失败，回退全库范围")
-        return Scope("whole_corpus", (), (), fallback_reason=f"范围解析失败：{exc}")
+        # 异常文本可能包含用户问题；日志与回退原因都只保留受控摘要。
+        logger.warning(
+            "chat_scope_resolution_failed run_id=%s error_type=%s",
+            run_id or "-", type(exc).__name__,
+        )
+        return Scope("whole_corpus", (), (), fallback_reason="范围解析失败，已回退全库范围")
 
 
 def _sse(event: str, data: Dict[str, Any]) -> str:
@@ -1318,8 +1323,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     sid = session["id"]
     history = session.get("messages", [])[-8:]  # 传给模型的最近 4 轮
 
+    run_id = uuid.uuid4().hex
+
     # 解析并冻结 Scope（在启动生产线程之前；失败回退全库，不让线程崩溃）
-    scope = await asyncio.to_thread(_resolve_scope, body)
+    # run_id 提前生成，使范围解析失败也能与本次问答关联检索。
+    scope = await asyncio.to_thread(_resolve_scope, body, run_id)
 
     # 外部工具：默认开启；use_mcp=false 时保持纯 RAG。
     tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
@@ -1332,7 +1340,6 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         except Exception:
             priority_report_id = None
 
-    run_id = uuid.uuid4().hex
     created_at = dt.datetime.now().isoformat(timespec="seconds")
 
     async def gen():
@@ -1357,12 +1364,12 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 for evt in rag_qa.answer_stream(body.question, history=history,
                                                 filters=body.filters, tools=tools,
                                                 priority_report_id=priority_report_id,
-                                                scope=scope):
+                                                scope=scope, run_id=run_id):
                     if stop_producer.is_set():
                         return
                     _safe_put(evt)
             except Exception as exc:
-                logger.exception("流式问答生产失败")
+                logger.warning("chat_run_producer_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
                 if not stop_producer.is_set():
                     _safe_put({"type": "error", "error": f"流式问答失败：{exc}"})
             finally:
@@ -1404,9 +1411,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             run = _make_run(status, content)
             chat_store.append_turn(sid, question=body.question, run=run)
             saved = True
+            logger.info("chat_run_finished run_id=%s status=%s", run_id, status)
             return run
 
         try:
+            logger.info("chat_run_started run_id=%s", run_id)
             yield _sse("session", {"session_id": sid})
             yield _sse("scope_resolved", {"scope": scope.to_dict()})
             yield _sse("run_started", {"run_id": run_id})
@@ -1520,7 +1529,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     })
                     return
         except Exception as exc:
-            logger.exception("流式问答失败")
+            logger.error("chat_run_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
             if not saved:
                 _persist("failed", "".join(answer_parts).strip())
             yield _sse("error", {

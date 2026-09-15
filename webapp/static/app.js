@@ -2759,6 +2759,7 @@ async function submitQuestion(q, key) {
           }
         });
       } else if (parsed.event === 'error') {
+        st.failedRun = parsed.data.run || { status: 'failed', id: st.runId || '' };
         throw new Error(parsed.data.error || '流式响应出错');
       }
     }
@@ -2783,7 +2784,7 @@ async function submitQuestion(q, key) {
         scopeEl = null;
         appendAssistantRun('#chat-history', {
           content: st.answerText,
-          run: { status: st.stopped ? 'stopped' : 'failed' },
+          run: { status: st.stopped ? 'stopped' : 'failed', id: st.runId || '' },
         });
         scrollChatToBottom();
       }
@@ -2801,7 +2802,7 @@ async function submitQuestion(q, key) {
         scopeEl = null;
         appendAssistantRun('#chat-history', {
           content: st.answerText,
-          run: { status: 'stopped' },
+          run: { status: 'stopped', id: st.runId || '' },
         });
         scrollChatToBottom();
       }
@@ -2813,7 +2814,10 @@ async function submitQuestion(q, key) {
         if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
         thinkingEl = null;
         scopeEl = null;
-        appendChatMsg('#chat-history', 'assistant', '⚠️ ' + err.message);
+        appendAssistantRun('#chat-history', {
+          content: '⚠️ ' + err.message,
+          run: st.failedRun || { status: 'failed', id: st.runId || '' },
+        });
         scrollChatToBottom();
       }
     }
@@ -2909,11 +2913,49 @@ function appendAnalysisCitations(sel, citations) {
 }
 
 // 「重新生成」从紧邻的用户消息重新提问；「继续研究」占位禁用，恢复状态机留到 M3。
+function setChatRunCopyFeedback(button, text) {
+  if (!button) return;
+  var original = button.dataset.originalLabel || button.textContent;
+  button.dataset.originalLabel = original;
+  button.textContent = text;
+  window.setTimeout(function () { button.textContent = original; }, 1600);
+}
+
+function copyChatRunId(button) {
+  var runId = button && button.dataset ? String(button.dataset.chatRunId || '') : '';
+  if (!runId) return;
+  function fallbackCopy() {
+    var input = document.createElement('textarea');
+    input.value = runId;
+    input.setAttribute('readonly', '');
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    var copied = false;
+    try { copied = document.execCommand('copy'); } catch (_) { /* 浏览器不支持时保留原按钮文案 */ }
+    document.body.removeChild(input);
+    setChatRunCopyFeedback(button, copied ? '已复制' : '复制失败');
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(runId).then(function () {
+      setChatRunCopyFeedback(button, '已复制');
+    }, fallbackCopy);
+  } else {
+    fallbackCopy();
+  }
+}
+
 function bindChatRunActions() {
   var box = $('#chat-history');
   if (!box || box.dataset.runActionsBound) return;
   box.dataset.runActionsBound = '1';
   box.addEventListener('click', function (e) {
+    var copy = e.target && e.target.closest ? e.target.closest('[data-chat-action="copy-run-id"]') : null;
+    if (copy) {
+      copyChatRunId(copy);
+      return;
+    }
     var regen = e.target && e.target.closest ? e.target.closest('.chat-run-regenerate') : null;
     if (!regen) return;
     var runBlock = regen.closest ? regen.closest('.chat-run') : null;

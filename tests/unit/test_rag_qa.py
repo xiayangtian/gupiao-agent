@@ -1,3 +1,5 @@
+import logging
+
 from financial_report_fetcher.rag.config import RagConfig
 from financial_report_fetcher.rag.qa import RagQA
 from financial_report_fetcher.rag.store import RagStore
@@ -160,6 +162,25 @@ def test_answer_stream_embedding_failure_degrades_without_citations():
     assert done["retrieval_degraded"] is True
     assert done["citations"] == []
     assert "本地财报检索服务暂时不可用" in ai.last_system
+
+
+def test_answer_stream_retrieval_failure_log_is_run_correlated_and_redacted(caplog):
+    """检索降级日志只记录 run_id/异常类型，不能泄露问题或 traceback。"""
+    secret_question = "仅用于 RAG 日志泄露测试的用户问题"
+
+    class BrokenStore:
+        def query(self, *args, **kwargs):
+            raise TimeoutError(secret_question)
+
+    ai = FakeAIStream(answer="当前无法核验具体财报数字。")
+    qa = RagQA(BrokenStore(), ai, top_k=4)
+    caplog.set_level(logging.INFO, logger="financial_report_fetcher.rag.qa")
+    events = list(qa.answer_stream(secret_question, run_id="run-rag-log-42"))
+
+    assert events[-1]["retrieval_degraded"] is True
+    assert secret_question not in caplog.text
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("rag_retrieval_failed" in message and "run-rag-log-42" in message and "TimeoutError" in message for message in messages)
 
 
 def test_answer_stream_passthrough_error(tmp_path, fake_embedder):
