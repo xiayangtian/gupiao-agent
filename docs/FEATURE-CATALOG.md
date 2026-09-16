@@ -19,7 +19,7 @@
 | [证据化财报分析](#evidence-analysis) | 对单份财报生成可回溯分析、事实和证据 | `analysis_pipeline.py`、`evidence/`、`facts.py` | `test_analysis_pipeline.py`、`test_evidence_*.py` | 见设计台账登记证据 |
 | [分析阅读、历史与可视化](#analysis-reading) | 渐进式主题阅读、历史报告、财务结构图表 | `analysis_workflow.js`、`analysis_visualizations.js`、`history.py` | `test_progressive_analysis_ui.py`、`test_visualizations.py` | `17e4dab`、`1107509` |
 | [RAG 知识库与检索](#rag) | 摄取 PDF、跨报告或限定范围问答、可选重排序 | `financial_report_fetcher/rag/ingest.py`、`financial_report_fetcher/rag/qa.py`、`financial_report_fetcher/rag/reranker.py` | `test_rag_*.py` | 见设计台账登记证据 |
-| [可信智能问答](#trusted-chat) | 多轮聊天、范围约束、证据链接、会话历史、紧凑来源区与授权补充财报 | `webapp/chat_scope.py`、`webapp/chat_supplement.py`、`financial_report_fetcher/rag/qa.py`、`webapp/static/app.js`、`webapp/static/chat_rendering.js` | `test_chat_*.py`、`test_chat_trust_flow.py`、`test_chat_pdf_supplement.py` | `1132bc6`：授权补充财报并恢复问答 |
+| [可信智能问答](#trusted-chat) | 多轮聊天、冻结范围、受控工具、可核验事实/冲突、证据链接、会话历史与授权补充财报 | `webapp/chat_scope.py`、`chat_policy.py`、`chat_facts.py`、`chat_verifier.py`、`chat_supplement.py`、`financial_report_fetcher/rag/qa.py`、`webapp/static/app.js`、`webapp/static/chat_rendering.js` | `test_chat_*.py`、`test_rag_policy_m2.py`、`test_chat_trust_flow.py`、`test_chat_policy_flow.py`、`test_chat_pdf_supplement.py` | `3c64060`：可信问答 M2 受控策略与核验闭环 |
 | [行情与 MCP 基本面](#market-mcp) | 实时行情、K 线、基本面/MCP 工具 | `financial_report_fetcher/market/tencent.py`、`financial_report_fetcher/market/mcp_client.py`、`webapp/mcp_guard.py` | `test_market_*.py`、`test_mcp_*.py` | 见设计台账登记证据 |
 | [任务与运行可靠性](#runtime) | 分析任务后台执行、取消、恢复和 SSE/轮询 | `webapp/tasks.py`、`task_store.py`、`server.py` | `test_tasks.py`、`test_server_api.py` | 见设计台账登记证据 |
 
@@ -98,12 +98,12 @@
 
 | 项目 | 定位信息 |
 | --- | --- |
-| 核心代码 | `webapp/chat_models.py`（运行/证据契约）、`webapp/chat_scope.py`（范围解析）、`webapp/chat_evidence.py`（证据标准化）、`webapp/chat_store.py`（持久化）、`webapp/chat_supplement.py`（一次性授权与受控下载）、`webapp/server.py`（SSE/API）、`financial_report_fetcher/rag/qa.py`（范围过滤与生成） |
+| 核心代码 | `webapp/chat_models.py`（运行/证据契约）、`webapp/chat_scope.py`（范围解析）、`webapp/chat_policy.py`（意图与工具策略）、`webapp/chat_facts.py`（事实归一与冲突）、`webapp/chat_verifier.py`（论断核验）、`webapp/chat_evidence.py`（证据标准化）、`webapp/chat_store.py`（持久化）、`webapp/chat_supplement.py`（一次性授权与受控下载）、`webapp/server.py`（SSE/API）、`financial_report_fetcher/rag/qa.py`（范围过滤、策略门控与生成） |
 | 前端 | `webapp/static/app.js`（会话、范围栏和流消费）、`chat_rendering.js`（回答/证据渲染）、`style.css` |
-| API/数据契约 | `POST /api/chat/stream`；`POST /api/chat/supplements/{supplement_id}/resolve`；`AnswerRun` 持久化 `scope`、`artifacts`、`tool_artifacts`、补充摘要与运行状态；旧答案可能不含证据包 |
-| 关键不变量 | `company_only` 是硬 `report_id` 边界，不能静默扩展到跨公司/跨期间；仅显式同业/比较问题才可扩至 `company_industry`，并标注“本地可检索同业样本”；补充下载仅在同公司原问题获得一次性明确授权后执行，候选与选择均不超过 5，跨会话/跨问题/重放一律拒绝；仅 `source="pdf"` 索引成功的报告可进入恢复范围；PDF 事实必须有页码证据；外部事实必须保留来源与 `as_of` |
+| API/数据契约 | `POST /api/chat/stream`；`POST /api/chat/supplements/{supplement_id}/resolve`；`AnswerRun` 持久化 `scope`、`intent_decision`、`tool_policy`、`facts`、`conflicts`、`verification_report`、`artifacts`、`tool_artifacts`、补充摘要与运行状态；旧答案可能不含证据包 |
+| 关键不变量 | `company_only` 是硬 `report_id` 与外部工具身份边界，不能静默扩展到跨公司/跨期间；仅显式同业/比较问题才可扩至 `company_industry`，并标注“本地可检索同业样本”；工具只能来自意图策略允许集，网页查询/行情代码均绑定冻结 Scope；缺少期间、口径、主体、单位或受控来源/时间的事实不得进入确定性结论，冲突必须披露；补充下载仅在同公司原问题获得一次性明确授权后执行，候选与选择均不超过 5，跨会话/跨问题/重放一律拒绝；仅 `source="pdf"` 索引成功的报告可进入恢复范围 |
 | 证据呈现规则 | 默认收起、无摘要/片段/工具参数结果；同 PDF 同页、同网页 URL、同来源同 `as_of` 的实时数据合并；单 PDF 超过 3 个不同页码仅保留首页链接；无可信 PDF URL 时只显示不可用状态，绝不伪造跳转 |
-| 验证 | `tests/unit/test_chat_models.py`、`tests/unit/test_chat_scope.py`、`tests/unit/test_chat_evidence.py`、`tests/unit/test_chat_store.py`、`tests/unit/test_chat_supplement.py`、`tests/unit/test_chat_supplement_ui.py`、`tests/unit/test_chat_rendering_js.py`、`tests/unit/test_server_api.py`、`tests/browser/test_chat_trust_flow.py`、`tests/browser/test_chat_pdf_supplement.py` |
+| 验证 | `tests/unit/test_chat_models.py`、`test_chat_scope.py`、`test_chat_policy.py`、`test_chat_facts.py`、`test_chat_verifier.py`、`test_rag_policy_m2.py`、`test_chat_policy_eval_cases.py`、`test_chat_evidence.py`、`test_chat_store.py`、`test_chat_supplement.py`、`test_chat_supplement_ui.py`、`test_chat_rendering_js.py`、`test_server_api.py`、`tests/browser/test_chat_trust_flow.py`、`test_chat_policy_flow.py`、`test_chat_pdf_supplement.py` |
 | 设计与记录 | [可信 Agent 设计](superpowers/specs/2026-09-10-智能问答可信Agent升级-design.md)、[M1 计划](superpowers/plans/2026-09-10-智能问答可信Agent-M1.md) |
 
 **变更记录**
@@ -116,7 +116,8 @@
 - `55c3189`：诊断失败日志仅保留 `run_id`、状态和异常类型，不记录问题正文或 traceback。
 - `9e8abed`：流式异常响应改为安全提示与诊断 ID；旧单报告问答回退日志补充报告代码与期间。
 - `1132bc6`：单公司问答缺少原文时提供最多 5 份可选候选；仅经一次性授权后下载并以 PDF 索引证据恢复原问题，持久化补充摘要并在重开会话展示；兼容性要求为单进程部署，补充登记表不跨进程共享。
-- 后续可信 Agent M2–M4 尚未实现；状态以[设计台账](superpowers/DESIGN-REGISTRY.md#trusted-chat-agent)为准。
+- `3c64060`：可信问答 M2，增加受控意图与工具策略、范围绑定的实时/网页查询、事实归一/冲突和确定性论断核验；外部数据仅作带来源与时间的参考，评测通过真实 RAG 策略门控。
+- M3–M4 尚未实现；状态以[设计台账](superpowers/DESIGN-REGISTRY.md#trusted-chat-agent)为准。
 
 <a id="market-mcp"></a>
 ## 行情与 MCP 基本面
