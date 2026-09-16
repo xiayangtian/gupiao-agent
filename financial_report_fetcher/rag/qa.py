@@ -7,12 +7,13 @@
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional
 
 from financial_report_fetcher.report_identity import build_report_id
-from webapp.chat_models import Scope
+from webapp.chat_models import Scope, ToolPolicy
 
 from .reranker import Reranker, _maybe_rerank
 from .store import RagStore
@@ -401,6 +402,7 @@ class RagQA:
         priority_report_id: Optional[str] = None,
         scope: Optional[Scope] = None,
         run_id: Optional[str] = None,
+        tool_policy: Optional[ToolPolicy] = None,
     ):
         """流式检索回答，可选工具调用编排。事件：
 
@@ -430,6 +432,14 @@ class RagQA:
             hits = []
             retrieval_degraded = True
         retrieval_report_ids = self._retrieval_report_ids(hits)
+        # A policy is authoritative in the trusted-chat path. Legacy callers may
+        # still supply raw tools without one, preserving the prior API behavior.
+        if tool_policy is not None:
+            allowed = set(tool_policy.allowed_tools)
+            tools = [tool for tool in (tools or []) if self._tool_name(tool) in allowed]
+            yield {"type": "policy_resolved", "intent": tool_policy.intent,
+                   "allowed_tools": list(tool_policy.allowed_tools), "max_calls": tool_policy.max_calls,
+                   "max_rounds": tool_policy.max_rounds}
         can_use_tools = bool(tools and self.tool_executor is not None)
         if not hits and not retrieval_degraded and not can_use_tools:
             yield {"type": "empty"}
@@ -467,14 +477,19 @@ class RagQA:
                         "tools_used": [],
                         "retrieval_report_ids": retrieval_report_ids,
                         "retrieval_degraded": retrieval_degraded,
+                        "tool_policy_intent": tool_policy.intent if tool_policy else None,
+                        "tool_timings": [],
                     }
                     return
 
         # 工具编排路径
         tools_used: List[str] = []
+        tool_timings: List[Dict[str, Any]] = []
         web_sources: List[Dict[str, str]] = []
         seen_tool_calls = set()
         total_tool_calls = 0
+        max_calls = min(self.max_tool_calls, tool_policy.max_calls) if tool_policy is not None else self.max_tool_calls
+        max_rounds = min(self.max_tool_rounds, tool_policy.max_rounds) if tool_policy is not None else self.max_tool_rounds
         round_no = 0
         while True:
             round_no += 1
@@ -527,15 +542,22 @@ class RagQA:
                             })
                             continue
 
+                        if tool_policy is not None and name not in tool_policy.allowed_tools:
+                            result = "工具调用失败：该工具不在本问题允许的来源范围内"
+                            ok = False
+                            yield {"type": "tool_result", "name": name, "summary": result, "ok": False}
+                            messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+                            continue
                         yield {"type": "reasoning_stage", "stage": "retrieve", "round": round_no,
                                "message": f"正在补充信息：调用 {name}…"}
                         yield {"type": "tool_call", "name": name, "arguments": args}
+                        started = time.monotonic()
                         if identity in seen_tool_calls:
                             result = "工具调用失败：检测到重复调用，已使用此前结果，请基于已有信息继续回答"
                             ok = False
-                        elif total_tool_calls >= self.max_tool_calls:
+                        elif total_tool_calls >= max_calls:
                             result = (
-                                f"工具调用失败：本次问答已达到工具调用上限（{self.max_tool_calls} 次）；"
+                                f"工具调用失败：本次问答已达到工具调用上限（{max_calls} 次）；"
                                 "重新发送问题会重置，请基于已有信息回答"
                             )
                             ok = False
@@ -551,10 +573,18 @@ class RagQA:
                             except Exception as exc:
                                 result = f"工具调用失败：{exc}"
                                 ok = False
+                        elapsed = round(time.monotonic() - started, 6)
                         if ok:
                             tools_used.append(name)  # 仅成功执行的工具计入（避免假徽章）
+                            tool_timings.append({"name": name, "elapsed_seconds": elapsed})
                             if name == "web_search":
                                 web_sources.extend(self._web_sources(result))
+                            try:
+                                structured = json.loads(result)
+                            except (TypeError, json.JSONDecodeError):
+                                structured = None
+                            if isinstance(structured, dict):
+                                yield {"type": "structured_tool_result", "name": name, "payload": structured, "ok": True}
                         yield {"type": "tool_result", "name": name, "summary": result[:200], "ok": ok}
                         yield {"type": "reasoning_stage", "stage": "review", "round": round_no,
                                "message": "已获取补充信息，正在核验并决定是否还需查询…"}
@@ -578,9 +608,11 @@ class RagQA:
                         "web_sources": web_sources,
                         "retrieval_report_ids": retrieval_report_ids,
                         "retrieval_degraded": retrieval_degraded,
+                        "tool_policy_intent": tool_policy.intent if tool_policy else None,
+                        "tool_timings": tool_timings,
                     }
                     return
-            if got_tool_calls and round_no < self.max_tool_rounds:
+            if got_tool_calls and round_no < max_rounds:
                 continue
             break
 
@@ -606,8 +638,15 @@ class RagQA:
                     "web_sources": web_sources,
                     "retrieval_report_ids": retrieval_report_ids,
                     "retrieval_degraded": retrieval_degraded,
+                    "tool_policy_intent": tool_policy.intent if tool_policy else None,
+                    "tool_timings": tool_timings,
                 }
                 return
+
+    @staticmethod
+    def _tool_name(tool: Dict[str, Any]) -> str:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        return str(function.get("name") or "") if isinstance(function, dict) else ""
 
     def try_answer_report(
         self,
