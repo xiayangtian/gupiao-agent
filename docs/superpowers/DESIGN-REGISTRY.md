@@ -17,7 +17,7 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
-| 智能问答可信 Agent M3：研究型 Agent | 待实现 | 可直接执行 | [主记录](#trusted-chat-m3) |
+| 智能问答可信 Agent M3：研究型 Agent | 实施中 | — | [主记录](#trusted-chat-m3) |
 | 智能问答可信 Agent M4：研究工作台与质量运营 | 待实现 | 可直接执行 | [主记录](#trusted-chat-m4) |
 
 ## 全部设计
@@ -41,7 +41,7 @@
 | <a id="analysis-tab-priority"></a>分析主题Tab优先级 | [设计](specs/2026-09-10-分析主题Tab优先级-design.md) | [计划](plans/2026-09-10-分析主题Tab优先级.md) | 已实现 | — | 合并 17e4dab；`python3 -m pytest tests/unit/test_analysis_result.py -k tab_label -q`：2 passed, 2 deselected in 0.12s | 2026-09-14 |
 | <a id="trusted-chat-m1"></a>智能问答可信 Agent M1：可信回答底座 | [设计](specs/2026-09-10-智能问答可信Agent升级-design.md) | [M1](plans/2026-09-10-智能问答可信Agent-M1.md) | 已实现 | — | 合并 6276701；`python3 -m pytest tests/browser/test_chat_trust_flow.py -q`：6 passed | 2026-09-14 |
 | <a id="trusted-chat-m2"></a>智能问答可信 Agent M2：受控检索与事实核验 | 同 M1 总体设计 | [M2](plans/2026-09-10-智能问答可信Agent-M2.md) | 已实现 | — | 合并 3c64060；`python3 -m pytest -q`：1008 passed，1 skipped，3 warnings；`git diff --check` 通过 | 2026-09-16 |
-| <a id="trusted-chat-m3"></a>智能问答可信 Agent M3：研究型 Agent | 同 M1 总体设计 | [M3](plans/2026-09-10-智能问答可信Agent-M3.md) | 待实现 | 可直接执行 | M2 已合并 3c64060；尚未创建 M3 实施分支 | 2026-09-16 |
+| <a id="trusted-chat-m3"></a>智能问答可信 Agent M3：研究型 Agent | 同 M1 总体设计 | [M3](plans/2026-09-10-智能问答可信Agent-M3.md) | 实施中 | — | 在 `feat/trusted-chat-m3` 实施中；M2 合并 3c64060 | 2026-09-16 |
 | <a id="trusted-chat-m4"></a>智能问答可信 Agent M4：研究工作台与质量运营 | 同 M1 总体设计 | [M4](plans/2026-09-10-智能问答可信Agent-M4.md) | 待实现 | 可直接执行 | 依赖 M3；尚未创建 M4 实施分支 | 2026-09-16 |
 | <a id="financial-structure-visuals"></a>财务结构可视化 | [设计](specs/2026-09-10-财务结构可视化-design.md) | [计划](plans/2026-09-10-财务结构可视化.md) | 已实现 | — | 合并 1107509；`python3 -m pytest tests/unit/test_visualizations.py -q`：14 passed in 0.12s | 2026-09-14 |
 | <a id="design-registry"></a>方案设计台账 | [设计](specs/2026-09-14-方案设计台账-design.md) | [计划](plans/2026-09-14-方案设计台账.md) | 已实现 | — | 合并 f27056c；`python3 -m pytest tests/unit/test_design_registry.py -q` → 4 passed in 0.11s | 2026-09-14 |
