@@ -2532,7 +2532,7 @@ class TestChatSupplementApi:
         assert needed["candidates"][0]["label"] == "2025 半年报"
         assert supplement_env["downloader"].calls == []
         assert supplement_env["ingestion"].calls == []
-        assert [name for name, _ in events] == ["session", "scope_resolved", "run_started",
+        assert [name for name, _ in events] == ["session", "scope_resolved", "policy_resolved", "run_started",
                                                 "supplement_needed"]
 
     def test_supplement_handler_is_reachable_from_the_streaming_producer_thread(
@@ -3050,3 +3050,19 @@ class TestChatSupplementApi:
         assert captured["tool_executor"] is not None
         assert captured["tool_executor"]("get_realtime_quote", {}) != ""
         assert captured["supplement_request_handler"] is server._handle_supplement_request
+
+
+def test_m2_policy_is_emitted_and_unsupported_numeric_is_degraded(client, env, monkeypatch):
+    class PolicyRag:
+        def answer_stream(self, question, **kwargs):
+            assert kwargs["tool_policy"].intent == "report_fact"
+            yield {"type": "done", "answer": "营收为 100 亿元", "citations": [], "model": "m", "usage": {}, "tools_used": [], "retrieval_report_ids": [], "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", PolicyRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "半年报营收多少？",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+    }))
+    assert _event(events, "policy_resolved")["intent"] == "report_fact"
+    assert _event(events, "verification")["verification"]["status"] == "blocked"
+    assert "未找到可核验" in _event(events, "done")["run"]["content"]
