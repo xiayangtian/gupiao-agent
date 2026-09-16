@@ -2928,6 +2928,10 @@ async function submitQuestion(q, key) {
             },
           });
         }
+      } else if (parsed.event === 'research_plan') {
+        st.researchPlan = parsed.data.plan || null;
+      } else if (parsed.event === 'research_done') {
+        st.researchRun = parsed.data.run || null;
       } else if (parsed.event === 'done') {
         done = true;
         st.finishedNormally = true;
@@ -2939,7 +2943,7 @@ async function submitQuestion(q, key) {
           if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
           thinkingEl = null;
           scopeEl = null;
-          appendAssistantRun('#chat-history', { content: st.answerText, run: parsed.data.run });
+          appendAssistantRun('#chat-history', { content: st.answerText, run: parsed.data.run, research_run: st.researchRun || parsed.data.research_run });
           appendChatElapsed('#chat-history', parsed.data.elapsed_seconds);
           // analysis 来源引用未进入 run.artifacts，只保留在旧 citations 字段一个版本；
           // PDF/网页/实时工具已由 renderRunArtifacts 统一渲染。
@@ -3127,6 +3131,10 @@ function appendAssistantRun(sel, message) {
   var displayed = rendering ? rendering.normalizeAssistantMarkdown(content) : content;
   parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + '</div>');
   if (rendering) {
+    var researchPlanHtml = rendering.renderResearchPlan(message && message.research_run && message.research_run.plan);
+    if (researchPlanHtml) parts.push(researchPlanHtml);
+    var researchStepsHtml = rendering.renderResearchSteps(message && message.research_run);
+    if (researchStepsHtml) parts.push(researchStepsHtml);
     var policyHtml = rendering.renderPolicy(run && run.tool_policy);
     if (policyHtml) parts.push(policyHtml);
     var factsHtml = rendering.renderFactsAndConflicts(run);
@@ -3142,6 +3150,8 @@ function appendAssistantRun(sel, message) {
   wrapper.innerHTML = parts.join('');
   // 补充摘要紧跟证据之后、运行状态之前，重载历史与实时完成走同一条路径。
   appendSupplementSummary(wrapper, run);
+  var recoveryHtml = rendering ? rendering.renderResearchRecovery(run) : '';
+  if (recoveryHtml) wrapper.insertAdjacentHTML('beforeend', recoveryHtml);
   if (statusHtml) wrapper.insertAdjacentHTML('beforeend', statusHtml);
   box.appendChild(wrapper);
   box.scrollTop = box.scrollHeight;
@@ -3207,12 +3217,35 @@ function bindChatRunActions() {
       copyChatRunId(copy);
       return;
     }
+    var resume = e.target && e.target.closest ? e.target.closest('[data-chat-action="resume-research"]') : null;
+    if (resume) {
+      resumeResearch(resume.dataset.researchRunId, resume);
+      return;
+    }
     var regen = e.target && e.target.closest ? e.target.closest('.chat-run-regenerate') : null;
     if (!regen) return;
     var runBlock = regen.closest ? regen.closest('.chat-run') : null;
     var userText = chatRunQuestion(runBlock);
     if (userText) submitQuestion(userText, chatStreamKey());
   });
+}
+
+async function resumeResearch(runId, button) {
+  if (!runId || !chatSessionId || !button) return;
+  button.disabled = true;
+  button.textContent = '正在继续研究…';
+  try {
+    var response = await fetch('/api/chat/research/' + encodeURIComponent(runId) + '/resume', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatSessionId }),
+    });
+    await consumeSupplementStream(response, {
+      done: function (data) { appendAssistantRun('#chat-history', { content: data.answer, run: data.run }); }
+    });
+  } catch (_) {
+    button.textContent = '继续研究失败';
+    button.disabled = false;
+  }
 }
 
 function chatRunQuestion(runBlock) {

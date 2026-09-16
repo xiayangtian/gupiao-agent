@@ -34,3 +34,10 @@
 - GREEN：`python3 -m pytest tests/unit/test_research_store.py tests/unit/test_research_agent.py tests/unit/test_server_api.py -q -k 'research or agent'`，5 passed、143 deselected。
 - 实现：ResearchRun 以会话 owner 索引持久化；研究流发出计划/步骤/终态事件；读取和恢复端点均按 session_id 隔离，普通 SSE 仍由既有独立 producer 路径服务。
 - 偏离：未使用 TaskManager 承载普通流式研究，避免改变其普通任务语义。
+
+## Task 6 — 研究计划与恢复交互
+
+- RED：新增研究渲染函数在实现前不存在。
+- GREEN：`python3 -m pytest tests/unit/test_chat_rendering_js.py -q`，17 passed。
+- 实现：纯渲染业务计划、步骤和恢复资格；SSE 消费研究事件；恢复按钮含可访问标签/焦点，移动样式允许步骤名换行且不以颜色单独传达状态。
+- 偏离：无。

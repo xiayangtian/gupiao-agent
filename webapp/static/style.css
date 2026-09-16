@@ -2756,3 +2756,13 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 @media (max-width: 390px) {
   .chat-policy, .chat-facts-conflicts, .chat-verification { font-size: 12px; }
 }
+
+/* M3 research plan: text labels and icons ensure status never relies on colour alone. */
+.research-plan, .research-steps, .research-recovery { margin: .5rem 0; padding: .6rem; border: 1px solid var(--border, #cbd5e1); border-radius: .5rem; }
+.research-plan summary { cursor: pointer; font-weight: 600; }
+.research-plan ol { padding-left: 1.4rem; }
+.research-step { overflow-wrap: anywhere; }
+.research-step-completed { font-weight: 600; }
+.research-recovery { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.chat-run-action:focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
+@media (max-width: 390px) { .research-plan, .research-steps, .research-recovery { max-width: 100%; overflow-wrap: anywhere; } }

@@ -396,6 +396,36 @@
     return '<div class="chat-verification chat-verification-' + escapeHtml(report.status) + '" role="status">' + escapeHtml(label) + '</div>';
   }
 
+  function researchStepLabel(step) {
+    return String((step && step.label) || '研究步骤');
+  }
+
+  function renderResearchPlan(plan) {
+    if (!plan || typeof plan !== 'object') return '';
+    var steps = Array.isArray(plan.steps) ? plan.steps : [];
+    var acceptance = Array.isArray(plan.acceptance) ? plan.acceptance : [];
+    if (!steps.length) return '';
+    return '<details class="research-plan"><summary>研究计划（' + steps.length + ' 步）</summary>'
+      + '<ol>' + steps.map(function (step) { return '<li>' + escapeHtml(researchStepLabel(step)) + '</li>'; }).join('') + '</ol>'
+      + '<div class="research-acceptance"><strong>完成判据</strong>：' + escapeHtml(acceptance.join('；')) + '</div></details>';
+  }
+
+  function renderResearchSteps(run) {
+    if (!run || typeof run !== 'object' || !Array.isArray(run.step_runs)) return '';
+    return '<div class="research-steps" role="status" aria-live="polite">' + run.step_runs.map(function (step) {
+      return '<div class="research-step research-step-' + escapeHtml(String(step.status || 'pending')) + '"><span aria-hidden="true">'
+        + (step.status === 'completed' ? '✓' : step.status === 'failed' ? '!' : '•') + '</span> '
+        + escapeHtml(String(step.step_id || '研究步骤')) + '：' + escapeHtml(String(step.status || 'pending')) + '</div>';
+    }).join('') + '</div>';
+  }
+
+  function renderResearchRecovery(run) {
+    if (!run || typeof run !== 'object' || !run.research_run_id || !['stopped', 'partial', 'failed'].includes(String(run.status))) return '';
+    var summary = run.research_summary || {};
+    var from = String(summary.resume_from_step_id || '未完成步骤');
+    return '<div class="research-recovery"><span>从步骤：' + escapeHtml(from) + '</span><button type="button" class="chat-run-action" data-chat-action="resume-research" data-research-run-id="' + escapeHtml(String(run.research_run_id)) + '">继续研究</button></div>';
+  }
+
   function renderRunStatus(run) {
     if (!run || typeof run !== 'object') return '';
     if (run.legacy_evidence_unavailable) {
@@ -443,6 +473,9 @@
     renderFactsAndConflicts: renderFactsAndConflicts,
     renderVerification: renderVerification,
     renderRunStatus: renderRunStatus,
+    renderResearchPlan: renderResearchPlan,
+    renderResearchSteps: renderResearchSteps,
+    renderResearchRecovery: renderResearchRecovery,
     supplementSummaryView: supplementSummaryView,
   };
 }));

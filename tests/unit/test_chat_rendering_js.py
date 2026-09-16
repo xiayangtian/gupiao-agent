@@ -429,3 +429,17 @@ def test_m2_rendering_marks_reference_conflict_and_business_policy():
     assert '外部参考' in result['facts'] and '已确认' not in result['facts']
     assert '存在口径/时间差异' in result['facts'] and 'PDF 原文' in result['facts'] and '实时数据' in result['facts']
     assert 'role="status"' in result['verification']
+
+
+def test_research_rendering_shows_business_steps_acceptance_and_recovery_only_when_resumable():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const plan = {{steps:[{{id:'v', label:'核对来源'}}], acceptance:['证据充分']}};
+        const stopped = {{status:'stopped', research_run_id:'r1', research_summary:{{resume_from_step_id:'比较'}}}};
+        console.log(JSON.stringify({{plan:r.renderResearchPlan(plan), recovery:r.renderResearchRecovery(stopped), completed:r.renderResearchRecovery({{status:'completed', research_run_id:'r1'}})}}));
+        """
+    )
+    assert '核对来源' in result['plan'] and '完成判据' in result['plan']
+    assert '继续研究' in result['recovery'] and '从步骤：比较' in result['recovery']
+    assert result['completed'] == ''
