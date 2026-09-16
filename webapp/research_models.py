@@ -127,6 +127,7 @@ class ResearchStepRun:
     step_id: str
     status: ResearchStepStatus = "pending"
     input_summary: str = ""
+    result_summary: str = ""
     artifacts: tuple[dict[str, Any], ...] = ()
     facts: tuple[dict[str, Any], ...] = ()
     conflicts: tuple[dict[str, Any], ...] = ()
@@ -139,7 +140,7 @@ class ResearchStepRun:
         _text(self.step_id, "step_id")
         if self.status not in _STEP_STATUSES:
             raise ValueError("unsupported research step status")
-        for name in ("input_summary", "error", "started_at", "finished_at"):
+        for name in ("input_summary", "result_summary", "error", "started_at", "finished_at"):
             _text(getattr(self, name), name, empty=True)
         for name in ("artifacts", "facts", "conflicts"):
             values = getattr(self, name)
@@ -161,7 +162,7 @@ class ResearchStepRun:
 
     def to_dict(self) -> dict[str, Any]:
         return {"step_id": self.step_id, "status": self.status, "input_summary": self.input_summary,
-                "artifacts": list(self.artifacts), "facts": list(self.facts), "conflicts": list(self.conflicts),
+                "result_summary": self.result_summary, "artifacts": list(self.artifacts), "facts": list(self.facts), "conflicts": list(self.conflicts),
                 "verification": self.verification, "error": self.error, "started_at": self.started_at,
                 "finished_at": self.finished_at}
 
@@ -172,6 +173,7 @@ class ResearchStepRun:
         verification = data.get("verification")
         return cls(_text(data.get("step_id"), "step_id"), _text(data.get("status", "pending"), "step status"),
                    _text(data.get("input_summary", ""), "input_summary", empty=True),
+                   _text(data.get("result_summary", ""), "result_summary", empty=True),
                    tuple(_safe_json(item, "artifacts") for item in data.get("artifacts", [])),
                    tuple(_safe_json(item, "facts") for item in data.get("facts", [])),
                    tuple(_safe_json(item, "conflicts") for item in data.get("conflicts", [])),

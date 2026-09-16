@@ -94,7 +94,7 @@ class ToolPolicyResolver:
         elif decision.intent == "event_attribution":
             fallback = "外部事件来源暂不可用；不能确认归因。"
         elif decision.intent == "research_task":
-            fallback = "详细研究规划将在 M3 提供；当前仅能进行本地查证。"
+            fallback = "研究将严格按当前范围与工具策略执行；无可用来源时会明确说明限制。"
 
         names = self._names_in_families(
             availability, self._INTENT_FAMILIES.get(decision.intent, ()),

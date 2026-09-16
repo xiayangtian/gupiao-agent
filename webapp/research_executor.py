@@ -15,7 +15,6 @@ class ResearchExecutor:
     def __init__(self, handlers: Mapping[str, StepHandler] | None = None, *, persist: Callable[[ResearchRun], None] | None = None) -> None:
         self.handlers = dict(handlers or {})
         self.persist = persist
-        self._tool_cache: dict[str, Mapping[str, Any]] = {}
 
     def execute(self, run: ResearchRun, *, stop_event: Event, emit: Callable[[dict[str, Any]], None]) -> ResearchRun:
         if run.status == "planned":
@@ -46,7 +45,10 @@ class ResearchExecutor:
 
     @staticmethod
     def _event(emit: Callable[[dict[str, Any]], None], step: ResearchStep, status: str, **extra: Any) -> None:
-        emit({"type": "research_step_" + status, "step_id": step.id, "label": step.label, "status": status, **extra})
+        # The public event name stays stable (``research_step_started``) while the
+        # payload status uses the persisted step vocabulary (``running``).
+        suffix = "started" if status == "running" else status
+        emit({"type": "research_step_" + suffix, "step_id": step.id, "label": step.label, "status": status, **extra})
 
     def _run(self, run: ResearchRun, stop_event: Event, emit: Callable[[dict[str, Any]], None]) -> ResearchRun:
         while True:
@@ -72,9 +74,14 @@ class ResearchExecutor:
                     return run
                 continue
             with ThreadPoolExecutor(max_workers=min(3, len(batch)), thread_name_prefix="research-step") as pool:
+                # Running state is also persisted before an external call starts so
+                # a restart cannot mistake it for an untouched step.
                 for step in batch:
+                    running = ResearchStepRun(step.id, "running", input_summary=step.label).transition("running")
+                    run = self._save(run.with_step_run(running))
                     self._event(emit, step, "running")
                 futures = {pool.submit(self._call, step, run): step for step in batch}
+                failure: tuple[ResearchStep, str] | None = None
                 for future in as_completed(futures):
                     step = futures[future]
                     if stop_event.is_set():
@@ -87,9 +94,17 @@ class ResearchExecutor:
                     try:
                         result = future.result()
                     except Exception as exc:
-                        run = self._fail(run, step, str(exc), emit)
-                        return run
-                    run = self._complete(run, step, result, emit)
+                        # Persist the failed step immediately, but keep collecting:
+                        # a sibling may already have produced reusable evidence.
+                        if failure is None:
+                            failure = (step, str(exc))
+                            failed = ResearchStepRun(step.id, "failed", input_summary=step.label, error=str(exc)).transition("failed", error=str(exc))
+                            run = self._save(run.with_step_run(failed).transition("failed"))
+                            self._event(emit, step, "failed", reason="该步骤未完成")
+                    else:
+                        run = self._complete(run, step, result, emit)
+                if failure is not None:
+                    return run
 
     def _execute_one(self, run: ResearchRun, step: ResearchStep, stop_event: Event, emit: Callable[[dict[str, Any]], None]) -> tuple[ResearchRun, bool]:
         if stop_event.is_set():
@@ -97,6 +112,8 @@ class ResearchExecutor:
             run = self._save(run.with_step_run(stopped).transition("stopped"))
             self._event(emit, step, "stopped", reason="用户已停止研究")
             return run, True
+        running = ResearchStepRun(step.id, "running", input_summary=step.label).transition("running")
+        run = self._save(run.with_step_run(running))
         self._event(emit, step, "running")
         try:
             result = self._call(step, run)
@@ -112,23 +129,19 @@ class ResearchExecutor:
     def _call(self, step: ResearchStep, run: ResearchRun) -> Mapping[str, Any]:
         handler = self.handlers.get(step.kind)
         if handler is None:
-            return {}
-        cache_key = ""
-        if step.kind == "tool":
-            cache_key = "|".join((step.tools[0] if step.tools else "", step.id, run.plan.scope.to_dict().__repr__()))
-            cached = self._tool_cache.get(cache_key)
-            if cached is not None:
-                return cached
+            raise ValueError(f"research step {step.id} has no production handler")
+        # A plan does not persist raw tool arguments/provider freshness metadata.
+        # Therefore caching is deliberately disabled unless a future controlled tool
+        # contract supplies provider + tool_name + canonical arguments + as_of_date.
         result = handler(step, run) or {}
         if not isinstance(result, Mapping):
             raise ValueError("research step handler must return an object")
-        if cache_key:
-            self._tool_cache[cache_key] = result
         return result
 
     def _complete(self, run: ResearchRun, step: ResearchStep, result: Mapping[str, Any], emit: Callable[[dict[str, Any]], None]) -> ResearchRun:
         completed = ResearchStepRun(
             step.id, "completed", input_summary=str(result.get("input_summary", step.label)),
+            result_summary=str(result.get("answer", result.get("result_summary", ""))),
             artifacts=tuple(result.get("artifacts", ())), facts=tuple(result.get("facts", ())),
             conflicts=tuple(result.get("conflicts", ())), verification=result.get("verification"),
         )

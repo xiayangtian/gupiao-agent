@@ -71,12 +71,14 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
 from .chat_facts import FactNormalizer, detect_conflicts
-from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, IndustryRef, Scope
+from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
 from .research_agent import ResearchAgent
+from .research_executor import ResearchExecutor
+from .research_models import ResearchRun
 from .chat_supplement import (
     SupplementCandidate,
     SupplementCandidateResolver,
@@ -1834,6 +1836,8 @@ def _make_answer_run(
     status: str,
     content: str,
     supplement: Optional[Dict[str, Any]] = None,
+    research_run_id: str = "",
+    research_summary: Optional[Dict[str, Any]] = None,
 ) -> AnswerRun:
     """按累积状态构造可持久化的 AnswerRun。"""
     return AnswerRun(
@@ -1849,12 +1853,35 @@ def _make_answer_run(
         tool_artifacts=tuple(state.tool_artifacts),
         retrieval_report_ids=tuple(state.retrieval_report_ids),
         id=run_id,
+        research_run_id=research_run_id,
+        research_summary=research_summary,
         created_at=created_at,
         completed_at=dt.datetime.now().isoformat(timespec="seconds"),
         elapsed_seconds=round(time.perf_counter() - started_at, 3),
         model=state.model_name,
         supplement=supplement,
     )
+
+
+def _mark_research_stopped(sid: str, run_id: str) -> Optional[ResearchRun]:
+    """Persist the honest stopped state for a research run whose client disconnected.
+
+    The executor thread can still be inside a blocking external call, so this
+    writes the same cooperative outcome the executor will reach: in-flight steps
+    become ``stopped`` while every completed step and its evidence stay immutable.
+    """
+    run = chat_store.get_research_run(sid, run_id)
+    if run is None:
+        return None
+    if run.status in {"completed", "partial", "stopped", "failed"}:
+        return run
+    for step_run in run.step_runs:
+        if step_run.status == "running":
+            run = run.with_step_run(step_run.transition("stopped"))
+    if run.status != "stopped":
+        run = run.transition("stopped")
+    chat_store.save_research_run(sid, run)
+    return run
 
 
 @app.post("/api/chat/stream")
@@ -1923,12 +1950,15 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         normalizer = EvidenceNormalizer()
         pump = _SseEventPump(asyncio.get_running_loop(), "流式问答", run_id=run_id)
         saved = False
+        research_run_id = ""
 
-        def _persist(status: str, content: str = "", supplement=None) -> AnswerRun:
+        def _persist(status: str, content: str = "", supplement=None, *, research_run_id: str = "",
+                     research_summary=None) -> AnswerRun:
             nonlocal saved
             run = _make_answer_run(
                 state, run_id=run_id, created_at=created_at, started_at=started_at,
                 status=status, content=content, supplement=supplement,
+                research_run_id=research_run_id, research_summary=research_summary,
             )
             chat_store.append_turn(sid, question=body.question, run=run)
             saved = True
@@ -1951,10 +1981,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             finally:
                 _supplement_context.current = None
 
-        # research_task 在 M2 没有工具也没有步骤规划：直接用策略 fallback 如实回答，
-        # 不调用模型（避免模型凭空编造研究计划），也不启动生产者线程。
-        research_fallback = policy.fallback_message if policy.intent == "research_task" else ""
-        if not research_fallback:
+        # M3 research_task uses the same policy-gated RagQA path as ordinary
+        # chat, but exposes its durable steps through ResearchAgent instead of
+        # pretending an empty deterministic plan is evidence.
+        is_research = policy.intent == "research_task"
+        if not is_research:
             pump.start(_produce)
 
         try:
@@ -1964,40 +1995,96 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             yield _sse("policy_resolved", {"intent": policy.intent, "allowed_tools": list(policy.allowed_tools),
                                              "max_calls": policy.max_calls, "max_rounds": policy.max_rounds})
             # 策略降级说明进入生产事件流：无外部工具或研究任务时用户能知道本次能力的边界。
-            if policy.fallback_message and (not policy.allowed_tools or research_fallback):
+            if policy.fallback_message and (not policy.allowed_tools or is_research):
                 yield _sse("policy_fallback", {
                     "intent": policy.intent,
                     "message": policy.fallback_message,
                 })
             yield _sse("run_started", {"run_id": run_id})
-            if research_fallback:
+            if is_research:
                 # Research runs in their own producer thread.  The async side
                 # continuously observes disconnects and cooperatively sets the
                 # executor event, so a long research never blocks normal chat SSE.
+                # The retrieve handler is a production bridge to existing RagQA:
+                # Scope and ToolPolicy are passed unchanged, and its citations,
+                # tool artifacts and normalized facts become the durable step data.
+                research_state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
+                research_normalizer = EvidenceNormalizer()
+                retrieved = False
+                def retrieve_research(_step, _run):
+                    nonlocal retrieved
+                    if retrieved:
+                        return {"artifacts": [item.to_dict() for item in research_state.evidence_artifacts],
+                                "facts": [item.to_dict() for item in research_state.facts]}
+                    retrieved = True
+                    kwargs = dict(question=body.question, history=history, filters=body.filters, tools=tools,
+                                  priority_report_id=priority_report_id, scope=scope, run_id=run_id)
+                    parameters = inspect.signature(rag_qa.answer_stream).parameters.values()
+                    if any(parameter.name == "tool_policy" or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+                        kwargs["tool_policy"] = policy
+                    for event in rag_qa.answer_stream(**kwargs):
+                        _relay_rag_event(event, research_state, research_normalizer)
+                    if research_state.error_text:
+                        raise ValueError(research_state.error_text)
+                    if research_state.empty or not (research_state.evidence_artifacts or research_state.facts):
+                        raise ValueError("未取得可核验的范围内来源")
+                    return {"artifacts": [item.to_dict() for item in research_state.evidence_artifacts],
+                            "facts": [item.to_dict() for item in research_state.facts],
+                            "result_summary": (research_state.done_payload or {}).get("answer") or "".join(research_state.answer_parts).strip()}
+                def normalize_research(_step, _run):
+                    return {"facts": [item.to_dict() for item in research_state.facts]}
+                def compare_research(_step, _run):
+                    research_state.conflicts = list(detect_conflicts(research_state.facts))
+                    return {"conflicts": [item.to_dict() for item in research_state.conflicts]}
+                def verify_research(_step, _run):
+                    return {}
+                def answer_research(_step, current_run):
+                    saved_retrieve = next((item for item in current_run.step_runs if item.step_id == "retrieve"), None)
+                    answer = ((research_state.done_payload or {}).get("answer") or "".join(research_state.answer_parts).strip()
+                              or (saved_retrieve.result_summary if saved_retrieve else ""))
+                    if not answer:
+                        raise ValueError("未形成可核验的研究结论")
+                    return {"answer": answer}
+                def persist_research(research_run):
+                    nonlocal research_run_id
+                    research_run_id = research_run.id
+                    chat_store.save_research_run(sid, research_run)
+
                 loop = asyncio.get_running_loop()
                 research_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
                 stop_event = threading.Event()
-                agent = ResearchAgent(persist=lambda research_run: chat_store.save_research_run(sid, research_run))
+                agent = ResearchAgent(
+                    executor=ResearchExecutor({"retrieve": retrieve_research, "normalize": normalize_research,
+                        "compare": compare_research, "verify": verify_research, "answer": answer_research}),
+                    persist=persist_research,
+                )
                 def emit_research(event: dict[str, Any]) -> None:
                     loop.call_soon_threadsafe(research_events.put_nowait, event)
-                research_task = asyncio.create_task(asyncio.to_thread(
-                    agent.run, body.question, scope, decision, policy,
-                    stop_event=stop_event, emit=emit_research,
-                ))
-                disconnected = False
-                while not research_task.done():
-                    if await request.is_disconnected():
+                research_task: asyncio.Task[Any] | None = None
+                try:
+                    research_task = asyncio.create_task(asyncio.to_thread(
+                        agent.run, body.question, scope, decision, policy,
+                        stop_event=stop_event, emit=emit_research,
+                    ))
+                    while not research_task.done():
+                        if await request.is_disconnected():
+                            stop_event.set()
+                        try:
+                            event = await asyncio.wait_for(research_events.get(), timeout=0.05)
+                        except asyncio.TimeoutError:
+                            continue
+                        yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
+                    research_answer = await research_task
+                    while not research_events.empty():
+                        event = research_events.get_nowait()
+                        yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
+                finally:
+                    # Starlette cancels this generator when the client disconnects, so
+                    # the polling loop above cannot always observe it.  Setting the
+                    # shared event here keeps the executor cooperative instead of
+                    # letting a later completion masquerade as the user's run.
+                    if research_task is not None and not research_task.done():
                         stop_event.set()
-                        disconnected = True
-                    try:
-                        event = await asyncio.wait_for(research_events.get(), timeout=0.05)
-                    except asyncio.TimeoutError:
-                        continue
-                    yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
-                research_answer = await research_task
-                while not research_events.empty():
-                    event = research_events.get_nowait()
-                    yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
                 run = replace(
                     research_answer, id=run_id, created_at=created_at,
                     completed_at=dt.datetime.now().isoformat(timespec="seconds"),
@@ -2114,9 +2201,19 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             })
         finally:
             pump.stop()
-            # 未正常完成（停止/断开/没有 done）：保存为 stopped，不伪装完整
+            # 未正常完成（停止/断开/没有 done）：保存为 stopped，不伪装完整；
+            # 研究运行的步骤产物已由同一 persist 回调落盘，这里只补上引用与安全摘要。
             if not saved:
-                _persist("stopped", "".join(state.answer_parts).strip())
+                stopped_summary = None
+                stopped_content = "".join(state.answer_parts).strip()
+                if research_run_id:
+                    stopped_run = _mark_research_stopped(sid, research_run_id)
+                    if stopped_run is not None:
+                        stopped_summary = {"status": stopped_run.status,
+                                           "resume_from_step_id": stopped_run.resume_from_step_id}
+                    stopped_content = stopped_content or "研究已停止；已完成步骤已保存，可继续研究。"
+                _persist("stopped", stopped_content,
+                         research_run_id=research_run_id, research_summary=stopped_summary)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -2140,10 +2237,43 @@ async def resume_research_run(run_id: str, body: ResumeResearchRequest) -> Strea
     if session is None:
         raise HTTPException(404, "会话不存在")
     question = _last_user_question(session)
+    original_policy = None
+    for message in reversed(session.get("messages", [])):
+        saved = (message.get("run") or {}) if isinstance(message, dict) else {}
+        if saved.get("research_run_id") != run_id:
+            continue
+        try:
+            original_policy = ToolPolicy.from_dict(saved["tool_policy"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        break
+    if original_policy is None:
+        raise HTTPException(409, "缺少原始工具策略，不能安全恢复研究")
 
     async def gen():
         events: list[dict[str, Any]] = []
-        agent = ResearchAgent(persist=lambda saved: chat_store.save_research_run(body.session_id, saved))
+        state = _RagRunState(scope=research_run.plan.scope, intent_decision=IntentDecision("research_task"), tool_policy=original_policy)
+        normalizer = EvidenceNormalizer()
+        def retrieve_research(_step, _run):
+            kwargs = dict(question=question, history=[], filters={}, tools=None, scope=research_run.plan.scope, run_id=run_id,
+                          tool_policy=original_policy)
+            for event in rag_qa.answer_stream(**kwargs):
+                _relay_rag_event(event, state, normalizer)
+            if state.error_text or state.empty or not (state.evidence_artifacts or state.facts):
+                raise ValueError(state.error_text or "未取得可核验的范围内来源")
+            return {"artifacts": [item.to_dict() for item in state.evidence_artifacts],
+                    "facts": [item.to_dict() for item in state.facts],
+                    "result_summary": (state.done_payload or {}).get("answer") or "".join(state.answer_parts).strip()}
+        def answer_research(_step, current_run):
+            retrieved = next((item for item in current_run.step_runs if item.step_id == "retrieve"), None)
+            answer = (state.done_payload or {}).get("answer") or "".join(state.answer_parts).strip() or (retrieved.result_summary if retrieved else "")
+            if not answer:
+                raise ValueError("未形成可核验的研究结论")
+            return {"answer": answer}
+        handlers = {"retrieve": retrieve_research, "normalize": lambda *_: {}, "compare": lambda *_: {},
+                    "verify": lambda *_: {}, "answer": answer_research}
+        agent = ResearchAgent(executor=ResearchExecutor(handlers),
+                              persist=lambda saved: chat_store.save_research_run(body.session_id, saved))
         try:
             answer = await asyncio.to_thread(agent.resume, research_run, stop_event=threading.Event(), emit=events.append)
         except ValueError:

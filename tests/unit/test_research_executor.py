@@ -1,4 +1,5 @@
 from threading import Event
+import time
 
 from webapp.chat_models import Scope
 from webapp.research_executor import ResearchExecutor
@@ -30,6 +31,31 @@ def test_stop_preserves_completed_steps_and_marks_current_step_stopped():
     run = ResearchExecutor().execute(ResearchRun.new(_plan()), stop_event=stop, emit=lambda _: None)
     assert run.status == "stopped"
     assert run.step_runs[0].status == "stopped"
+
+
+def test_parallel_failure_persists_completed_sibling_and_resume_does_not_repeat_it():
+    scope = Scope.company_only("601288", "农业银行", ["601288:2024-12-31:annual"])
+    plan = ResearchPlan("研究", scope, (
+        ResearchStep("good", "retrieve", "可用来源"),
+        ResearchStep("bad", "retrieve", "失败来源"),
+    ), ("核对",))
+    persisted = []
+    calls = {"good": 0, "bad": 0}
+    def retrieve(step, run):
+        calls[step.id] += 1
+        if step.id == "bad":
+            raise RuntimeError("provider unavailable")
+        time.sleep(0.05)
+        return {"artifacts": [{"id": "real-source"}]}
+    executor = ResearchExecutor(handlers={"retrieve": retrieve}, persist=persisted.append)
+    failed = executor.execute(ResearchRun.new(plan), stop_event=Event(), emit=lambda _: None)
+    assert failed.status == "failed"
+    assert next(item for item in failed.step_runs if item.step_id == "good").status == "completed"
+    assert any(next((step for step in item.step_runs if step.step_id == "good"), None) for item in persisted)
+    resumed = executor.resume(failed, stop_event=Event(), emit=lambda _: None)
+    assert calls["good"] == 1
+    assert calls["bad"] == 2
+    assert next(item for item in resumed.step_runs if item.step_id == "good").status == "completed"
 
 
 def test_resume_does_not_repeat_completed_external_tool_step():
