@@ -133,6 +133,18 @@ def test_user_confirmed_historical_designs_are_completed_with_traceable_override
         assert "原合并记录缺失" in records[title]["evidence"]
 
 
+def test_trusted_chat_stages_are_tracked_independently():
+    records = {record["title"]: record for record in _main_records()}
+    expected = {
+        "智能问答可信 Agent M1：可信回答底座": "已实现",
+        "智能问答可信 Agent M2：受控检索与事实核验": "已实现",
+        "智能问答可信 Agent M3：研究型 Agent": "待实现",
+        "智能问答可信 Agent M4：研究工作台与质量运营": "待实现",
+    }
+    assert {title: records[title]["status"] for title in expected} == expected
+    assert all(records[title]["executability"] == "可直接执行" for title, status in expected.items() if status == "待实现")
+
+
 def test_project_workflow_defines_registry_updates_and_direct_execution():
     policy = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     for requirement in (
