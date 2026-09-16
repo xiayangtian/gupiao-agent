@@ -232,7 +232,7 @@ class ResearchRun:
             raise ValueError(f"cannot transition {self.status} to {status}; resumable states require resume()")
         return replace(self, status=status, started_at=self.started_at or _now(),
                        finished_at=_now() if status in {"completed", "awaiting_input", "partial", "stopped", "failed"} else "",
-                       resume_from_step_id=self._first_resume_step() if status in _TERMINAL_RESUMABLE else "")
+                       resume_from_step_id=(self._first_resume_step() or "") if status in _TERMINAL_RESUMABLE else "")
 
     def resume(self) -> "ResearchRun":
         if self.status not in _TERMINAL_RESUMABLE:

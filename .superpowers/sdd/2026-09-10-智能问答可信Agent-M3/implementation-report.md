@@ -20,3 +20,10 @@
 - GREEN：`python3 -m pytest tests/unit/test_research_executor.py -q`，3 passed。
 - 实现：只并行无依赖 retrieve/tool，其他步骤按依赖顺序；每步立即经持久化回调保存，停止保留完成步骤，恢复跳过完成工具与事实。
 - 偏离：无。
+
+## Task 4 — ResearchAgent
+
+- RED：`python3 -m pytest tests/unit/test_research_agent.py -q`，因模块不存在而收集失败。
+- GREEN：`python3 -m pytest tests/unit/test_research_agent.py tests/unit/test_research_executor.py tests/unit/test_research_models.py -q`，11 passed。
+- 实现：串联 Planner、Executor 与 M2 ClaimVerifier；仅发出业务研究事件；核验 blocked 时严格降为 partial，不创建计划的简单意图走普通回答。
+- 偏离：无。
