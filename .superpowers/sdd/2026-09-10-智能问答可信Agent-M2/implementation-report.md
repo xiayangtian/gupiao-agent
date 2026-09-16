@@ -234,3 +234,64 @@ intent、允许来源、实际使用来源、禁止报告、运行/核验状态�
 （`8cbdd76`），受影响单测、tests/unit 全量、全量 pytest、M2 浏览器流与补报浏览器回归全部通过；
 `git diff --check` 通过；CSS 检查仍只有既有失败（未声称通过）。仍需独立 reviewer 执行门禁，
 分支未推送、未合并。
+
+## M2 第二轮复审遗留 P1 修复（`27a3c3d`、`3d63f9e`；未推送、未合并）
+
+本轮严格限于 M2：修复冻结 Scope 下自由文本网页查询绕过（P1-A），并让 8 条
+`chat_policy_eval_cases.json` 真实经过 `RagQA.answer_stream()` 的工具策略门控（P1-B）。未改动
+M3/M4、前端或外部网络调用。
+
+### P1-A：网页 `query` 绑定冻结 Scope
+
+**根因：** `RagQA._tool_arguments_within_scope()` 仅校验 `symbol/code/report_id` 等结构化参数，
+将 `web_search.query` 视为不带身份的自由文本；所以 `company_only(601288)` 下
+`web_search(query="长江电力 公告")` 可直达 executor。
+
+**RED（实际）：** 先新增最小参数化回归后执行
+`python3 -m pytest tests/unit/test_rag_policy_m2.py -q -k out_of_scope_web_query_identity`，结果
+`3 failed, 10 deselected, 3 warnings in 0.76s`；名称、`600900` 和别名 `长电` 三种输入均显示
+`('web_search', {'query': ...})` 已进入 executor。
+
+**实现与 GREEN：** `27a3c3d`（`fix: bind scoped web queries to company identity`）增加
+`_bind_web_query_to_scope()`：对 `company_only/company_industry` 的每个网页查询解析 6 位代码与
+中文名称/别名片段（复用 executor 的同一名称→代码 resolver），任一可解析身份不在冻结 Scope
+即在 executor 前返回受控失败；通过后用服务端 Scope 身份前缀构造 provider query。`whole_corpus`
+保留原 query 不收窄。GREEN：`python3 -m pytest tests/unit/test_rag_policy_m2.py -q` →
+`15 passed, 3 warnings in 1.87s`；覆盖范围外名称/代码/别名不执行、范围内 `农行 公告` 可执行且被绑定、
+`whole_corpus` 原样执行，以及 `event_attribution` 仍可网页查询。
+
+### P1-B：评测真实通过 RagQA 策略门控
+
+**根因：** 原 `_ScriptedRagQA` 直接 yield `tool_call/structured_tool_result/done`，使 8 条评测
+绕过 `RagQA` 的模型可见工具定义过滤、未批准工具拒绝、Scope 参数检查和真实 executor 调度。
+
+**RED（实际）：** 新增断言后执行
+`python3 -m pytest tests/unit/test_chat_policy_eval_cases.py -q -k evaluation_pipeline_uses_real_ragqa`，结果
+`1 failed, 10 deselected, 3 warnings in 1.09s`，断言显示
+`isinstance(<_ScriptedRagQA>, RagQA)` 为 false。
+
+**实现与 GREEN：** `3d63f9e`（`test: run M2 policy evaluation through real RagQA`）以 fake store、
+fake AI 和 recording fake executor 组装真实 `RagQA` 后注入真实 FastAPI `/api/chat/stream`；fake AI
+只产生 OpenAI 风格请求，所有工具过滤、参数绑定、调用、结构化事件、SSE、Fact/Verifier 和 run
+持久化均由生产代码完成。GREEN：`python3 -m pytest tests/unit/test_chat_policy_eval_cases.py -q` →
+`11 passed, 3 warnings in 1.58s`。逐条断言 8 条 fixture 的 intent、模型可见定义、policy、实际 executor
+调用、来源/禁止报告、证据、状态与持久化 run；另有真实 RAG 探针断言未批准
+`get_financial_metrics` 与范围外网页 query 均被拒绝且 executor 未调用。
+
+### 验证（实际输出）
+
+- 受影响单测：`python3 -m pytest tests/unit/test_rag_policy_m2.py tests/unit/test_chat_policy_eval_cases.py tests/unit/test_rag_qa.py tests/unit/test_server_api.py -q` → `212 passed, 3 warnings in 13.47s`。
+- 全部 unit：`python3 -m pytest tests/unit -q` → `961 passed, 3 warnings in 15.04s`。
+- 全量：`python3 -m pytest -q` → `1008 passed, 1 skipped, 3 warnings in 112.37s`。
+- 浏览器指定回归：`python3 -m pytest tests/browser/test_chat_policy_flow.py tests/browser/test_chat_pdf_supplement.py -q` → `13 passed in 52.46s`。
+- `git diff --check` 和 `git diff --cached --check` → passed；验证时无 staged files。
+- `python3 scripts/check_css.py` → failed，仅有既有 `.history-view-pane` 重复 2 次；本轮未改 CSS。
+
+### 遗留风险与自评
+
+- 中文自由文本身份解析依赖现有名称→代码 resolver；无法解析的自由文本会保留并加 Scope 身份前缀，
+可解析的范围外身份 fail-closed。解析器的股票别名覆盖范围仍受其本地索引/词典数据质量限制。
+- `company_industry` 的网页 query 会绑定 focus 公司名称及 Scope 中的允许代码；搜索 provider 仍可能返回
+无关网页，但范围外可解析公司输入不会被执行。
+- 评测保持完全离线：模型、store、executor 为 fake；生产 Scope/Policy/RagQA/Fact/Verifier/SSE/持久化为真实路径。
+- CSS 基线失败未扩大范围修复；仍需独立 reviewer 门禁。自评：`DONE_WITH_RESIDUAL_RISKS`。

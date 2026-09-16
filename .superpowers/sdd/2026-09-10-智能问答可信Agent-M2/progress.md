@@ -110,3 +110,26 @@ Review feedback was reproduced against `4ea57ad` before each fix. No M3/M4 behav
 - 详细根因/RED-GREEN/偏离/风险见 `implementation-report.md` 的「M2 第二轮复审修复」。
 - 主要遗留：PDF 来源的 `verified` Fact 在服务端路径不可达（纯 PDF 数字一律 blocked）；数值格式仅支持千分位；工具超时放弃等待但线程可能继续到自身超时；补报恢复路径无 ToolPolicy；评测用例的模型/工具层为脚本化替代。
 - 仍待独立 reviewer 门禁；分支未推送、未合并。
+
+## M2 第二轮复审遗留 P1 修复 — completed（`27a3c3d`、`3d63f9e`）
+
+仅修复 M2 P1-A/P1-B；未推送、未合并，未涉及 M3/M4 或前端。
+
+| P1 | 根因 | RED（实际输出） | GREEN / 提交 |
+| --- | --- | --- | --- |
+| P1-A Scope 网页自由文本 | `web_search.query` 未受 `_tool_arguments_within_scope()` 身份校验，范围外名称/代码/别名可达 executor | `python3 -m pytest tests/unit/test_rag_policy_m2.py -q -k out_of_scope_web_query_identity` → `3 failed, 10 deselected, 3 warnings in 0.76s`；三种输入均进入 executor | `27a3c3d`：按 Scope 解析 query 身份，越界拒绝、服务端绑定 Scope 身份；`tests/unit/test_rag_policy_m2.py -q` → `15 passed, 3 warnings in 1.87s`，范围内 event 网页查询可执行、whole_corpus 原样执行 |
+| P1-B 评测绕过 RagQA | `_ScriptedRagQA` 直接产 tool events，绕过模型工具定义、policy、参数拒绝和 executor | `python3 -m pytest tests/unit/test_chat_policy_eval_cases.py -q -k evaluation_pipeline_uses_real_ragqa` → `1 failed, 10 deselected, 3 warnings in 1.09s`（`_ScriptedRagQA` 非 `RagQA`） | `3d63f9e`：8 条 fixture 经真实 `RagQA` + fake AI/store/executor + FastAPI SSE/persistence；`tests/unit/test_chat_policy_eval_cases.py -q` → `11 passed, 3 warnings in 1.58s`；额外断言未批准工具和范围外网页 query 均不调用 executor |
+
+### 验证
+
+- 受影响：`212 passed, 3 warnings in 13.47s`（rag_policy_m2、eval_cases、rag_qa、server_api）。
+- `tests/unit`：`961 passed, 3 warnings in 15.04s`；完整 pytest：`1008 passed, 1 skipped, 3 warnings in 112.37s`。
+- 浏览器：`tests/browser/test_chat_policy_flow.py tests/browser/test_chat_pdf_supplement.py -q` → `13 passed in 52.46s`。
+- `git diff --check`、`git diff --cached --check` passed；验证时无 staged files。
+- `python3 scripts/check_css.py` 仍仅失败于既有 `.history-view-pane` 重复选择器；本轮未改 CSS。
+
+### 风险
+
+自由文本名称/别名识别依赖现有 resolver 的本地索引/词典覆盖；无法解析文本被 Scope 前缀绑定，
+可解析的范围外身份 fail-closed。`company_industry` provider 结果本身仍可能无关但外部输入不得越界。
+详细根因、证据、偏离与自评见 `implementation-report.md` 的「M2 第二轮复审遗留 P1 修复」。
