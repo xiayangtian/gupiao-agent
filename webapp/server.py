@@ -440,6 +440,8 @@ def _init_rag() -> None:
             # 补报工具需要工具编排路径，工具全不可用时用占位执行器保底。
             tool_executor=_build_chat_tool_executor(cfg) or _unavailable_tool_executor(),
             supplement_request_handler=_handle_supplement_request,
+            # Scope 校验与执行器必须使用同一名称→代码解析路径，否则模型可用公司名称绕过范围。
+            company_code_resolver=_resolve_symbol_code,
             max_tool_rounds=getattr(cfg, "mcp_max_tool_rounds", 3),
             max_tool_calls=getattr(cfg, "mcp_max_tool_calls", 6),
             reranker=reranker,
@@ -1944,7 +1946,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             finally:
                 _supplement_context.current = None
 
-        pump.start(_produce)
+        # research_task 在 M2 没有工具也没有步骤规划：直接用策略 fallback 如实回答，
+        # 不调用模型（避免模型凭空编造研究计划），也不启动生产者线程。
+        research_fallback = policy.fallback_message if policy.intent == "research_task" else ""
+        if not research_fallback:
+            pump.start(_produce)
 
         try:
             logger.info("chat_run_started run_id=%s", run_id)
@@ -1952,7 +1958,26 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             yield _sse("scope_resolved", {"scope": scope.to_dict()})
             yield _sse("policy_resolved", {"intent": policy.intent, "allowed_tools": list(policy.allowed_tools),
                                              "max_calls": policy.max_calls, "max_rounds": policy.max_rounds})
+            # 策略降级说明进入生产事件流：无外部工具或研究任务时用户能知道本次能力的边界。
+            if policy.fallback_message and (not policy.allowed_tools or research_fallback):
+                yield _sse("policy_fallback", {
+                    "intent": policy.intent,
+                    "message": policy.fallback_message,
+                })
             yield _sse("run_started", {"run_id": run_id})
+            if research_fallback:
+                run = _persist("partial", research_fallback)
+                yield _sse("done", {
+                    "answer": research_fallback,
+                    "citations": [],
+                    "session_id": sid,
+                    "tools_used": [],
+                    "web_sources": [],
+                    "retrieval_degraded": False,
+                    "run": run.to_dict(),
+                    "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                })
+                return
             while True:
                 evt = await pump.queue.get()
                 if evt is pump.sentinel:
@@ -2025,7 +2050,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     )
                     yield _sse("verification", {"verification": state.verification_report.to_dict()})
                     if state.verification_report.status == "blocked":
-                        answer = "未找到可核验的披露，不能确认该数值。"
+                        # 只替换不受支持的数值论断；受支持内容与上下文保留。
+                        answer = ClaimVerifier().degrade_blocked(answer, scope, state.facts)
                     elif state.verification_report.status == "partial":
                         answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
                     status = (

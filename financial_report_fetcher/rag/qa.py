@@ -8,6 +8,8 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional
@@ -21,6 +23,15 @@ from .store import RagStore
 logger = logging.getLogger(__name__)
 
 CITE_RE = re.compile(r"\[(\d+)\]")
+
+# 工具调用超时执行池：执行器是阻塞的外部调用，超时后放弃等待而不拖住问答流。
+_TOOL_CALL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="rag-tool-call")
+
+# 结构化公司身份参数：值可能是 6 位代码，也可能是名称/别名，一律先解析再校验 Scope。
+_IDENTITY_ARGUMENT_KEYS = (
+    "symbol", "code", "company_code", "stock_code", "ts_code", "secu_code", "ticker",
+    "report_id", "report_ids", "report_code", "report_codes",
+)
 
 SYSTEM_PROMPT_TEMPLATE = """你是一位专业的金融分析师，基于检索到的财报片段回答用户问题。
 规则：
@@ -44,6 +55,8 @@ EMPTY_RETRIEVAL_TOOL_PROMPT = """你是一位专业的金融分析师。本地�
 
 # 受控补报工具：仅向模型征求“需要哪期哪类财报”，不下载、不接受 URL 或代码。
 SUPPLEMENT_REQUEST_TOOL_NAME = "request_missing_reports"
+# 受控工具：只申请授权、不执行外部动作，因此不占用 ToolPolicy 的允许工具额度。
+CONTROLLED_TOOL_NAMES = frozenset({SUPPLEMENT_REQUEST_TOOL_NAME})
 SUPPLEMENT_MAX_NEEDS = 5
 SUPPLEMENT_REASON_MAX_CHARS = 240
 SUPPLEMENT_REPORT_TYPES = ("annual", "semi_annual", "quarterly")
@@ -112,13 +125,17 @@ class RagQA:
         rerank_score_threshold: float = 0.5,
         rerank_margin_threshold: float = 0.05,
         supplement_request_handler: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        company_code_resolver: Optional[Callable[[str], Optional[str]]] = None,
     ) -> None:
         """tool_executor: (name, arguments) -> str，用于执行 MCP 等外部工具；
         None 表示不启用工具调用（纯 RAG 路径）。
         reranker: 注入后检索放宽到 rerank_candidates 并按质量自适应精排；
         None 保持纯向量检索现状。
         supplement_request_handler: 补报授权处理器；为 None 时补报请求一律不可用，
-        返回 False 表示上层拒绝本次补充。"""
+        返回 False 表示上层拒绝本次补充。
+        company_code_resolver: 股票名称/别名 → 6 位代码；必须与工具执行器使用同一
+        解析路径，使 Scope 校验和执行器对同一参数得到同一公司身份。未注入时只有
+        6 位代码形式的身份参数可通过 Scope 校验（fail-closed）。"""
         self.store = store
         self.ai_client = ai_client
         self.top_k = top_k
@@ -131,6 +148,7 @@ class RagQA:
         self.rerank_score_threshold = rerank_score_threshold
         self.rerank_margin_threshold = rerank_margin_threshold
         self.supplement_request_handler = supplement_request_handler
+        self.company_code_resolver = company_code_resolver
 
     def answer(
         self,
@@ -435,7 +453,9 @@ class RagQA:
         # A policy is authoritative in the trusted-chat path. Legacy callers may
         # still supply raw tools without one, preserving the prior API behavior.
         if tool_policy is not None:
-            allowed = set(tool_policy.allowed_tools)
+            # 受控工具只申请授权、不执行外部动作，因此不消耗工具额度也不被策略过滤；
+            # 其他工具仍必须命中策略允许集，未列出的工具不会进入模型定义。
+            allowed = set(tool_policy.allowed_tools) | CONTROLLED_TOOL_NAMES
             tools = [tool for tool in (tools or []) if self._tool_name(tool) in allowed]
             yield {"type": "policy_resolved", "intent": tool_policy.intent,
                    "allowed_tools": list(tool_policy.allowed_tools), "max_calls": tool_policy.max_calls,
@@ -548,7 +568,7 @@ class RagQA:
                             yield {"type": "tool_result", "name": name, "summary": result, "ok": False}
                             messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
                             continue
-                        if not self._tool_arguments_within_scope(args, scope):
+                        if not self._tool_arguments_within_scope(args, scope, self.company_code_resolver):
                             result = "工具调用失败：工具参数超出本次问答范围"
                             yield {"type": "tool_result", "name": name, "summary": result, "ok": False}
                             messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
@@ -570,7 +590,7 @@ class RagQA:
                             seen_tool_calls.add(identity)
                             total_tool_calls += 1
                             try:
-                                result = self.tool_executor(name, args)
+                                result = self._execute_tool(name, args, tool_policy)
                                 ok = not result.startswith((
                                     "工具调用失败", "MCP 服务暂不可用",
                                     "无法解析股票", "未获取到",
@@ -648,27 +668,70 @@ class RagQA:
                 }
                 return
 
-    @staticmethod
-    def _tool_arguments_within_scope(arguments: Dict[str, Any], scope: Optional[Scope]) -> bool:
-        """Reject explicit company/report parameters that escape a frozen Scope.
+    def _execute_tool(
+        self, name: str, args: Dict[str, Any], tool_policy: Optional[ToolPolicy],
+    ) -> str:
+        """执行工具；有策略时每次调用耗时不得超过策略 timeout_seconds。
 
-        Free-text search queries are not identity parameters.  Every structured
-        company identifier supplied to a tool is checked here before its executor
-        can resolve or send it to an external provider.
+        执行器是阻塞的外部调用，超时后在独立线程中放弃等待并返回受控失败，
+        使单次工具调用不会拖垮整条问答流。
+        """
+        if tool_policy is None:
+            return self.tool_executor(name, args)
+        timeout = tool_policy.timeout_seconds
+        future = _TOOL_CALL_POOL.submit(self.tool_executor, name, args)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            future.cancel()
+            return f"工具调用失败：工具调用超时（超过 {timeout} 秒），已停止本次调用"
+
+    def _tool_arguments_within_scope(
+        self, arguments: Dict[str, Any], scope: Optional[Scope],
+        resolver: Optional[Callable[[str], Optional[str]]] = None,
+    ) -> bool:
+        """Reject company/report parameters that escape a frozen Scope.
+
+        Every structured company identifier supplied to a tool is checked before
+        its executor can resolve or send it to an external provider.  Identity
+        values are resolved to a 6-digit code through the same resolver the
+        executor uses; codes and company names/aliases that do not resolve to an
+        in-Scope company are rejected.  Free-text search queries are not identity
+        parameters and are left untouched.
         """
         if scope is None or scope.mode == "whole_corpus":
             return True
         allowed_codes = {report_id.split(":", 1)[0] for report_id in scope.report_ids}
         allowed_codes.update(company.code for company in scope.companies)
-        for key in ("symbol", "code", "company_code", "report_id", "report_ids"):
+        for key in _IDENTITY_ARGUMENT_KEYS:
             value = arguments.get(key)
             values = value if isinstance(value, (list, tuple)) else (value,)
             for item in values:
                 text = str(item or "").strip()
-                code = text.split(":", 1)[0] if key.startswith("report") else text
-                if re.fullmatch(r"\d{6}", code) and code not in allowed_codes:
+                if not text:
+                    continue
+                code = self._identity_code(key, text, resolver)
+                if code is None or code not in allowed_codes:
                     return False
         return True
+
+    @staticmethod
+    def _identity_code(
+        key: str, text: str, resolver: Optional[Callable[[str], Optional[str]]],
+    ) -> Optional[str]:
+        """身份参数 → 6 位代码；无法确认身份时返回 None（调用方按越界处理）。"""
+        if key.startswith("report"):
+            text = text.split(":", 1)[0]
+        found = re.search(r"(?<!\d)\d{6}(?!\d)", text)
+        if found:
+            return found.group(0)
+        if resolver is None:
+            return None
+        try:
+            resolved = resolver(text)
+        except Exception:
+            return None
+        return resolved if isinstance(resolved, str) and re.fullmatch(r"\d{6}", resolved) else None
 
     @staticmethod
     def _tool_name(tool: Dict[str, Any]) -> str:

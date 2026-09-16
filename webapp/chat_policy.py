@@ -2,8 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Callable
 
+from financial_report_fetcher.rag.mcp_tools import (
+    WEB_SEARCH_TOOL_FAMILY,
+    REALTIME_QUOTE_TOOL_FAMILY,
+    is_realtime_quote_tool,
+    is_web_search_tool,
+)
 from webapp.chat_models import IntentDecision, Scope, SourcePolicy, ToolPolicy
 
 
@@ -46,22 +52,55 @@ class IntentRouter:
 
 
 class ToolPolicyResolver:
+    """按意图把可允许的工具家族解析为实际可调用的 provider 工具名。
+
+    允许集不是写死的工具名，而是「家族 × 当前可用工具名」的交集，两者都与
+    provider 定义同源，因此新增加/改名行情工具后策略仍能授权，也不会授权未列出的
+    家族（如财务指标、报表工具）。
+    """
+
+    # 家族谓词：以 provider 工具名定义为准（mcp_tools）
+    _FAMILIES: dict[str, Callable[[str], bool]] = {
+        REALTIME_QUOTE_TOOL_FAMILY: is_realtime_quote_tool,
+        WEB_SEARCH_TOOL_FAMILY: is_web_search_tool,
+    }
+
+    # 意图 → 允许的工具家族（顺序即允许集顺序，对提示与展示都确定）
+    _INTENT_FAMILIES: dict[str, tuple[str, ...]] = {
+        "realtime_market": (REALTIME_QUOTE_TOOL_FAMILY, WEB_SEARCH_TOOL_FAMILY),
+        "event_attribution": (WEB_SEARCH_TOOL_FAMILY, REALTIME_QUOTE_TOOL_FAMILY),
+    }
+
     def __init__(self, timeout_seconds: int = 30) -> None:
         self.timeout_seconds = min(30, max(1, int(timeout_seconds)))
 
+    @classmethod
+    def _names_in_families(cls, availability: ToolAvailability, families: tuple[str, ...]) -> tuple[str, ...]:
+        names: list[str] = []
+        for family in families:
+            matches = cls._FAMILIES.get(family)
+            if matches is None:
+                continue
+            for name in sorted(availability.names):
+                if name not in names and matches(name):
+                    names.append(name)
+        return tuple(names)
+
     def resolve(self, decision: IntentDecision, scope: Scope, availability: ToolAvailability) -> ToolPolicy:
         del scope
-        allowed: Iterable[str] = ()
         fallback = "请基于本地可核验财报披露回答。"
         if decision.intent == "realtime_market":
-            allowed = ("get_quote", "web_search")
             fallback = "实时数据暂不可用；请以本地披露为准。"
         elif decision.intent == "event_attribution":
-            allowed = ("web_search", "get_quote")
             fallback = "外部事件来源暂不可用；不能确认归因。"
         elif decision.intent == "research_task":
             fallback = "详细研究规划将在 M3 提供；当前仅能进行本地查证。"
-        names = tuple(name for name in allowed if availability.permits(name))
+
+        names = self._names_in_families(
+            availability, self._INTENT_FAMILIES.get(decision.intent, ()),
+        )
+        market_data = any(is_realtime_quote_tool(name) for name in names)
+        web = any(is_web_search_tool(name) for name in names)
         external = bool(names)
         return ToolPolicy(
             intent=decision.intent,
@@ -69,6 +108,8 @@ class ToolPolicyResolver:
             max_calls=3 if external else 0,
             max_rounds=2 if external else 0,
             timeout_seconds=self.timeout_seconds,
-            source_policy=SourcePolicy(local_pdf=True, historical_analysis=True, market_data=external, web="web_search" in names),
+            source_policy=SourcePolicy(
+                local_pdf=True, historical_analysis=True, market_data=market_data, web=web,
+            ),
             fallback_message=fallback,
         )
