@@ -5,10 +5,13 @@
 
 | Task | 状态 | RED | GREEN | 提交 | 偏离 |
 |---|---|---|---|---|---|
-| 1 | 已完成 | 失败（模块不存在） | 35 passed | 待提交 | 无 |
-| 2–7 | 未开始 | — | — | — | — |
+| 1 | 已完成 | 失败（模块不存在） | 35 passed | `1f0c638` | 无 |
+| 2 | 已完成 | 失败（模块不存在） | 9 passed | 待提交 | 无 |
+| 3–7 | 未开始 | — | — | — | — |
 
 ## 命令日志
 
 - RED `python3 -m pytest tests/unit/test_research_models.py -q`：预期收集失败（`ModuleNotFoundError`）。
 - GREEN `python3 -m pytest tests/unit/test_research_models.py tests/unit/test_chat_models.py -q`：35 passed。
+- RED `python3 -m pytest tests/unit/test_research_planner.py -q`：预期收集失败（`ModuleNotFoundError`）。
+- GREEN `python3 -m pytest tests/unit/test_research_planner.py tests/unit/test_research_models.py -q`：9 passed。
