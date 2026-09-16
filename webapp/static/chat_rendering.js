@@ -361,7 +361,7 @@
     var label = {
       report_fact: '本地财报查证', company_trend: '本地财报趋势对照',
       industry_benchmark: '本地可检索同业样本', realtime_market: '实时行情查证',
-      event_attribution: '公开事件参考', research_task: '本地查证（详细规划将在后续版本提供）'
+      event_attribution: '公开事件参考', research_task: '受限研究计划与来源核对'
     }[String(policy.intent || '')];
     return label ? '<details class="chat-policy"><summary>本次查证方式</summary><span>'
       + escapeHtml(label) + '</span></details>' : '';

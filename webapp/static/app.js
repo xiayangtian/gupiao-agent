@@ -2351,14 +2351,24 @@ async function openChatSession(sid) {
     var res = await fetch('/api/chat/sessions/' + sid);
     if (res.ok) {
       var data = await res.json();
-      (data.messages || []).forEach(function (m) {
-        if (!m || !m.role) return;
+      for (var messageIndex = 0; messageIndex < (data.messages || []).length; messageIndex++) {
+        var m = data.messages[messageIndex];
+        if (!m || !m.role) continue;
         if (m.role === 'user') {
           if (m.content) appendChatMsg('#chat-history', 'user', m.content);
         } else if (m.role === 'assistant') {
-          appendAssistantRun('#chat-history', m);
+          var researchRun = null;
+          var researchId = m.run && m.run.research_run_id;
+          if (researchId) {
+            try {
+              var researchResponse = await fetch('/api/chat/research/' + encodeURIComponent(researchId)
+                + '?session_id=' + encodeURIComponent(sid));
+              if (researchResponse.ok) researchRun = (await researchResponse.json()).run;
+            } catch (_) { /* answer remains readable if a historic research record is unavailable */ }
+          }
+          appendAssistantRun('#chat-history', { content: m.content, run: m.run, research_run: researchRun });
         }
-      });
+      }
     }
   } catch (_) { /* 加载失败保持空会话 */ }
   scrollChatToBottom();

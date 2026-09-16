@@ -62,7 +62,7 @@ class ChatStore:
                     # 旧版或损坏的 supplements 字段（如数组）一律忽略，不影响会话读取。
                     supplements = {}
                 return {
-                    "schema_version": 3,
+                    "schema_version": 2,
                     "sessions": [
                         self._normalize_session(session)
                         for session in data["sessions"]
@@ -82,10 +82,10 @@ class ChatStore:
                 }
         except (OSError, json.JSONDecodeError, ValueError):
             pass
-        return {"schema_version": 3, "sessions": [], "supplements": {}, "research_runs": {}}
+        return {"schema_version": 2, "sessions": [], "supplements": {}, "research_runs": {}}
 
     def _save(self) -> None:
-        self._data["schema_version"] = 3
+        self._data["schema_version"] = 2
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:

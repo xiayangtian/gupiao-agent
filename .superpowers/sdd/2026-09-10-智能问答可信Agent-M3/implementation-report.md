@@ -41,3 +41,10 @@
 - GREEN：`python3 -m pytest tests/unit/test_chat_rendering_js.py -q`，17 passed。
 - 实现：纯渲染业务计划、步骤和恢复资格；SSE 消费研究事件；恢复按钮含可访问标签/焦点，移动样式允许步骤名换行且不以颜色单独传达状态。
 - 偏离：无。
+
+## Task 7 — 浏览器回归与验收
+
+- RED：研究浏览器用例在实现前不存在。
+- GREEN：`python3 -m pytest tests/browser/test_research_agent_flow.py -q`，4 passed；`python3 -m pytest -q`，1029 passed、2 skipped、3 warnings；`git diff --check` 通过；`python3 scripts/check_css.py` 通过。
+- 真实浏览器 QA：agent-browser 访问真实 fixture 应用并在 1280x900、768x1000、390x844 打开重开研究会话；三档均 `overflow=false`。浏览器回归同时验证控制台/页面错误为空。
+- 偏离：浏览器 fixture 使用确定性本地协作方，不调用 AI、MCP、网页或真实 RAG 摄取。
