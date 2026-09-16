@@ -356,6 +356,46 @@
       + '</details>';
   }
 
+  function renderPolicy(policy) {
+    if (!policy || typeof policy !== 'object') return '';
+    var label = {
+      report_fact: '本地财报查证', company_trend: '本地财报趋势对照',
+      industry_benchmark: '本地可检索同业样本', realtime_market: '实时行情查证',
+      event_attribution: '公开事件参考', research_task: '本地查证（详细规划将在后续版本提供）'
+    }[String(policy.intent || '')];
+    return label ? '<details class="chat-policy"><summary>本次查证方式</summary><span>'
+      + escapeHtml(label) + '</span></details>' : '';
+  }
+
+  function factSourceLabel(fact) {
+    return fact && fact.source_type === 'pdf' ? 'PDF 原文' : '实时数据';
+  }
+
+  function renderFactsAndConflicts(run) {
+    if (!run || typeof run !== 'object') return '';
+    var parts = [];
+    (Array.isArray(run.facts) ? run.facts : []).forEach(function (fact) {
+      if (!fact || typeof fact !== 'object') return;
+      var label = fact.verification === 'reference' ? '外部参考' : 'PDF 原文';
+      var asOf = fact.verification === 'reference' && fact.as_of ? ' · 数据截至 ' + escapeHtml(fact.as_of) : '';
+      parts.push('<div class="chat-fact chat-fact-' + escapeHtml(fact.verification || '') + '">'
+        + escapeHtml(label + ' · ' + String(fact.metric || '') + '：' + String(fact.value || '') + ' ' + String(fact.unit || '')) + asOf + '</div>');
+    });
+    (Array.isArray(run.conflicts) ? run.conflicts : []).forEach(function (conflict) {
+      if (!conflict || typeof conflict !== 'object') return;
+      var labels = (Array.isArray(conflict.facts) ? conflict.facts : []).map(factSourceLabel).filter(function (value, index, all) { return all.indexOf(value) === index; });
+      parts.push('<div class="chat-conflict" role="status"><strong>存在口径/时间差异</strong>：'
+        + escapeHtml(String(conflict.reason || '来源数值不一致')) + '（' + escapeHtml(labels.join('、')) + '）</div>');
+    });
+    return parts.length ? '<div class="chat-facts-conflicts">' + parts.join('') + '</div>' : '';
+  }
+
+  function renderVerification(report) {
+    if (!report || typeof report !== 'object' || report.status === 'passed') return '';
+    var label = report.status === 'blocked' ? '未找到可核验的披露，不能确认该数值。' : '该回答含外部参考或口径差异，请结合来源核对。';
+    return '<div class="chat-verification chat-verification-' + escapeHtml(report.status) + '" role="status">' + escapeHtml(label) + '</div>';
+  }
+
   function renderRunStatus(run) {
     if (!run || typeof run !== 'object') return '';
     if (run.legacy_evidence_unavailable) {
@@ -399,6 +439,9 @@
     webSourceReferences: webSourceReferences,
     renderScope: renderScope,
     renderRunArtifacts: renderRunArtifacts,
+    renderPolicy: renderPolicy,
+    renderFactsAndConflicts: renderFactsAndConflicts,
+    renderVerification: renderVerification,
     renderRunStatus: renderRunStatus,
     supplementSummaryView: supplementSummaryView,
   };

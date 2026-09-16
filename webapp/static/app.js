@@ -2801,6 +2801,12 @@ async function submitQuestion(q, key) {
             scrollChatToBottom();
           }
         }
+      } else if (parsed.event === 'policy_resolved') {
+        st.policy = parsed.data || null;
+      } else if (parsed.event === 'fact' || parsed.event === 'conflict' || parsed.event === 'verification') {
+        // Done carries the durable run. Consume the incremental event without
+        // exposing internal JSON or duplicating transient content.
+        st[parsed.event] = parsed.data || null;
       } else if (parsed.event === 'run_started') {
         st.runId = parsed.data.run_id || '';
       } else if (parsed.event === 'artifact') {
@@ -3121,8 +3127,14 @@ function appendAssistantRun(sel, message) {
   var displayed = rendering ? rendering.normalizeAssistantMarkdown(content) : content;
   parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + '</div>');
   if (rendering) {
+    var policyHtml = rendering.renderPolicy(run && run.tool_policy);
+    if (policyHtml) parts.push(policyHtml);
+    var factsHtml = rendering.renderFactsAndConflicts(run);
+    if (factsHtml) parts.push(factsHtml);
     var artifactsHtml = rendering.renderRunArtifacts(run);
     if (artifactsHtml) parts.push(artifactsHtml);
+    var verificationHtml = rendering.renderVerification(run && run.verification_report);
+    if (verificationHtml) parts.push(verificationHtml);
   }
   var statusHtml = rendering ? rendering.renderRunStatus(run) : '';
   var wrapper = document.createElement('div');
