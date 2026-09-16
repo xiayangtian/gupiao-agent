@@ -68,3 +68,169 @@ M2 Task 1–7 已在 `feat/trusted-chat-m2` 完成；未实现 M3 Planner、恢�
 ## 修复后自评
 
 `DONE_WITH_CSS_BASELINE_CONCERN`：四项 Important finding 均有最小 RED/GREEN 回归和全量/浏览器验证。残留风险仅为无关既有 CSS checker 失败；仍需独立 reviewer 执行门禁，且本分支尚未合并 main。
+
+## M2 第二轮复审修复（代码提交 `8cbdd76`；本证据与代码同分支，未推送未合并）
+
+复审确认的 7 项发现全部修复并提交在 `feat/trusted-chat-m2`（未推送、未合并、未实现 M3/M4）。
+根因、RED/GREEN 命令与实际输出如下。
+
+### 1. F1 身份参数绕过 Scope
+
+**根因：** `RagQA._tool_arguments_within_scope()` 只把 `re.fullmatch(r"\d{6}")` 的显式代码
+与 Scope 允许代码比对，非 6 位数字的名称/别名（如 `{"symbol": "长江电力"}`）直接放行，
+模型可以用公司名称把外部工具指向范围外公司。
+
+**RED（旧代码 `HEAD^` 实测）：** 临时回退 `financial_report_fetcher/rag/qa.py` 后运行
+复现脚本（`{"symbol": "长江电力"}`、Scope=601288、policy=realtime_market）：
+
+```
+names reaching executor: [{'symbol': '长江电力'}]
+```
+
+**GREEN：** 同一脚本在修复后输出 `names reaching executor: []`；回归测试
+`python3 -m pytest tests/unit/test_rag_policy_m2.py -q` → `10 passed, 3 warnings`。
+
+**修复：** 身份参数（`symbol/code/company_code/stock_code/ts_code/secu_code/ticker/report_*`）
+一律先解析成 6 位代码再校验是否属于 Scope 允许公司集合；解析器由服务端注入，与工具执行器
+使用**同一个** `_resolve_symbol_code`（`webapp/server.py:_init_rag`），避免策略与执行分叉；
+解析失败即受控失败（fail-closed）。数字与名称两种形式各有回归测试。
+
+### 2. P1-1 允许集与真实工具名同源
+
+**根因：** `webapp/chat_policy.ToolPolicyResolver` 写死 `("get_quote", "web_search")`，而真实
+provider 工具名是 `get_realtime_quote/get_realtime_data` 等，交集后实时/事件意图只剩
+`web_search`（实测 `AssertionError: assert {'web_search'} == {'get_realtime_quote',
+'get_realtime_data', 'web_search'}`）。
+
+**RED：** `python3 -m pytest tests/unit/test_chat_policy.py -q` → `3 failed, 5 passed`
+（新增 4 条用例中 3 条失败，失败信息即上面这行）。
+**GREEN：** 同命令 → `8 passed, 3 warnings`。
+
+**修复：** 工具家族谓词定义在 provider 工具名所在模块
+`financial_report_fetcher/rag/mcp_tools.py`（`is_realtime_quote_tool/is_web_search_tool`、
+`WEB_SEARCH_TOOL_NAME`），`ToolPolicyResolver` 只做「意图 → 家族 × 当前可用工具名」的交集，
+所以授权名永远来自 `_build_chat_tool_defs` 的真实定义；非家族工具（`get_financial_metrics`
+等）与 `request_missing_reports` 不会被授权。`source_policy.market_data` 现在只有真的授予了
+行情工具家族才为 true。
+
+### 3. P1-2 恢复受控补报工具
+
+**根因：** `RagQA.answer_stream()` 在带 policy 时按 `tool_policy.allowed_tools` 过滤工具定义，
+`request_missing_reports` 不在任何意图的允许集里，于是 main 已合入的问答补报能力在生产不可达。
+
+**RED：** `python3 -m pytest tests/unit/test_rag_policy_m2.py -q -k supplement_tool` →
+2 failed（`seen_tools` 中没有 `request_missing_reports`）。
+**GREEN：** 同命令 → `2 passed`；整文件 `10 passed`。
+
+**修复：** 受控工具（`CONTROLLED_TOOL_NAMES`，只申请授权、不执行外部动作）不被 policy 过滤，
+也不占预算；其自身门控（载荷校验、handler、重复请求、无下载）完全不变，未批准的其他工具
+仍被过滤——回归测试同时断言 `web_search not in seen_tools[0]` 与非法载荷只产生受控失败。
+
+### 4. P2-3 消费 ToolPolicy.fallback_message
+
+**根因：** `fallback_message` 只被写进 `ToolPolicy`/持久化 JSON，没有任何生产路径读取。
+
+**RED：** `python3 -m pytest tests/unit/test_server_api.py -q -k 'm2_blocked_run or research_task
+or fallback_hint'` → `3 failed`，其中两条为 `事件 'policy_fallback' 不存在`，
+`research_task` 一条为模型被调用（`AssertionError: M2 的研究任务不应调用模型或工具`）。
+**GREEN：** 同命令 → `3 passed`。
+
+**修复：** 无外部工具或 `research_task` 时发出独立 SSE `policy_fallback`（含 intent 与
+message）；`research_task` 按方案要求给出 M2 无工具回答（内容即 fallback 文案，状态 partial，
+不调用模型与工具）。
+
+### 5. P2-4 timeout_seconds 约束单次工具调用
+
+**RED：** `python3 -m pytest tests/unit/test_rag_policy_m2.py -q -k timeout` →
+`assert 2.0052919164299965 < 1.5`（policy timeout=1s，执行器 sleep 2s 仍被等满）。
+**GREEN：** 同命令 → `1 passed`（总耗时 <1.5s，`tool_result ok=False` 且摘要含“超时”，
+成功工具列表为空）。
+
+**修复：** `RagQA._execute_tool()` 在有 policy 时经专用线程池按 `timeout_seconds` 等待，
+超时即返回受控失败并放弃等待，不再拖住问答流。
+
+### 6. P2-5 blocked 只替换不受支持的论断
+
+**RED：** `python3 -m pytest tests/unit/test_server_api.py -q -k m2_blocked_run` →
+`AssertionError: assert '营业收入为 100 亿元' in '未找到可核验的披露，不能确认该数值。'`
+（整段替换，受支持内容与上下文被丢弃）。
+**GREEN：** 同命令 → `1 passed`（受支持的“营业收入为 100 亿元”与公司身份保留，不受支持的
+621 亿元被替换，回答含安全说明）。`tests/unit/test_chat_verifier.py -q` → `13 passed`。
+
+**修复：** `ClaimVerifier.degrade_blocked()` 只替换没有本范围事实支持的数值论断；整篇没有
+可核验论断时才回退为固定安全说明（保持旧文案，浏览器验收仍断言该文案）。
+
+### 7. 残留：指标词收敛到单条论断 + 评测用例真正跑流水线
+
+**指标词（RED）：** 新增用例后 `python3 -m pytest tests/unit/test_chat_verifier.py -q` →
+先因 `ImportError: cannot import name 'SAFE_UNSUPPORTED_CLAIM_TEXT'` 收集失败，实现后又出现
+`assert 'passed' == 'blocked'`（“营业收入为 100 亿元，净利润为 100 亿元”里，整篇出现的
+“营业收入”让净利润的 100 亿元被误判为受支持）。**GREEN：** `13 passed`。
+修复：指标词只在数值所在分句内判定；越界事实不再为数值背书；千分位逗号不被当作分句边界，
+金额按整值比对（`4,108.71 亿元` 不再被切碎）。
+
+**评测用例（RED/GREEN）：**
+`tests/unit/test_chat_policy_eval_cases.py` 现在用真实 FastAPI 端点驱动真实 Scope 解析、
+IntentRouter、ToolPolicyResolver、`_build_chat_tool_defs` 的真实工具名、FactNormalizer、
+冲突识别、ClaimVerifier 与持久化；只有模型/外部工具由按问题脚本化的假协作方替代，
+用例缺少脚本直接失败（不允许静默跳过）。首轮实跑即暴露 fixture 从未执行过的事实：
+`4 failed, 6 passed`，根因是 `expected_status` 混用了 AnswerStatus 与核验状态两套词表
+（“passed”不是合法 AnswerStatus）。现在 fixture 显式区分 `expected_status`（运行：
+completed/partial）与 `expected_verification`（核验：passed/partial/blocked），并逐条比对
+intent、允许来源、实际使用来源、禁止报告、运行/核验状态与真实证据 id；实跑结果
+`10 passed`。把允许集临时改回复审前的字面量 `get_quote` 后复跑，恰好 4 条实时/事件用例失败
+（`realtime_market0/1/2`、`event_attribution`），证明这些用例真的卡住了 P1-1 的缺陷。
+
+### 修复后验证（实际输出）
+
+- 受影响单测：`python3 -m pytest tests/unit/test_chat_verifier.py tests/unit/test_chat_facts.py tests/unit/test_chat_evidence.py tests/unit/test_chat_policy.py tests/unit/test_chat_policy_eval_cases.py tests/unit/test_rag_policy_m2.py tests/unit/test_rag_qa.py tests/unit/test_server_api.py tests/unit/test_mcp_tools.py -q` → `252 passed, 3 warnings in 10.31s`。
+- tests/unit 全量：`python3 -m pytest tests/unit -q` → `953 passed, 3 warnings in 15.55s`。
+- 全量：`python3 -m pytest -q` → `1002 passed, 1 skipped, 3 warnings in 115.27s`（skip 为既有环境跳过：Chrome `--dump-dom` 在 15 秒内未退出）。
+- M2 浏览器流：`python3 -m pytest tests/browser/test_chat_policy_flow.py -q` 与补报浏览器回归
+  `tests/browser/test_chat_pdf_supplement.py -q` → `13 passed in 51.08s`；M1 信任闭环
+  `tests/browser/test_chat_trust_flow.py -q` → `6 passed in 18.15s`。
+- `git diff --check` → passed；提交前 `git status --short` 全部为已暂存改动，提交后工作区干净。
+- `python3 scripts/check_css.py` → 仍失败，且只报既有重复选择器 `.history-view-pane`
+  （`webapp/static/style.css:1755/1765`，本次 diff 未触及 CSS）。
+
+### 本次评审中的判断与偏离（供复审确认）
+
+1. **fixture 词表拆分**：`expected_status` 改为 AnswerStatus，新增 `expected_verification`。
+   依据：`blocked/partial/passed` 与 `completed/partial` 是两套词表；且既有契约
+   （`tests/browser/test_chat_trust_flow.py` 断言核验不通过的回答 run 仍为 `completed`）要求
+   运行状态与可信状态分开记录。
+2. **冲突用例改为行情 vs 网页冲突**：M2 服务端路径只能从结构化工具事件产生 Fact
+   （`_relay_rag_event` 只把 `structured_tool_result` + ToolArtifact 交给 `FactNormalizer`），
+   PDF 证据只能产生 EvidenceArtifact；因此“PDF 事实 vs 外部事实”的冲突在 M2 不可达，
+   原用例的 `revenue_pdf` 期望无法真实满足。改用 `get_realtime_data`（3.2）与 `web_search`
+   （3.5）的价格冲突，仍是“同指标同口径来源冲突必须披露”的同一契约。
+3. **research_task 直达回答**：方案 Task 1 明确要求“research_task 收到无工具的 M2 回答”，
+   因此该意图不再调用模型/工具，直接持久化 fallback 文案（status partial）。
+4. **新增 SSE `policy_fallback`**：报告类意图的 SSE 事件序列多了一帧，
+   `tests/unit/test_server_api.py::TestChatSupplementApi::test_stream_supplement_needs_consent_and_does_not_download`
+   的期望序列同步更新为 `session → scope_resolved → policy_resolved → policy_fallback → run_started → supplement_needed`。
+   前端未消费该事件（不在本次修复清单内），未知事件在 `webapp/static/app.js` 中被忽略。
+
+### 遗留风险（未在本次修复范围内）
+
+1. **PDF 事实不可达**：服务端没有任何路径把“PDF 页码证据 + 结构化数值”转成 `verified` Fact，
+   因此纯 PDF 依据的数字在核验时一律 blocked（fail-closed）。这是 M2 设计
+   “关键数字均有期间、单位、主体口径和证据”尚未闭环的部分，需要补一条受控 PDF 事实来源
+   （超出本轮 7 项修复，未自行决策）。
+2. **数值格式**：已支持千分位，仍不支持全角数字、“亿”不带“元”等写法；这类写法会被判为
+   无证据并降级（fail-closed）。
+3. **工具超时实现**：超时后放弃等待，底层线程仍可能跑到自身 HTTP 超时；执行器自身超时
+   （MCP 30s / 网页 15s）仍是最外层兜底。补报恢复路径（M1 路径）没有 ToolPolicy，
+   因此不受策略超时约束。
+4. **自由文本参数**：`query/keyword` 不是身份参数（按方案定义），不参与 Scope 校验；跨公司
+   事实/数字仍会被 FactNormalizer 与 ClaimVerifier 拦下。
+5. **评测脚本层**：评测用例的模型/工具层是脚本化的，RagQA 内部的策略门控由
+   `tests/unit/test_rag_policy_m2.py` 覆盖；评测用例断言的是策略授予与运行结果契约。
+6. **CSS 检查**：既有 `.history-view-pane` 重复选择器失败未修（本分支未触及 CSS）。
+
+### 自评
+
+`DONE_WITH_RESIDUAL_RISKS`：7 项复审发现均有 RED/GREEN 回归证据、最小修复与提交
+（`8cbdd76`），受影响单测、tests/unit 全量、全量 pytest、M2 浏览器流与补报浏览器回归全部通过；
+`git diff --check` 通过；CSS 检查仍只有既有失败（未声称通过）。仍需独立 reviewer 执行门禁，
+分支未推送、未合并。

@@ -81,3 +81,32 @@ Review feedback was reproduced against `4ea57ad` before each fix. No M3/M4 behav
 - `git diff --check` and `git diff --cached --check` → passed; no staged files before the remediation commit.
 - `python3 scripts/check_css.py` still fails only on duplicate `.history-view-pane`; `git show HEAD:webapp/static/style.css | grep -n '\.history-view-pane' | wc -l` → `2`, proving the duplicate is unchanged and outside this scope.
 - Manual real-browser QA: launched `tests/browser/visual_test_app.py` at `http://127.0.0.1:58765/#/chat`, created an actual conflict SSE run, then opened it with agent-browser. DOM contained both external reference values, the textual `存在口径/时间差异` disclosure and `⚠️ 部分完成`; measured `overflow: false`.
+
+## M2 第二轮复审修复 — completed（代码提交 `8cbdd76`）
+
+复审 7 项发现在 `feat/trusted-chat-m2` 修复完成；未推送、未合并、未实现 M3/M4。
+
+| Finding | 根因 | RED（实际输出） | GREEN（实际输出） |
+| --- | --- | --- | --- |
+| F1 身份参数绕过 Scope | 只比对 6 位数字代码，名称/别名直接放行 | 回退 `rag/qa.py` 后复现：`names reaching executor: [{'symbol': '长江电力'}]` | 修复后同脚本 `names reaching executor: []`；`tests/unit/test_rag_policy_m2.py -q` → `10 passed, 3 warnings` |
+| P1-1 允许集与真实工具名分叉 | 写死 `get_quote`，真实名是 `get_realtime_quote/get_realtime_data` | `tests/unit/test_chat_policy.py -q` → `3 failed, 5 passed`，`assert {'web_search'} == {'get_realtime_quote','get_realtime_data','web_search'}` | 同命令 → `8 passed, 3 warnings` |
+| P1-2 补报工具被 policy 过滤 | 过滤使用 `tool_policy.allowed_tools`，受控工具不在其中 | `tests/unit/test_rag_policy_m2.py -q -k supplement_tool` → `2 failed` | 同命令 → `2 passed` |
+| P2-3 fallback_message 未被消费 | 只写进 ToolPolicy/JSON，无生产路径读取 | `tests/unit/test_server_api.py -q -k 'm2_blocked_run or research_task or fallback_hint'` → `3 failed`（`事件 'policy_fallback' 不存在`、`M2 的研究任务不应调用模型或工具`） | 同命令 → `3 passed` |
+| P2-4 timeout_seconds 未生效 | 工具执行器同步阻塞调用 | `-k timeout` → `assert 2.0052919164299965 < 1.5` | 同命令 → `1 passed` |
+| P2-5 blocked 整段替换 | server 直接用固定文案覆盖回答 | `-k m2_blocked_run` → `assert '营业收入为 100 亿元' in '未找到可核验的披露，不能确认该数值。'` | 同命令 → `1 passed`；`tests/unit/test_chat_verifier.py -q` → `13 passed` |
+| 残留：指标词/评测用例 | 指标词在全篇判定；fixture 只做 schema 校验 | 指标词：`assert 'passed' == 'blocked'`；评测首轮实跑 `4 failed, 6 passed`（`expected_status` 混用两套词表）；把允许集改回字面量后复跑，恰好 4 条实时/事件用例失败 | 指标词 `13 passed`；评测 `10 passed` |
+
+### 修复后验证
+
+- 受影响单测：`252 passed, 3 warnings in 10.31s`（verifier/facts/evidence/policy/eval_cases/rag_policy_m2/rag_qa/server_api/mcp_tools）。
+- tests/unit 全量：`953 passed, 3 warnings in 15.55s`。
+- 全量：`python3 -m pytest -q` → `1002 passed, 1 skipped, 3 warnings in 115.27s`（既有环境跳过：Chrome `--dump-dom` 15s 未退出）。
+- M2 浏览器流 + 补报浏览器回归：`tests/browser/test_chat_policy_flow.py` + `tests/browser/test_chat_pdf_supplement.py` → `13 passed in 51.08s`；M1 `test_chat_trust_flow.py` → `6 passed in 18.15s`。
+- `git diff --check` → passed；提交前所有改动已暂存，提交后工作区干净（无 staged files）。
+- `python3 scripts/check_css.py` → 仍失败，只报既有重复选择器 `.history-view-pane`（`style.css:1755/1765`，本次未触及 CSS）；如实记录，不声称通过。
+
+### 报告与遗留
+
+- 详细根因/RED-GREEN/偏离/风险见 `implementation-report.md` 的「M2 第二轮复审修复」。
+- 主要遗留：PDF 来源的 `verified` Fact 在服务端路径不可达（纯 PDF 数字一律 blocked）；数值格式仅支持千分位；工具超时放弃等待但线程可能继续到自身超时；补报恢复路径无 ToolPolicy；评测用例的模型/工具层为脚本化替代。
+- 仍待独立 reviewer 门禁；分支未推送、未合并。
