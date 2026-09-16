@@ -6,11 +6,31 @@
   失败或为空时回退内置常用白名单（FALLBACK_MCP_TOOLS）。
 """
 
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 # 已验证在当前依赖组合下稳定失败的 MCP 工具。保留名称清单便于将来替换为
 # 可靠的数据源后集中恢复，不能把它们注入模型或作为 CLI 快捷入口调用。
 DISABLED_MCP_TOOL_NAMES = frozenset({"get_news_data"})
+
+# 工具家族名（问答策略按家族授权，具体工具名始终来自 provider 清单/兜底清单，
+# 使策略白名单不会与真实工具名分叉）。
+REALTIME_QUOTE_TOOL_FAMILY = "realtime_quote"
+WEB_SEARCH_TOOL_FAMILY = "web"
+WEB_SEARCH_TOOL_NAME = "web_search"
+
+# 实时行情家族：实时行情/行情快照类工具（含版本后缀）
+_REALTIME_QUOTE_RE = re.compile(r"^get_(?:realtime|quote)")
+
+
+def is_realtime_quote_tool(name: str) -> bool:
+    """该 tool 名是否属于实时行情家族（get_realtime_quote / get_realtime_data …）。"""
+    return bool(isinstance(name, str) and _REALTIME_QUOTE_RE.match(name))
+
+
+def is_web_search_tool(name: str) -> bool:
+    return name == WEB_SEARCH_TOOL_NAME
+
 
 # 内置兜底白名单：MCP 启动失败/未安装时仍可用统一参数模板
 # （symbol=6 位代码 + output_format=json/markdown）
@@ -63,7 +83,7 @@ FALLBACK_MCP_TOOLS: List[Dict[str, Any]] = [
 
 # 内部工具，不经过 MCP。仅在运行环境配置 TAVILY_API_KEY 时注入模型。
 WEB_SEARCH_TOOL: Dict[str, Any] = {
-    "name": "web_search",
+    "name": WEB_SEARCH_TOOL_NAME,
     "description": (
         "搜索公开网页并返回标题、URL、摘要与发布日期。涉及今日、近期、最新、"
         "公告、新闻、舆情或股价涨跌原因时优先使用；财报数字必须优先采用本地财报证据。"

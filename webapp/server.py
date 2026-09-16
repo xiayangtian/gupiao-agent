@@ -16,6 +16,7 @@
 import asyncio
 import datetime as dt
 import json
+import inspect
 import logging
 import logging.handlers
 import os
@@ -69,7 +70,10 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
+from .chat_facts import FactNormalizer, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, IndustryRef, Scope
+from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
+from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
 from .chat_supplement import (
@@ -436,6 +440,8 @@ def _init_rag() -> None:
             # 补报工具需要工具编排路径，工具全不可用时用占位执行器保底。
             tool_executor=_build_chat_tool_executor(cfg) or _unavailable_tool_executor(),
             supplement_request_handler=_handle_supplement_request,
+            # Scope 校验与执行器必须使用同一名称→代码解析路径，否则模型可用公司名称绕过范围。
+            company_code_resolver=_resolve_symbol_code,
             max_tool_rounds=getattr(cfg, "mcp_max_tool_rounds", 3),
             max_tool_calls=getattr(cfg, "mcp_max_tool_calls", 6),
             reranker=reranker,
@@ -1697,6 +1703,11 @@ class _RagRunState:
     pending_tool_args: List[Dict[str, Any]] = field(default_factory=list)
     tool_artifacts: List[Any] = field(default_factory=list)
     facts: List[Any] = field(default_factory=list)
+    conflicts: List[Any] = field(default_factory=list)
+    intent_decision: Any = None
+    tool_policy: Any = None
+    verification_report: Any = None
+    structured_tool_payloads: List[Dict[str, Any]] = field(default_factory=list)
     evidence_artifacts: List[Any] = field(default_factory=list)
     retrieval_report_ids: List[str] = field(default_factory=list)
     model_name: str = ""
@@ -1733,6 +1744,12 @@ def _relay_rag_event(
             "stage": evt.get("stage", ""), "round": evt.get("round", 0),
             "message": evt.get("message", ""),
         }))
+    elif etype == "policy_resolved":
+        frames.append(_sse("policy_resolved", {key: evt.get(key) for key in ("intent", "allowed_tools", "max_calls", "max_rounds")}))
+    elif etype == "structured_tool_result":
+        payload = evt.get("payload")
+        if isinstance(payload, dict):
+            state.structured_tool_payloads.append({"name": evt.get("name", ""), "payload": payload})
     elif etype == "tool_result":
         name = evt.get("name", "")
         summary = evt.get("summary", "")
@@ -1750,13 +1767,23 @@ def _relay_rag_event(
             state.tool_artifacts.append(artifact)
             if not ok:
                 state.had_external_failure = True
-            try:
-                new_facts = normalizer.facts_from_structured_tool_payload(summary, artifact)
-            except ValueError:
-                # 非有限数值等受控字段异常：降级为 partial，不向上抛
-                state.had_external_failure = True
-                new_facts = ()
-            state.facts.extend(new_facts)
+            # Raw M1 tool text is retained only as a reference artifact.  M2 facts
+            # must originate from the policy-gated structured event below so every
+            # persisted value passes FactNormalizer's complete contract.
+            # Only the RAG policy-gated JSON-object event is eligible for M2 Fact
+            # normalization; raw tool text remains a reference artifact.
+            for structured in [item for item in state.structured_tool_payloads if item["name"] == name]:
+                raw = dict(structured["payload"])
+                # Provider identity and as-of belong to the execution artifact, not
+                # to model/tool-controlled JSON, so structured payloads cannot
+                # claim a different source or timestamp.
+                raw["provider"] = artifact.provider
+                raw["as_of"] = artifact.as_of
+                fact = FactNormalizer().normalize(raw, artifact, state.scope)
+                if fact is not None:
+                    state.facts.append(fact)
+                    frames.append(_sse("fact", {"fact": fact.to_dict()}))
+            state.structured_tool_payloads = [item for item in state.structured_tool_payloads if item["name"] != name]
             frames.append(_sse("artifact", {"artifact": artifact.to_dict()}))
         frames.append(_sse("tool_result", {"name": name, "summary": summary, "ok": ok}))
     elif etype == "supplement_request":
@@ -1809,6 +1836,10 @@ def _make_answer_run(
         status=status,
         scope=state.scope,
         facts=tuple(state.facts),
+        conflicts=tuple(state.conflicts),
+        intent_decision=state.intent_decision,
+        tool_policy=state.tool_policy,
+        verification_report=state.verification_report,
         artifacts=tuple(state.evidence_artifacts),
         tool_artifacts=tuple(state.tool_artifacts),
         retrieval_report_ids=tuple(state.retrieval_report_ids),
@@ -1861,8 +1892,13 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     # run_id 提前生成，使范围解析失败也能与本次问答关联检索。
     scope = await asyncio.to_thread(_resolve_scope, body, run_id)
 
-    # 外部工具：默认开启；use_mcp=false 时保持纯 RAG。
+    # Scope 冻结后才分类；策略是工具定义的唯一权限来源。
+    decision = IntentRouter().classify(body.question, scope)
     tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
+    availability = ToolAvailability.available(*[
+        str(item.get("function", {}).get("name") or "") for item in (tools or [])
+    ])
+    policy = ToolPolicyResolver().resolve(decision, scope, availability)
     # 聚焦报告：解析为 report_id 后提升其检索权重（历史记录跳转场景）
     priority_report_id = None
     fr = body.focus_report or {}
@@ -1878,7 +1914,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         # 同步生成器（rag_qa.answer_stream 内部为阻塞式 requests 流）放在独立
         # 生产者线程执行，经 asyncio.Queue 转发到事件循环 —— 这样多个会话的
         # 流式请求真正并行，一个会话的模型调用不会阻塞其他会话的响应。
-        state = _RagRunState(scope=scope)
+        state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
         normalizer = EvidenceNormalizer()
         pump = _SseEventPump(asyncio.get_running_loop(), "流式问答", run_id=run_id)
         saved = False
@@ -1899,20 +1935,49 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             # 由该线程回调，只能提交需求，不能决定候选或触发下载。
             _supplement_context.current = {"session_id": sid, "payload": None}
             try:
-                yield from rag_qa.answer_stream(
-                    body.question, history=history, filters=body.filters, tools=tools,
-                    priority_report_id=priority_report_id, scope=scope, run_id=run_id,
-                )
+                kwargs = dict(question=body.question, history=history, filters=body.filters, tools=tools,
+                              priority_report_id=priority_report_id, scope=scope, run_id=run_id)
+                # M1-compatible injected test adapters may not yet expose the M2
+                # argument; production RagQA always receives the policy.
+                parameters = inspect.signature(rag_qa.answer_stream).parameters.values()
+                if any(parameter.name == "tool_policy" or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+                    kwargs["tool_policy"] = policy
+                yield from rag_qa.answer_stream(**kwargs)
             finally:
                 _supplement_context.current = None
 
-        pump.start(_produce)
+        # research_task 在 M2 没有工具也没有步骤规划：直接用策略 fallback 如实回答，
+        # 不调用模型（避免模型凭空编造研究计划），也不启动生产者线程。
+        research_fallback = policy.fallback_message if policy.intent == "research_task" else ""
+        if not research_fallback:
+            pump.start(_produce)
 
         try:
             logger.info("chat_run_started run_id=%s", run_id)
             yield _sse("session", {"session_id": sid})
             yield _sse("scope_resolved", {"scope": scope.to_dict()})
+            yield _sse("policy_resolved", {"intent": policy.intent, "allowed_tools": list(policy.allowed_tools),
+                                             "max_calls": policy.max_calls, "max_rounds": policy.max_rounds})
+            # 策略降级说明进入生产事件流：无外部工具或研究任务时用户能知道本次能力的边界。
+            if policy.fallback_message and (not policy.allowed_tools or research_fallback):
+                yield _sse("policy_fallback", {
+                    "intent": policy.intent,
+                    "message": policy.fallback_message,
+                })
             yield _sse("run_started", {"run_id": run_id})
+            if research_fallback:
+                run = _persist("partial", research_fallback)
+                yield _sse("done", {
+                    "answer": research_fallback,
+                    "citations": [],
+                    "session_id": sid,
+                    "tools_used": [],
+                    "web_sources": [],
+                    "retrieval_degraded": False,
+                    "run": run.to_dict(),
+                    "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                })
+                return
             while True:
                 evt = await pump.queue.get()
                 if evt is pump.sentinel:
@@ -1977,8 +2042,20 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     legacy_citations = done_evt.get("citations", []) or []
                     legacy_web_sources = done_evt.get("web_sources", []) or []
                     legacy_tools_used = done_evt.get("tools_used", []) or []
+                    state.conflicts = list(detect_conflicts(state.facts))
+                    for conflict in state.conflicts:
+                        yield _sse("conflict", {"conflict": conflict.to_dict()})
+                    state.verification_report = ClaimVerifier().verify(
+                        answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
+                    )
+                    yield _sse("verification", {"verification": state.verification_report.to_dict()})
+                    if state.verification_report.status == "blocked":
+                        # 只替换不受支持的数值论断；受支持内容与上下文保留。
+                        answer = ClaimVerifier().degrade_blocked(answer, scope, state.facts)
+                    elif state.verification_report.status == "partial":
+                        answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
                     status = (
-                        "partial" if (state.had_external_failure or state.retrieval_degraded)
+                        "partial" if (state.had_external_failure or state.retrieval_degraded or state.verification_report.status == "partial")
                         else "completed"
                     )
                     run = _persist(status, answer)

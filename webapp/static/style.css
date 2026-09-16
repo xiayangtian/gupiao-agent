@@ -2736,3 +2736,23 @@ details.citation-card .citation-snippet { margin-top: 6px; }
   .chat-run-status { gap: 6px; }
   .chat-artifact { padding: 6px 8px; }
 }
+
+/* M2 trusted-chat policy, source boundary, and verifier states. */
+.chat-policy, .chat-facts-conflicts, .chat-verification {
+  max-width: 100%; overflow-wrap: anywhere; margin: 6px 0; font-size: 13px;
+}
+.chat-policy { color: var(--text-secondary); }
+.chat-policy summary { cursor: pointer; font-weight: 600; }
+.chat-policy summary:focus-visible, .chat-artifacts summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.chat-fact, .chat-conflict, .chat-verification {
+  padding: 6px 8px; border-left: 3px solid var(--border); border-radius: 3px;
+}
+.chat-fact-reference { border-left-color: #b7791f; }
+.chat-conflict { border-left-color: #c05621; color: var(--text-primary); }
+.chat-verification-partial { border-left-color: #b7791f; }
+.chat-verification-blocked { border-left-color: #c53030; }
+@media (max-width: 390px) {
+  .chat-policy, .chat-facts-conflicts, .chat-verification { font-size: 12px; }
+}

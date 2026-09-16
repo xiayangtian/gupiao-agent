@@ -17,10 +17,14 @@ from urllib.parse import urlparse
 ScopeMode = Literal["company_only", "company_industry", "whole_corpus"]
 AnswerStatus = Literal["completed", "partial", "stopped", "failed", "waiting_consent"]
 FactVerification = Literal["verified", "reference", "conflict", "unavailable"]
+IntentName = Literal["report_fact", "company_trend", "industry_benchmark", "realtime_market", "event_attribution", "research_task"]
+VerificationStatus = Literal["passed", "partial", "blocked"]
 
 _SCOPE_MODES = frozenset(("company_only", "company_industry", "whole_corpus"))
 _ANSWER_STATUSES = frozenset(("completed", "partial", "stopped", "failed", "waiting_consent"))
 _FACT_VERIFICATIONS = frozenset(("verified", "reference", "conflict", "unavailable"))
+_INTENTS = frozenset(("report_fact", "company_trend", "industry_benchmark", "realtime_market", "event_attribution", "research_task"))
+_VERIFICATION_STATUSES = frozenset(("passed", "partial", "blocked"))
 
 # 补充授权摘要的受控字段：只允许候选人可读信息，禁止 URL、文件路径和模型原始参数。
 SUPPLEMENT_MAX_CANDIDATES = 5
@@ -363,6 +367,89 @@ class Scope:
 
 
 @dataclass(frozen=True)
+class IntentDecision:
+    """Bounded question classification.  Unknown model output fails closed."""
+
+    intent: IntentName = "report_fact"
+    confidence: str = "low"
+    needs_local_pdf: bool = True
+    needs_market_data: bool = False
+    needs_web: bool = False
+    comparison_periods: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.intent not in _INTENTS:
+            raise ValueError("intent must be supported")
+        if self.confidence not in {"low", "medium", "high"}:
+            raise ValueError("intent confidence must be low, medium, or high")
+        if not all(isinstance(value, bool) for value in (self.needs_local_pdf, self.needs_market_data, self.needs_web)):
+            raise ValueError("intent needs fields must be boolean")
+        if not isinstance(self.comparison_periods, tuple):
+            raise ValueError("comparison_periods must be a tuple")
+        for period in self.comparison_periods:
+            _string(period, "comparison_period")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"intent": self.intent, "confidence": self.confidence, "needs_local_pdf": self.needs_local_pdf,
+                "needs_market_data": self.needs_market_data, "needs_web": self.needs_web,
+                "comparison_periods": list(self.comparison_periods)}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "IntentDecision":
+        data = _mapping(data, "intent decision")
+        intent = data.get("intent")
+        if intent not in _INTENTS:
+            return cls()
+        try:
+            return cls(intent=intent, confidence=data.get("confidence", "low"),
+                       needs_local_pdf=data.get("needs_local_pdf", True),
+                       needs_market_data=data.get("needs_market_data", False),
+                       needs_web=data.get("needs_web", False),
+                       comparison_periods=_strings(data.get("comparison_periods", []), "comparison_periods"))
+        except ValueError:
+            return cls()
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    intent: IntentName
+    allowed_tools: tuple[str, ...] = ()
+    max_calls: int = 0
+    max_rounds: int = 0
+    timeout_seconds: int = 30
+    source_policy: SourcePolicy = field(default_factory=SourcePolicy.local_only)
+    fallback_message: str = ""
+
+    def __post_init__(self) -> None:
+        if self.intent not in _INTENTS:
+            raise ValueError("tool policy intent must be supported")
+        if not isinstance(self.allowed_tools, tuple) or not all(isinstance(item, str) and item for item in self.allowed_tools):
+            raise ValueError("allowed_tools must be a tuple of names")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (self.max_calls, self.max_rounds)):
+            raise ValueError("tool budgets must be non-negative integers")
+        if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, int) or not 1 <= self.timeout_seconds <= 30:
+            raise ValueError("timeout_seconds must be between 1 and 30")
+        if not isinstance(self.source_policy, SourcePolicy):
+            raise ValueError("tool policy source_policy must be a SourcePolicy")
+        _string(self.fallback_message, "fallback_message", required=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"intent": self.intent, "allowed_tools": list(self.allowed_tools), "max_calls": self.max_calls,
+                "max_rounds": self.max_rounds, "timeout_seconds": self.timeout_seconds,
+                "source_policy": self.source_policy.to_dict(), "fallback_message": self.fallback_message}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ToolPolicy":
+        data = _mapping(data, "tool policy")
+        return cls(intent=_string(data.get("intent"), "tool policy intent"),
+                   allowed_tools=_strings(data.get("allowed_tools", []), "allowed_tools"),
+                   max_calls=data.get("max_calls", 0), max_rounds=data.get("max_rounds", 0),
+                   timeout_seconds=data.get("timeout_seconds", 30),
+                   source_policy=SourcePolicy.from_dict(data.get("source_policy", {})),
+                   fallback_message=_string(data.get("fallback_message", ""), "fallback_message", required=False))
+
+
+@dataclass(frozen=True)
 class Fact:
     metric: str
     value: float
@@ -375,6 +462,8 @@ class Fact:
     evidence_ids: tuple[str, ...]
     verification: FactVerification = "unavailable"
     as_of: str = ""
+    original_value: float | None = None
+    original_unit: str = ""
 
     def __post_init__(self) -> None:
         for name in ("metric", "unit", "period", "period_kind", "entity_scope", "company_code", "source_type"):
@@ -388,6 +477,9 @@ class Fact:
         if self.verification not in _FACT_VERIFICATIONS:
             raise ValueError(f"verification must be one of {sorted(_FACT_VERIFICATIONS)}")
         _string(self.as_of, "as_of", required=False)
+        if self.original_value is not None and (isinstance(self.original_value, bool) or not isinstance(self.original_value, Real) or not isfinite(self.original_value)):
+            raise ValueError("original_value must be a finite number or null")
+        _string(self.original_unit, "original_unit", required=False)
         if self.source_type in {"tool", "web"} and not self.as_of and self.verification != "unavailable":
             raise ValueError("external facts without as_of must be unavailable")
 
@@ -433,6 +525,8 @@ class Fact:
             "evidence_ids": list(self.evidence_ids),
             "verification": self.verification,
             "as_of": self.as_of,
+            "original_value": self.original_value,
+            "original_unit": self.original_unit,
         }
 
     @classmethod
@@ -450,6 +544,8 @@ class Fact:
             evidence_ids=_strings(data.get("evidence_ids", []), "evidence_ids"),
             verification=_string(data.get("verification", "unavailable"), "verification"),
             as_of=_string(data.get("as_of", ""), "as_of", required=False),
+            original_value=data.get("original_value"),
+            original_unit=_string(data.get("original_unit", ""), "original_unit", required=False),
         )
 
 
@@ -612,11 +708,96 @@ class ToolArtifact:
 
 
 @dataclass(frozen=True)
+class FactConflict:
+    metric: str
+    facts: tuple[Fact, ...]
+    reason: str
+
+    def __post_init__(self) -> None:
+        _string(self.metric, "conflict metric")
+        if not isinstance(self.facts, tuple) or len(self.facts) < 2 or not all(isinstance(fact, Fact) for fact in self.facts):
+            raise ValueError("conflict facts must contain at least two Facts")
+        _string(self.reason, "conflict reason")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"metric": self.metric, "facts": [fact.to_dict() for fact in self.facts], "reason": self.reason}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "FactConflict":
+        data = _mapping(data, "fact conflict")
+        return cls(metric=_string(data.get("metric"), "conflict metric"),
+                   facts=tuple(Fact.from_dict(item) for item in _sequence(data.get("facts", []), "conflict facts")),
+                   reason=_string(data.get("reason"), "conflict reason"))
+
+
+@dataclass(frozen=True)
+class VerificationIssue:
+    code: str
+    severity: str
+    message: str
+    fact_ids: tuple[str, ...] = ()
+    artifact_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("code", "severity", "message"):
+            _string(getattr(self, name), name)
+        for name in ("fact_ids", "artifact_ids"):
+            values = getattr(self, name)
+            if not isinstance(values, tuple):
+                raise ValueError(f"{name} must be a tuple")
+            for value in values:
+                _string(value, name[:-1])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"code": self.code, "severity": self.severity, "message": self.message,
+                "fact_ids": list(self.fact_ids), "artifact_ids": list(self.artifact_ids)}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "VerificationIssue":
+        data = _mapping(data, "verification issue")
+        return cls(code=_string(data.get("code"), "code"), severity=_string(data.get("severity"), "severity"),
+                   message=_string(data.get("message"), "message"), fact_ids=_strings(data.get("fact_ids", []), "fact_ids"),
+                   artifact_ids=_strings(data.get("artifact_ids", []), "artifact_ids"))
+
+
+@dataclass(frozen=True)
+class VerificationReport:
+    status: VerificationStatus
+    issues: tuple[VerificationIssue, ...] = ()
+    supported_fact_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status not in _VERIFICATION_STATUSES:
+            raise ValueError("verification status must be passed, partial, or blocked")
+        if not isinstance(self.issues, tuple) or not all(isinstance(issue, VerificationIssue) for issue in self.issues):
+            raise ValueError("issues must be a tuple of VerificationIssue")
+        if not isinstance(self.supported_fact_ids, tuple):
+            raise ValueError("supported_fact_ids must be a tuple")
+        for fact_id in self.supported_fact_ids:
+            _string(fact_id, "supported_fact_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"status": self.status, "issues": [issue.to_dict() for issue in self.issues],
+                "supported_fact_ids": list(self.supported_fact_ids)}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "VerificationReport":
+        data = _mapping(data, "verification report")
+        return cls(status=_string(data.get("status"), "verification status"),
+                   issues=tuple(VerificationIssue.from_dict(item) for item in _sequence(data.get("issues", []), "issues")),
+                   supported_fact_ids=_strings(data.get("supported_fact_ids", []), "supported_fact_ids"))
+
+
+@dataclass(frozen=True)
 class AnswerRun:
     content: str
     status: AnswerStatus
     scope: Scope | None = None
     facts: tuple[Fact, ...] = ()
+    conflicts: tuple[FactConflict, ...] = ()
+    intent_decision: IntentDecision | None = None
+    tool_policy: ToolPolicy | None = None
+    verification_report: VerificationReport | None = None
     artifacts: tuple[EvidenceArtifact, ...] = ()
     tool_artifacts: tuple[ToolArtifact, ...] = ()
     retrieval_report_ids: tuple[str, ...] = ()
@@ -636,10 +817,16 @@ class AnswerRun:
             raise ValueError(f"answer status must be one of {sorted(_ANSWER_STATUSES)}")
         if self.scope is not None and not isinstance(self.scope, Scope):
             raise ValueError("scope must be a Scope or null")
-        for name, model_type in (("facts", Fact), ("artifacts", EvidenceArtifact), ("tool_artifacts", ToolArtifact)):
+        for name, model_type in (("facts", Fact), ("conflicts", FactConflict), ("artifacts", EvidenceArtifact), ("tool_artifacts", ToolArtifact)):
             values = getattr(self, name)
             if not isinstance(values, tuple) or not all(isinstance(value, model_type) for value in values):
                 raise ValueError(f"{name} must be a tuple of {model_type.__name__}")
+        if self.intent_decision is not None and not isinstance(self.intent_decision, IntentDecision):
+            raise ValueError("intent_decision must be an IntentDecision or null")
+        if self.tool_policy is not None and not isinstance(self.tool_policy, ToolPolicy):
+            raise ValueError("tool_policy must be a ToolPolicy or null")
+        if self.verification_report is not None and not isinstance(self.verification_report, VerificationReport):
+            raise ValueError("verification_report must be a VerificationReport or null")
         if not isinstance(self.retrieval_report_ids, tuple):
             raise ValueError("retrieval_report_ids must be a tuple")
         for report_id in self.retrieval_report_ids:
@@ -667,6 +854,10 @@ class AnswerRun:
             "status": self.status,
             "scope": self.scope.to_dict() if self.scope else None,
             "facts": [fact.to_dict() for fact in self.facts],
+            "conflicts": [conflict.to_dict() for conflict in self.conflicts],
+            "intent_decision": self.intent_decision.to_dict() if self.intent_decision else None,
+            "tool_policy": self.tool_policy.to_dict() if self.tool_policy else None,
+            "verification_report": self.verification_report.to_dict() if self.verification_report else None,
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "tool_artifacts": [artifact.to_dict() for artifact in self.tool_artifacts],
             "retrieval_report_ids": list(self.retrieval_report_ids),
@@ -700,6 +891,10 @@ class AnswerRun:
             status=_string(data.get("status"), "answer status"),
             scope=Scope.from_dict(scope_data) if scope_data is not None else None,
             facts=tuple(Fact.from_dict(item) for item in _sequence(data.get("facts", []), "facts")),
+            conflicts=tuple(FactConflict.from_dict(item) for item in _sequence(data.get("conflicts", []), "conflicts")),
+            intent_decision=IntentDecision.from_dict(_mapping(data["intent_decision"], "intent_decision")) if data.get("intent_decision") is not None else None,
+            tool_policy=ToolPolicy.from_dict(_mapping(data["tool_policy"], "tool_policy")) if data.get("tool_policy") is not None else None,
+            verification_report=VerificationReport.from_dict(_mapping(data["verification_report"], "verification_report")) if data.get("verification_report") is not None else None,
             artifacts=tuple(EvidenceArtifact.from_dict(item) for item in _sequence(data.get("artifacts", []), "artifacts")),
             tool_artifacts=tuple(ToolArtifact.from_dict(item) for item in _sequence(data.get("tool_artifacts", []), "tool_artifacts")),
             retrieval_report_ids=_strings(data.get("retrieval_report_ids", []), "retrieval_report_ids"),

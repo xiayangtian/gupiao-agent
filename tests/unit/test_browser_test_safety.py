@@ -122,3 +122,12 @@ def test_chat_trust_browser_tests_use_agent_browser_without_opt_in_skip():
     assert "/api/chat/stream" in source  # 通过真实 SSE 端点生成会话，而非 mock 页面。
     assert "TEARDOWN_GRACE_SECONDS" in source
     assert "SIGKILL 后仍未退出" in source
+
+
+def test_m2_policy_browser_flow_uses_real_fixture_app_and_agent_browser():
+    source = (ROOT / "tests" / "browser" / "test_chat_policy_flow.py").read_text(encoding="utf-8")
+    assert "actual_app_url" in source
+    assert "browser_session" in source
+    assert "_chat_stream" in source
+    assert "overflow" in source
+    assert "policy_resolved" in source

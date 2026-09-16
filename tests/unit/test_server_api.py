@@ -2532,8 +2532,8 @@ class TestChatSupplementApi:
         assert needed["candidates"][0]["label"] == "2025 半年报"
         assert supplement_env["downloader"].calls == []
         assert supplement_env["ingestion"].calls == []
-        assert [name for name, _ in events] == ["session", "scope_resolved", "run_started",
-                                                "supplement_needed"]
+        assert [name for name, _ in events] == ["session", "scope_resolved", "policy_resolved", "policy_fallback",
+                                                "run_started", "supplement_needed"]
 
     def test_supplement_handler_is_reachable_from_the_streaming_producer_thread(
         self, client, supplement_env,
@@ -3050,3 +3050,111 @@ class TestChatSupplementApi:
         assert captured["tool_executor"] is not None
         assert captured["tool_executor"]("get_realtime_quote", {}) != ""
         assert captured["supplement_request_handler"] is server._handle_supplement_request
+        # Scope 校验必须复用执行器的名称→代码解析路径，否则名称形式的身份参数可绕过范围。
+        assert captured["company_code_resolver"] is server._resolve_symbol_code
+
+
+def test_m2_raw_tool_json_does_not_bypass_fact_normalization(client, env, monkeypatch):
+    class RawToolRag:
+        def answer_stream(self, question, **kwargs):
+            yield {"type": "tool_call", "name": "get_quote", "arguments": {"symbol": "601288"}}
+            yield {"type": "tool_result", "name": "get_quote", "ok": True, "summary": json.dumps({
+                "metric": "price", "value": 3.2, "unit": "元/股", "period": "as_of",
+                "company_code": "601288", "as_of": "2026-09-16T10:00:00",
+            })}
+            yield {"type": "done", "answer": "实时数据仅供参考。", "citations": [], "model": "m", "usage": {}, "tools_used": ["get_quote"], "retrieval_report_ids": [], "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", RawToolRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "农业银行今天行情如何？",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+        "use_mcp": True,
+    }))
+
+    run = _event(events, "done")["run"]
+    assert run["facts"] == []
+
+
+def test_m2_policy_is_emitted_and_unsupported_numeric_is_degraded(client, env, monkeypatch):
+    class PolicyRag:
+        def answer_stream(self, question, **kwargs):
+            assert kwargs["tool_policy"].intent == "report_fact"
+            yield {"type": "done", "answer": "营收为 100 亿元", "citations": [], "model": "m", "usage": {}, "tools_used": [], "retrieval_report_ids": [], "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", PolicyRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "半年报营收多少？",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+    }))
+    assert _event(events, "policy_resolved")["intent"] == "report_fact"
+    assert _event(events, "verification")["verification"]["status"] == "blocked"
+    assert "未找到可核验" in _event(events, "done")["run"]["content"]
+
+
+def test_m2_blocked_run_replaces_only_the_unsupported_claims(client, env, monkeypatch):
+    """blocked 只替换不受支持的确定性论断，受支持内容必须保留。"""
+    class MixedClaimRag:
+        def answer_stream(self, question, **kwargs):
+            yield {"type": "tool_call", "name": "get_financial_metrics", "arguments": {"symbol": "601288"}}
+            yield {"type": "structured_tool_result", "name": "get_financial_metrics", "payload": {
+                "metric": "revenue", "value": 100, "unit": "亿元", "period": "2026-06-30",
+                "period_kind": "semi_annual_cumulative", "entity_scope": "consolidated",
+                "company_code": "601288", "evidence_ids": ["tool:revenue:601288"],
+            }, "ok": True}
+            yield {"type": "tool_result", "name": "get_financial_metrics", "ok": True, "summary": "{}"}
+            yield {"type": "done", "answer": "外部参考：营业收入为 100 亿元，经营活动现金流量净额为 621 亿元。",
+                   "citations": [], "model": "m", "usage": {}, "tools_used": ["get_financial_metrics"],
+                   "retrieval_report_ids": [], "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", MixedClaimRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "农业银行半年报营收和经营现金流多少？",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+        "use_mcp": True,
+    }))
+
+    run = _event(events, "done")["run"]
+    assert run["verification_report"]["status"] == "blocked"
+    assert "营业收入为 100 亿元" in run["content"]
+    assert "621" not in run["content"]
+    assert "未找到可核验的披露" in run["content"]
+
+
+def test_m2_research_task_answers_with_the_policy_fallback_message(client, env, monkeypatch):
+    """research_task 在 M2 无工具可用：按策略 fallback 如实说明，不调用模型。"""
+    class NoCallRag:
+        def answer_stream(self, question, **kwargs):
+            raise AssertionError("M2 的研究任务不应调用模型或工具")
+
+    monkeypatch.setattr(server, "rag_qa", NoCallRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "帮我制定农业银行的研究计划",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+    }))
+
+    assert _event(events, "policy_resolved")["intent"] == "research_task"
+    fallback = _event(events, "policy_fallback")
+    assert fallback["intent"] == "research_task"
+    assert "M3" in fallback["message"]
+    run = _event(events, "done")["run"]
+    assert run["status"] == "partial"
+    assert run["content"] == fallback["message"]
+    assert run["tool_policy"]["fallback_message"] == fallback["message"]
+
+
+def test_m2_policy_fallback_hint_is_emitted_when_no_external_tool_applies(client, env, monkeypatch):
+    """无外部工具的意图也要把策略 fallback 送入生产事件流，而不是留在数据里。"""
+    class LocalRag:
+        def answer_stream(self, question, **kwargs):
+            yield {"type": "done", "answer": "营收披露见报告。", "citations": [], "model": "m",
+                   "usage": {}, "tools_used": [], "retrieval_report_ids": [], "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", LocalRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "农业银行半年报营收是多少？",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+    }))
+
+    fallback = _event(events, "policy_fallback")
+    assert fallback["intent"] == "report_fact"
+    assert fallback["message"] == _event(events, "done")["run"]["tool_policy"]["fallback_message"]

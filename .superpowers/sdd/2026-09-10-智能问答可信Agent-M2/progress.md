@@ -1,0 +1,135 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-09-10-智能问答可信Agent-M2.md
+
+## Workspace and baseline
+- Worktree: /Users/xiayangtian/Desktop/code/gp-agent/.worktrees/trusted-chat-m2
+- Branch: feat/trusted-chat-m2
+- Merge base: 2429844
+- Baseline: `python3 -m pytest tests/unit/test_chat_models.py tests/unit/test_chat_scope.py tests/unit/test_chat_evidence.py tests/unit/test_chat_store.py tests/unit/test_rag_qa.py -q` — 109 passed, 3 pre-existing dependency warnings.
+
+## Preflight interface scan
+| Tasks/interfaces | Producer → consumer | Finding / ruling |
+| --- | --- | --- |
+| T1 → T4/T5 | `IntentDecision`, `ToolPolicy` → policy-gated RAG and server orchestration | Compatible: T1 establishes the contract before its consumers. |
+| T2 → T3/T5/T6 | `Fact`, `FactConflict` → verifier, SSE/persistence, rendering | Compatible: T2 precedes all consumers; `FactConflict` is added compatibly to models. |
+| T3 → T5/T6 | `VerificationReport` → server degradation and renderer status | Compatible: T3 precedes T5 and T6. |
+| T4 → T5 | policy-resolved/structured-tool events → server normalization | Compatible: event names and backwards compatibility are explicitly required. |
+| T5 → T6/T7 | persisted run/SSE fields → frontend and browser harness | Compatible: UI and acceptance depend on server lifecycle. |
+| T6 → T7 | user-visible states → browser assertions | Compatible: UI precedes browser acceptance. |
+| T1 intent lexical rules | `event_attribution` words overlap realtime markers | Ruling: use plan-stated lexical priority for realtime markers; event terms classify event attribution only when no realtime marker is present. Cost if wrong: event questions containing “近期” may use quote policy; verifier still marks external evidence as reference. |
+| T2 verification wording | plan says permitted external structured facts are `reference`; initial precondition text says `verified` requires controlled structured external data | Ruling: follow Task 2's explicit and stricter behavior: PDF facts only become `verified`; permitted external structured facts remain `reference`. Cost if wrong: a future provider trust tier may require a compatible extension. |
+
+## Task 1 — completed
+- RED: `python3 -m pytest tests/unit/test_chat_policy.py -q` → collection failure (`ModuleNotFoundError: webapp.chat_policy`), as expected before implementation.
+- GREEN: `python3 -m pytest tests/unit/test_chat_policy.py tests/unit/test_chat_models.py -q` → `34 passed in 0.13s`.
+- Evidence: lexical, fail-closed `IntentDecision`; availability-filtered bounded `ToolPolicy`; model/AnswerRun-compatible JSON contracts.
+- Commit: `8b2866d` (`feat: 为智能问答增加受控意图与工具策略`).
+
+## Task 2 — completed
+- RED: `python3 -m pytest tests/unit/test_chat_facts.py -q` → collection failure (`ModuleNotFoundError: webapp.chat_facts`), as expected before implementation.
+- GREEN: `python3 -m pytest tests/unit/test_chat_facts.py tests/unit/test_chat_models.py -q` → `34 passed in 0.16s`.
+- Evidence: accepted-unit normalization preserves original value/unit; incomplete/web facts fail closed; external structured values require provider/as_of; scoped conflicts are explicit.
+- Commit: `0ba8f38` (`feat: 归一智能问答事实并识别口径冲突`).
+
+## Task 3 — completed
+- RED: `python3 -m pytest tests/unit/test_chat_verifier.py -q` → collection failure (`ModuleNotFoundError: webapp.chat_verifier`), as expected before implementation.
+- GREEN: `python3 -m pytest tests/unit/test_chat_verifier.py tests/unit/test_chat_models.py -q` → `34 passed in 0.12s`.
+- Evidence: numeric/unit matching, Scope/PDF URL checks, reference wording and conflict disclosure are deterministic and fail closed.
+- Commit: `fcd04db` (`feat: 核验智能问答关键论断与证据覆盖`).
+
+## Task 4 — completed
+- RED: `python3 -m pytest tests/unit/test_rag_policy_m2.py -q` → `3 failed` (`answer_stream()` had no `tool_policy` argument).
+- GREEN: `python3 -m pytest tests/unit/test_rag_policy_m2.py tests/unit/test_rag_qa.py -q` → `45 passed, 3 warnings in 1.24s`.
+- Evidence: policies filter OpenAI definitions, disabled requests never execute, budget/round caps apply, JSON object results emit structured events, done payload preserves policy intent/timing.
+- Commit: `542bedf` (`feat: 让问答工具调用服从意图与预算策略`).
+
+## Task 5 — completed
+- RED: server lifecycle test initially produced no M2 verifier event because the injected adapter did not accept the new policy argument; reproduced as an SSE error event and fixed only the M1 adapter compatibility seam.
+- GREEN: `python3 -m pytest tests/unit/test_server_api.py -q -k 'chat_stream or policy or conflict'` → `19 passed, 121 deselected, 3 warnings in 1.42s`; `python3 -m pytest tests/unit/test_server_api.py -q` → `140 passed, 3 warnings in 8.25s`.
+- Evidence: Scope is classified before execution; policy, facts/conflicts and verification are SSE/persisted; blocked numeric output is deterministically replaced with the required safe sentence.
+- Commit: `be8c7c0` (`feat: 在问答运行中持久化事实冲突与核验结果`).
+
+## Task 6 — completed with pre-existing CSS check concern
+- RED: `python3 -m pytest tests/unit/test_chat_rendering_js.py -q` → `1 failed` because the three M2 renderer functions did not exist.
+- GREEN: `python3 -m pytest tests/unit/test_chat_rendering_js.py -q` → `16 passed in 0.58s`.
+- CSS: `python3 scripts/check_css.py` executed and failed on pre-existing duplicate selector `.history-view-pane` (the M2 selectors are not named in the diagnostic).
+- Evidence: collapsed business-language policy, explicit PDF/reference facts and text-based conflict labels, role=status verifier feedback; streamed M2 events are consumed without exposing JSON/tool names.
+- Commit: `0ab83ad` (`feat: 在智能问答标示策略、外部参考与事实冲突`).
+
+## Task 7 — completed with process/CSS concerns
+- Evaluation fixture: `python3 -m pytest tests/unit/test_chat_policy_eval_cases.py -q` → `1 passed in 0.11s`; coverage includes report fact, trend, local industry, realtime, event, Scope violation, conflict and tool failure.
+- Browser GREEN: `python3 -m pytest tests/browser/test_chat_policy_flow.py -q` → `1 passed in 4.63s`; `python3 -m pytest tests/browser/test_chat_trust_flow.py -q` → `6 passed in 18.70s`. These run real FastAPI fixture app and agent-browser, including 1280x900, 768x1000 and 390x844 checks.
+- Full verification: `python3 -m pytest -q` → `968 passed, 1 skipped, 3 warnings in 108.08s`; `git diff --check` → passed; `python3 scripts/check_css.py` → failed only on existing `.history-view-pane` duplicate selector.
+- Manual agent-browser QA: actual fixture URL `http://127.0.0.1:58732/#/chat`; DOM showed `本次查证方式本地财报查证`, the safe numeric explanation, and `overflow: false`.
+- Process note: Task 7 fixture schema did not retain an independent pre-fixture RED command; do not represent that as compliant TDD evidence.
+- Commit: `1209913` (`test: 覆盖智能问答策略与事实核验闭环`).
+
+## M2 final-review Important fixes — completed
+
+Review feedback was reproduced against `4ea57ad` before each fix. No M3/M4 behavior was added.
+
+| Finding | Root cause | RED | GREEN | Commit |
+| --- | --- | --- | --- | --- |
+| Scope tool-parameter bypass | `RagQA.answer_stream()` checked only tool names; a policy-approved tool could receive another company’s `symbol`/`code`/`report_id`. | `python3 -m pytest tests/unit/test_rag_policy_m2.py -q` → `1 failed, 3 passed` (`600900` reached executor). | Same command → `4 passed, 3 warnings`; explicit out-of-Scope identity parameters emit failed tool result before executor. | `c4eaf72` |
+| M1 loose fact bypassed M2 normalization | Server persisted `EvidenceNormalizer.facts_from_structured_tool_payload()` from raw tool-result text before `FactNormalizer`; incomplete facts could enter `AnswerRun`. | `python3 -m pytest tests/unit/test_server_api.py -q -k raw_tool_json_does_not_bypass_fact_normalization` → `1 failed, 140 deselected` (raw JSON persisted as a fact). | Same command → `1 passed, 140 deselected, 3 warnings`; only `structured_tool_result` passing complete `FactNormalizer` is persisted. | `c4eaf72` |
+| ClaimVerifier metric/conflict false positives | Numeric matching used unit/value only; conflict relevance used raw metric-string inclusion, so same-value different metrics passed and `revenue` conflicts were skipped for `营业收入`. | `python3 -m pytest tests/unit/test_chat_verifier.py -q` → `2 failed, 4 passed`. | Same command → `6 passed`; controlled revenue/net-profit/cash-flow/price aliases now bind claims and relevant conflict disclosure. | `c4eaf72` |
+| Task 7 acceptance coverage was insufficient | The JSON schema fixture was metadata-only and the browser fake had one generic path, so industry/realtime/event/conflict/tool-failure/Scope cases did not exercise SSE persistence and rendering. | `python3 -m pytest tests/browser/test_chat_policy_flow.py -q` → `1 failed, 1 passed` (realtime run had no persisted reference Fact). | Same command → `2 passed`; fixture exercises all six paths through real SSE and agent-browser rendering. | `c4eaf72` |
+
+### Final-review validation
+- Affected unit suite: `python3 -m pytest tests/unit/test_chat_verifier.py tests/unit/test_chat_facts.py tests/unit/test_chat_evidence.py tests/unit/test_rag_policy_m2.py tests/unit/test_rag_qa.py tests/unit/test_server_api.py -q` → `208 passed, 3 warnings in 9.03s`.
+- Browser/SSE: `python3 -m pytest tests/browser/test_chat_policy_flow.py tests/browser/test_chat_trust_flow.py -q` → `8 passed in 31.29s`. These start the real FastAPI fixture app and use agent-browser; the added flow reopened industry, realtime, event and conflict runs and asserted no horizontal overflow, console error or page error.
+- Full suite: `python3 -m pytest -q` → `972 passed, 2 skipped, 3 warnings in 126.06s`.
+- `git diff --check` and `git diff --cached --check` → passed; no staged files before the remediation commit.
+- `python3 scripts/check_css.py` still fails only on duplicate `.history-view-pane`; `git show HEAD:webapp/static/style.css | grep -n '\.history-view-pane' | wc -l` → `2`, proving the duplicate is unchanged and outside this scope.
+- Manual real-browser QA: launched `tests/browser/visual_test_app.py` at `http://127.0.0.1:58765/#/chat`, created an actual conflict SSE run, then opened it with agent-browser. DOM contained both external reference values, the textual `存在口径/时间差异` disclosure and `⚠️ 部分完成`; measured `overflow: false`.
+
+## M2 第二轮复审修复 — completed（代码提交 `8cbdd76`）
+
+复审 7 项发现在 `feat/trusted-chat-m2` 修复完成；未推送、未合并、未实现 M3/M4。
+
+| Finding | 根因 | RED（实际输出） | GREEN（实际输出） |
+| --- | --- | --- | --- |
+| F1 身份参数绕过 Scope | 只比对 6 位数字代码，名称/别名直接放行 | 回退 `rag/qa.py` 后复现：`names reaching executor: [{'symbol': '长江电力'}]` | 修复后同脚本 `names reaching executor: []`；`tests/unit/test_rag_policy_m2.py -q` → `10 passed, 3 warnings` |
+| P1-1 允许集与真实工具名分叉 | 写死 `get_quote`，真实名是 `get_realtime_quote/get_realtime_data` | `tests/unit/test_chat_policy.py -q` → `3 failed, 5 passed`，`assert {'web_search'} == {'get_realtime_quote','get_realtime_data','web_search'}` | 同命令 → `8 passed, 3 warnings` |
+| P1-2 补报工具被 policy 过滤 | 过滤使用 `tool_policy.allowed_tools`，受控工具不在其中 | `tests/unit/test_rag_policy_m2.py -q -k supplement_tool` → `2 failed` | 同命令 → `2 passed` |
+| P2-3 fallback_message 未被消费 | 只写进 ToolPolicy/JSON，无生产路径读取 | `tests/unit/test_server_api.py -q -k 'm2_blocked_run or research_task or fallback_hint'` → `3 failed`（`事件 'policy_fallback' 不存在`、`M2 的研究任务不应调用模型或工具`） | 同命令 → `3 passed` |
+| P2-4 timeout_seconds 未生效 | 工具执行器同步阻塞调用 | `-k timeout` → `assert 2.0052919164299965 < 1.5` | 同命令 → `1 passed` |
+| P2-5 blocked 整段替换 | server 直接用固定文案覆盖回答 | `-k m2_blocked_run` → `assert '营业收入为 100 亿元' in '未找到可核验的披露，不能确认该数值。'` | 同命令 → `1 passed`；`tests/unit/test_chat_verifier.py -q` → `13 passed` |
+| 残留：指标词/评测用例 | 指标词在全篇判定；fixture 只做 schema 校验 | 指标词：`assert 'passed' == 'blocked'`；评测首轮实跑 `4 failed, 6 passed`（`expected_status` 混用两套词表）；把允许集改回字面量后复跑，恰好 4 条实时/事件用例失败 | 指标词 `13 passed`；评测 `10 passed` |
+
+### 修复后验证
+
+- 受影响单测：`252 passed, 3 warnings in 10.31s`（verifier/facts/evidence/policy/eval_cases/rag_policy_m2/rag_qa/server_api/mcp_tools）。
+- tests/unit 全量：`953 passed, 3 warnings in 15.55s`。
+- 全量：`python3 -m pytest -q` → `1002 passed, 1 skipped, 3 warnings in 115.27s`（既有环境跳过：Chrome `--dump-dom` 15s 未退出）。
+- M2 浏览器流 + 补报浏览器回归：`tests/browser/test_chat_policy_flow.py` + `tests/browser/test_chat_pdf_supplement.py` → `13 passed in 51.08s`；M1 `test_chat_trust_flow.py` → `6 passed in 18.15s`。
+- `git diff --check` → passed；提交前所有改动已暂存，提交后工作区干净（无 staged files）。
+- `python3 scripts/check_css.py` → 仍失败，只报既有重复选择器 `.history-view-pane`（`style.css:1755/1765`，本次未触及 CSS）；如实记录，不声称通过。
+
+### 报告与遗留
+
+- 详细根因/RED-GREEN/偏离/风险见 `implementation-report.md` 的「M2 第二轮复审修复」。
+- 主要遗留：PDF 来源的 `verified` Fact 在服务端路径不可达（纯 PDF 数字一律 blocked）；数值格式仅支持千分位；工具超时放弃等待但线程可能继续到自身超时；补报恢复路径无 ToolPolicy；评测用例的模型/工具层为脚本化替代。
+- 仍待独立 reviewer 门禁；分支未推送、未合并。
+
+## M2 第二轮复审遗留 P1 修复 — completed（`27a3c3d`、`3d63f9e`）
+
+仅修复 M2 P1-A/P1-B；未推送、未合并，未涉及 M3/M4 或前端。
+
+| P1 | 根因 | RED（实际输出） | GREEN / 提交 |
+| --- | --- | --- | --- |
+| P1-A Scope 网页自由文本 | `web_search.query` 未受 `_tool_arguments_within_scope()` 身份校验，范围外名称/代码/别名可达 executor | `python3 -m pytest tests/unit/test_rag_policy_m2.py -q -k out_of_scope_web_query_identity` → `3 failed, 10 deselected, 3 warnings in 0.76s`；三种输入均进入 executor | `27a3c3d`：按 Scope 解析 query 身份，越界拒绝、服务端绑定 Scope 身份；`tests/unit/test_rag_policy_m2.py -q` → `15 passed, 3 warnings in 1.87s`，范围内 event 网页查询可执行、whole_corpus 原样执行 |
+| P1-B 评测绕过 RagQA | `_ScriptedRagQA` 直接产 tool events，绕过模型工具定义、policy、参数拒绝和 executor | `python3 -m pytest tests/unit/test_chat_policy_eval_cases.py -q -k evaluation_pipeline_uses_real_ragqa` → `1 failed, 10 deselected, 3 warnings in 1.09s`（`_ScriptedRagQA` 非 `RagQA`） | `3d63f9e`：8 条 fixture 经真实 `RagQA` + fake AI/store/executor + FastAPI SSE/persistence；`tests/unit/test_chat_policy_eval_cases.py -q` → `11 passed, 3 warnings in 1.58s`；额外断言未批准工具和范围外网页 query 均不调用 executor |
+
+### 验证
+
+- 受影响：`212 passed, 3 warnings in 13.47s`（rag_policy_m2、eval_cases、rag_qa、server_api）。
+- `tests/unit`：`961 passed, 3 warnings in 15.04s`；完整 pytest：`1008 passed, 1 skipped, 3 warnings in 112.37s`。
+- 浏览器：`tests/browser/test_chat_policy_flow.py tests/browser/test_chat_pdf_supplement.py -q` → `13 passed in 52.46s`。
+- `git diff --check`、`git diff --cached --check` passed；验证时无 staged files。
+- `python3 scripts/check_css.py` 仍仅失败于既有 `.history-view-pane` 重复选择器；本轮未改 CSS。
+
+### 风险
+
+自由文本名称/别名识别依赖现有 resolver 的本地索引/词典覆盖；无法解析文本被 Scope 前缀绑定，
+可解析的范围外身份 fail-closed。`company_industry` provider 结果本身仍可能无关但外部输入不得越界。
+详细根因、证据、偏离与自评见 `implementation-report.md` 的「M2 第二轮复审遗留 P1 修复」。

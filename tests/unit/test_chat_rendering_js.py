@@ -412,3 +412,20 @@ def test_chat_focus_bar_clears_label_when_no_focus_report():
     assert result["withCompany"]["labelText"] == "聚焦报告：农业银行（601288 · 2026-06-30）——检索优先本报告"
     assert "bar-add:hidden" not in result["withCompany"]["events"]
     assert "bar-remove:hidden" in result["withCompany"]["events"]
+
+
+def test_m2_rendering_marks_reference_conflict_and_business_policy():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{
+          policy: r.renderPolicy({{intent: 'realtime_market', allowed_tools: ['get_quote']}}),
+          facts: r.renderFactsAndConflicts({{facts: [{{metric: '价格', value: 10, unit: '元/股', verification: 'reference', source_type: 'tool', as_of: '2026-09-15'}}], conflicts: [{{reason: '同指标同期间同口径数值不一致', facts: [{{source_type: 'pdf'}}, {{source_type: 'tool'}}]}}]}}),
+          verification: r.renderVerification({{status: 'partial'}})
+        }}));
+        """
+    )
+    assert '实时行情' in result['policy'] and 'get_quote' not in result['policy']
+    assert '外部参考' in result['facts'] and '已确认' not in result['facts']
+    assert '存在口径/时间差异' in result['facts'] and 'PDF 原文' in result['facts'] and '实时数据' in result['facts']
+    assert 'role="status"' in result['verification']
