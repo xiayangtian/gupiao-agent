@@ -71,7 +71,7 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
 from .chat_facts import FactNormalizer, detect_conflicts
-from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, IndustryRef, IntentDecision, Scope, ToolPolicy
+from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
@@ -1963,11 +1963,35 @@ def _research_step_handlers(
                 }
             return cached
 
-    def normalize_research(_step: Any, _run: Any) -> Dict[str, Any]:
-        return {"facts": [item.to_dict() for item in state.facts]}
+    def merged_facts(current_run: ResearchRun) -> List[Fact]:
+        """本次流累积的事实 + 已完成步骤已落盘的事实（按值去重）。
 
-    def compare_research(_step: Any, _run: Any) -> Dict[str, Any]:
-        state.conflicts = list(detect_conflicts(state.facts))
+        恢复可以从 normalize/compare 起步，此时检索步骤不会重跑，事实只存在于已完成
+        步骤记录里。只读当前累积状态会让冲突检测得到空集，恢复后的 conflicts 与首次
+        运行不一致，从而漏掉必须披露的冲突。
+        """
+        merged: List[Fact] = []
+        seen: set[Fact] = set()
+        for fact in state.facts:
+            if fact not in seen:
+                seen.add(fact)
+                merged.append(fact)
+        for step_run in current_run.step_runs:
+            for raw in step_run.facts:
+                try:
+                    fact = Fact.from_dict(raw)
+                except ValueError:
+                    continue
+                if fact not in seen:
+                    seen.add(fact)
+                    merged.append(fact)
+        return merged
+
+    def normalize_research(_step: Any, current_run: ResearchRun) -> Dict[str, Any]:
+        return {"facts": [item.to_dict() for item in merged_facts(current_run)]}
+
+    def compare_research(_step: Any, current_run: ResearchRun) -> Dict[str, Any]:
+        state.conflicts = list(detect_conflicts(merged_facts(current_run)))
         return {"conflicts": [item.to_dict() for item in state.conflicts]}
 
     def verify_research(_step: Any, _run: Any) -> Dict[str, Any]:

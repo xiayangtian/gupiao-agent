@@ -3382,6 +3382,73 @@ def test_resume_uses_the_same_controlled_handlers_as_the_first_run(client, env, 
     assert compare_step.conflicts
 
 
+class _ConflictingRevenueRag:
+    """同一公司同一指标的两次外部取值：首次运行必然检出冲突。"""
+
+    def answer_stream(self, question, **kwargs):
+        for name, value in (("get_quote", 100), ("web_search", 120)):
+            yield {"type": "tool_call", "name": name, "arguments": {"symbol": "601288"}}
+            yield {"type": "structured_tool_result", "name": name, "ok": True, "payload": {
+                "metric": "revenue", "value": value, "unit": "亿元", "period": "2026-06-30",
+                "period_kind": "semi_annual_cumulative", "entity_scope": "consolidated",
+                "company_code": "601288", "evidence_ids": [f"tool:{name}:{value}"],
+            }}
+            yield {"type": "tool_result", "name": name, "ok": True, "summary": "{}"}
+        yield {"type": "done", "answer": "营业收入为 100 亿元。", "citations": [], "model": "m",
+               "usage": {}, "tools_used": [], "web_sources": [], "retrieval_report_ids": [],
+               "retrieval_degraded": False}
+
+
+def test_resume_from_normalize_detects_conflicts_from_completed_retrieve(client, env, monkeypatch, tmp_path):
+    """恢复只重跑 normalize/compare 时，已落盘检索步骤的事实仍必须参与冲突检测。
+
+    首次运行在这里会检出 revenue 100/120 冲突并把验证结论降为 partial；恢复流若只从
+    当前累积状态取事实，conflicts 会为空、验证放行，运行被判 completed，漏掉冲突披露。
+    """
+    from webapp.chat_models import AnswerRun, IntentDecision, ToolPolicy
+    from webapp.chat_store import ChatStore
+    from webapp.research_models import ResearchRun, ResearchStepRun
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    _configure_scoped_rag_answer(env)
+    monkeypatch.setattr(server, "rag_qa", _ConflictingRevenueRag())
+
+    first_events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "帮我制定农业银行的研究计划，比较盈利质量",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+    }))
+    sid = _event(first_events, "session")["session_id"]
+    first = _event(first_events, "done")["run"]
+    assert first["conflicts"] and first["verification_report"]["status"] == "partial"
+    assert first["status"] == "partial"
+
+    # 用首次运行真实落盘的计划与已完成 retrieve 步骤构造「检索已完成、normalize 未完成」的运行。
+    first_run = store.get_research_run(sid, first["research_run_id"])
+    retrieve = next(item for item in first_run.step_runs if item.step_id == "retrieve")
+    assert retrieve.status == "completed" and retrieve.facts
+    store.save_research_run(sid, ResearchRun("resume-from-normalize", first_run.plan, "stopped", (
+        retrieve, ResearchStepRun("normalize", "stopped"),
+    )))
+    store.append_turn(sid, question="帮我制定农业银行的研究计划，比较盈利质量", run=AnswerRun(
+        content="研究已停止；已完成步骤已保存，可继续研究。", status="stopped", scope=first_run.plan.scope,
+        intent_decision=IntentDecision.from_dict(first["intent_decision"]),
+        tool_policy=ToolPolicy.from_dict(first["tool_policy"]), research_run_id="resume-from-normalize",
+        research_summary={"status": "stopped", "resume_from_step_id": "normalize"},
+    ))
+
+    response = client.post("/api/chat/research/resume-from-normalize/resume", json={"session_id": sid})
+
+    assert response.status_code == 200
+    resumed = _event(_read_sse(response), "done")["run"]
+    assert resumed["conflicts"], resumed["facts"]
+    assert resumed["verification_report"]["status"] == first["verification_report"]["status"]
+    assert resumed["status"] == first["status"]
+    compare_step = next(item for item in store.get_research_run(sid, "resume-from-normalize").step_runs
+                        if item.step_id == "compare")
+    assert compare_step.conflicts
+
+
 def test_resume_stream_cancels_a_running_step_after_client_disconnect(env, monkeypatch, tmp_path):
     """恢复流也必须像首次研究流一样观察断开，并协作取消正在执行的外部调用。"""
     import asyncio
