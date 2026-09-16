@@ -400,6 +400,11 @@
     return String((step && step.label) || '研究步骤');
   }
 
+  var RESEARCH_STEP_STATUS_LABELS = {
+    pending: '待执行', running: '进行中', completed: '已完成',
+    stopped: '已停止', failed: '失败', skipped: '已跳过',
+  };
+
   function renderResearchPlan(plan) {
     if (!plan || typeof plan !== 'object') return '';
     var steps = Array.isArray(plan.steps) ? plan.steps : [];
@@ -412,10 +417,16 @@
 
   function renderResearchSteps(run) {
     if (!run || typeof run !== 'object' || !Array.isArray(run.step_runs)) return '';
+    var labels = {};
+    ((run.plan && Array.isArray(run.plan.steps)) ? run.plan.steps : []).forEach(function (step) {
+      labels[String(step.id || '')] = researchStepLabel(step);
+    });
     return '<div class="research-steps" role="status" aria-live="polite">' + run.step_runs.map(function (step) {
-      return '<div class="research-step research-step-' + escapeHtml(String(step.status || 'pending')) + '"><span aria-hidden="true">'
-        + (step.status === 'completed' ? '✓' : step.status === 'failed' ? '!' : '•') + '</span> '
-        + escapeHtml(String(step.step_id || '研究步骤')) + '：' + escapeHtml(String(step.status || 'pending')) + '</div>';
+      var status = String(step.status || 'pending');
+      var label = labels[String(step.step_id || '')] || String(step.step_id || '研究步骤');
+      return '<div class="research-step research-step-' + escapeHtml(status) + '"><span aria-hidden="true">'
+        + (status === 'completed' ? '✓' : status === 'failed' ? '!' : status === 'running' ? '…' : '•') + '</span> '
+        + escapeHtml(label) + '：' + escapeHtml(RESEARCH_STEP_STATUS_LABELS[status] || status) + '</div>';
     }).join('') + '</div>';
   }
 
@@ -445,11 +456,6 @@
     var html = '<div class="chat-run-status chat-run-status-' + escapeHtml(status)
       + '" role="status" aria-live="polite">'
       + '<span class="chat-run-status-label">' + label + '</span>';
-    if (status === 'stopped' || status === 'partial') {
-      // 恢复状态机到 M3 才实现：仅渲染禁用占位，避免承诺当前不存在的能力。
-      html += '<button type="button" class="chat-run-action chat-run-continue"'
-        + ' data-chat-action="continue" disabled title="恢复研究将在后续版本提供">继续研究</button>';
-    }
     if (status === 'stopped' || status === 'partial' || status === 'failed') {
       html += '<button type="button" class="chat-run-action chat-run-regenerate"'
         + ' data-chat-action="regenerate">重新生成</button>';

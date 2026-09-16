@@ -2759,6 +2759,34 @@ async function submitQuestion(q, key) {
   var stageEl = null;
   var assistantEl = null;
   var scopeEl = null;       // scope_resolved 时首部展示的范围摘要（done 时合并进最终回答）
+  var researchStreamEl = null;
+
+  function clearResearchProgress() {
+    if (researchStreamEl && researchStreamEl.parentNode) researchStreamEl.parentNode.removeChild(researchStreamEl);
+    researchStreamEl = null;
+  }
+
+  function renderResearchProgress() {
+    if (!isCurrentChatStream(key) || !st.researchRun) return;
+    if (!researchStreamEl) {
+      researchStreamEl = document.createElement('section');
+      researchStreamEl.className = 'research-stream-progress';
+      researchStreamEl.setAttribute('aria-live', 'polite');
+      if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.insertBefore(researchStreamEl, thinkingEl.nextSibling);
+      else $('#chat-history').appendChild(researchStreamEl);
+    }
+    var rendering = window.ChatRendering;
+    researchStreamEl.innerHTML = rendering
+      ? rendering.renderResearchPlan(st.researchRun.plan) + rendering.renderResearchSteps(st.researchRun)
+      : '';
+    if (st.researchBlocked) {
+      var blocked = document.createElement('div');
+      blocked.className = 'research-step research-step-failed';
+      blocked.textContent = '受阻：' + st.researchBlocked;
+      researchStreamEl.appendChild(blocked);
+    }
+    scrollChatToBottom();
+  }
 
   try {
     var body = { question: q, session_id: chatSessionId, scope_mode: currentScopeMode() };
@@ -2940,8 +2968,27 @@ async function submitQuestion(q, key) {
         }
       } else if (parsed.event === 'research_plan') {
         st.researchPlan = parsed.data.plan || null;
+        st.researchRun = { plan: st.researchPlan, status: 'running', step_runs: [] };
+        renderResearchProgress();
+      } else if (parsed.event === 'research_running') {
+        st.researchRun = parsed.data.run || st.researchRun;
+        renderResearchProgress();
+      } else if (parsed.event === 'research_step_started' || parsed.event === 'research_step_completed' || parsed.event === 'research_step_failed') {
+        if (!st.researchRun) st.researchRun = { plan: st.researchPlan || {}, status: 'running', step_runs: [] };
+        var stepId = String(parsed.data.step_id || '');
+        var steps = st.researchRun.step_runs;
+        var index = steps.findIndex(function (step) { return step.step_id === stepId; });
+        var stepRun = { step_id: stepId, status: parsed.data.status || 'running' };
+        if (index >= 0) steps[index] = stepRun;
+        else steps.push(stepRun);
+        renderResearchProgress();
+      } else if (parsed.event === 'research_blocked') {
+        st.researchBlocked = parsed.data.reason || '研究受阻';
+        if (st.researchRun) st.researchRun.status = 'partial';
+        renderResearchProgress();
       } else if (parsed.event === 'research_done') {
-        st.researchRun = parsed.data.run || null;
+        st.researchRun = parsed.data.run || st.researchRun;
+        renderResearchProgress();
       } else if (parsed.event === 'done') {
         done = true;
         st.finishedNormally = true;
@@ -2953,6 +3000,7 @@ async function submitQuestion(q, key) {
           if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
           thinkingEl = null;
           scopeEl = null;
+          clearResearchProgress();
           appendAssistantRun('#chat-history', { content: st.answerText, run: parsed.data.run, research_run: st.researchRun || parsed.data.research_run });
           appendChatElapsed('#chat-history', parsed.data.elapsed_seconds);
           // analysis 来源引用未进入 run.artifacts，只保留在旧 citations 字段一个版本；
@@ -2998,9 +3046,11 @@ async function submitQuestion(q, key) {
         if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
         thinkingEl = null;
         scopeEl = null;
+        clearResearchProgress();
         appendAssistantRun('#chat-history', {
           content: st.answerText,
-          run: { status: st.stopped ? 'stopped' : 'failed', id: st.runId || '' },
+          run: { status: st.stopped ? 'stopped' : 'failed', id: st.runId || '', research_run_id: (st.researchRun && st.researchRun.id) || '' },
+          research_run: st.researchRun || null,
         });
         scrollChatToBottom();
       }
@@ -3016,9 +3066,11 @@ async function submitQuestion(q, key) {
         if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
         thinkingEl = null;
         scopeEl = null;
+        clearResearchProgress();
         appendAssistantRun('#chat-history', {
           content: st.answerText,
-          run: { status: 'stopped', id: st.runId || '' },
+          run: { status: 'stopped', id: st.runId || '', research_run_id: (st.researchRun && st.researchRun.id) || '' },
+          research_run: st.researchRun || null,
         });
         scrollChatToBottom();
       }
@@ -3030,9 +3082,11 @@ async function submitQuestion(q, key) {
         if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
         thinkingEl = null;
         scopeEl = null;
+        clearResearchProgress();
         appendAssistantRun('#chat-history', {
           content: '⚠️ ' + err.message,
           run: st.failedRun || { status: 'failed', id: st.runId || '' },
+          research_run: st.researchRun || null,
         });
         scrollChatToBottom();
       }
@@ -3183,7 +3237,7 @@ function appendAnalysisCitations(sel, citations) {
   box.scrollTop = box.scrollHeight;
 }
 
-// 「重新生成」从紧邻的用户消息重新提问；「继续研究」占位禁用，恢复状态机留到 M3。
+// 「重新生成」从紧邻的用户消息重新提问；研究运行的「继续研究」由 renderResearchRecovery 提供。
 function setChatRunCopyFeedback(button, text) {
   if (!button) return;
   var original = button.dataset.originalLabel || button.textContent;
@@ -3250,6 +3304,12 @@ async function resumeResearch(runId, button) {
       body: JSON.stringify({ session_id: chatSessionId }),
     });
     await consumeSupplementStream(response, {
+      research_plan: function () { button.textContent = '正在继续研究…'; },
+      research_running: function () { button.textContent = '正在继续研究…'; },
+      research_step_started: function (data) { button.textContent = '正在执行：' + (data.label || '研究步骤'); },
+      research_step_completed: function (data) { button.textContent = '已完成：' + (data.label || '研究步骤'); },
+      research_step_failed: function (data) { button.textContent = '步骤失败：' + (data.label || '研究步骤'); },
+      research_blocked: function (data) { button.textContent = data.reason || '研究受阻'; },
       done: function (data) { appendAssistantRun('#chat-history', { content: data.answer, run: data.run }); }
     });
   } catch (_) {

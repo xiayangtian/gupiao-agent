@@ -306,8 +306,8 @@ def test_web_artifact_requires_http_url_and_escapes_title():
     assert "ftp://" not in result["bad"]
 
 
-def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
-    """停止/部分/失败给出清晰文本与「重新生成」；恢复占位禁用，不承诺 M3 能力。"""
+def test_run_status_renders_regenerate_for_incomplete_runs_without_a_fake_continue_placeholder():
+    """停止/部分/失败给出清晰文本与「重新生成」；恢复入口只由真实研究运行提供。"""
     result = _run_node(
         f"""
         const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
@@ -324,8 +324,8 @@ def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
     assert "诊断 ID：<code>run-stopped</code>" in result["stopped"]
     assert 'data-chat-action="copy-run-id"' in result["stopped"]
     assert "重新生成" in result["stopped"]
-    assert 'data-chat-action="continue"' in result["stopped"]
-    assert "disabled" in result["stopped"]
+    assert 'data-chat-action="continue"' not in result["stopped"]
+    assert "继续研究" not in result["stopped"]
     assert "部分完成" in result["partial"]
     assert "诊断 ID：<code>run-partial</code>" in result["partial"]
     assert "重新生成" in result["partial"]
@@ -443,3 +443,18 @@ def test_research_rendering_shows_business_steps_acceptance_and_recovery_only_wh
     assert '核对来源' in result['plan'] and '完成判据' in result['plan']
     assert '继续研究' in result['recovery'] and '从步骤：比较' in result['recovery']
     assert result['completed'] == ''
+
+
+def test_research_steps_render_public_running_failed_and_blocked_states():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const plan = {{steps:[{{id:'retrieve', label:'检索已授权披露'}}]}};
+        const running = r.renderResearchSteps({{plan:plan, step_runs:[{{step_id:'retrieve', status:'running'}}]}});
+        const failed = r.renderResearchSteps({{plan:plan, step_runs:[{{step_id:'retrieve', status:'failed'}}]}});
+        console.log(JSON.stringify({{running, failed}}));
+        """
+    )
+    assert '检索已授权披露' in result['running']
+    assert '进行中' in result['running']
+    assert '失败' in result['failed']
