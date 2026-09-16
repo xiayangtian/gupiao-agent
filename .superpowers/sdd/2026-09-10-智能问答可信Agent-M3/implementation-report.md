@@ -109,3 +109,68 @@
 - 研究步骤的 `error` 文本仍随 ResearchRun 持久化（owner-scoped endpoint 可读，UI 只展示业务状态）；公开事件只发通用阻塞原因。
 - 研究运行使用与普通问答相同的 RagQA 桥接，但不注入补报上下文：research_task 的 ToolPolicy 不授权任何工具，模型无法申请补充财报，缺来源时按 partial/blocked 诚实降级（不改变补报授权端点语义）。
 - 未推送、未合并、未实现 M4；`docs/FEATURE-CATALOG.md`/`README.md` 的功能条目更新留在合入 `main` 时执行。
+
+## 第二轮复审修复（2026-09-16，commit `5cb6674`、`922f8ca`、`eb421e7`）
+
+### Review 结论（第二轮，P1 + P2）
+
+第二轮复审在最终审查修复后仍判定 2 项 P1：二次恢复必然 409（恢复轮次丢失冻结策略）；恢复重放的不是原研究问题（用会话最后一条用户消息）。另有 5 项 P2：恢复路径用空 lambda 的 compare/verify handler（conflicts/verification 与首次运行不一致）；并行 sibling 失败后停止会触发非法 `failed→stopped` 转换、`execute()` 对可恢复终态走非法路径；编排层硬编码 retrieve/answer 步骤 id；缺少「外部调用前持久化为 running」与「完成/不可恢复运行不渲染继续研究死按钮」的覆盖；恢复流没有协作取消。
+
+### 逐项根因 → RED → 修复 → GREEN
+
+1. **P1-1 二次恢复必然 409 缺策略**
+   - 根因：恢复端点只在**第一条**持有该 run id 的助手消息上取 `tool_policy`，读不到就 `break`、直接 409；而 `ResearchAgent.resume` 落盘的 AnswerRun 传入 `intent/policy=None`，首次恢复因此写入 `tool_policy: null`，第二次恢复必然 409。
+   - RED：`python3 -m pytest tests/unit/test_server_api.py -q -k repeated_resume` → `1 failed`：`AssertionError: {"detail":"缺少原始工具策略，不能安全恢复研究"}`（`409 == 200`）。
+   - 修复：`ResearchAgent.resume(...)` 新增可选 `intent/policy` 并在 `_execute` 落盘时保真；服务端恢复端点把第一次恢复的冻结策略与意图一并传入并写回轮次。`_research_resume_origin` 对策略字段不可读的候选**继续向更早的同 run 轮次回退**，全部不可读才 fail-closed 409。
+   - GREEN：同命令 → `1 passed`（第一次恢复按 failed 诚实落盘，第二次恢复 200 并 completed；两次 RAG 调用都收到同一 `ToolPolicy`）。
+
+2. **P1-2 恢复重放错误问题**
+   - 根因：端点用 `_last_user_question(session)`（会话最后一条用户消息）。用户「停止研究 → 追问其他问题 → 恢复旧研究」时，重放的是追问；会话里没有用户消息时甚至会用空问题发起检索（200）。
+   - RED：`python3 -m pytest tests/unit/test_server_api.py -q -k 'replays_the_question or fails_closed_when_the_run'` → `2 failed`：`['农业银行今天股价是多少？'] == ['比较农业银行盈利质量']`；无提问轮次时 `200 == 409`。
+   - 修复：新增 `_research_resume_origin`：按持有 run id 的助手消息，取其**之前最近一条用户消息**作为 question，并把该消息之前的会话前缀作为当时的检索上下文；解析不到提问轮次一律 409 `找不到该研究运行的原研究问题`，且不调用任何协作方。
+   - GREEN：同命令 → `2 passed`；新增轮次的用户消息也是原研究问题，不追加错误问题。
+
+3. **P2-3 恢复路径使用空 lambda handler**
+   - 根因：恢复端点自建 `normalize/compare/verify = lambda *_: {}`，`detect_conflicts` 从不执行，恢复后 conflicts/verification 与首次运行不一致。
+   - RED：`python3 -m pytest tests/unit/test_server_api.py -q -k same_controlled_handlers` → `1 failed`（`done["conflicts"]` 为空，持久化 compare 步骤无 conflicts）。
+   - 修复：抽出 `_research_step_handlers(...)`，`chat_stream` 研究分支与恢复端点共用同一组受控 handler（检索桥 + 事实归一 + 冲突检测 + 回答；步骤级核验仍由 agent 的 M2 ClaimVerifier 在最后统一执行），检索结果在桥内缓存一次，避免并行 retrieve 重复外部调用。
+   - GREEN：同命令 → `1 passed`；首次研究流的既有断言（步骤事件、证据数、completed）保持通过。
+
+4. **P2-4 executor 状态机容错**
+   - 根因：并行批次中 sibling 失败先把 run 置 `failed`，同一批次后续迭代若发现 stop_event 仍执行 `transition("stopped")` → `ValueError: cannot transition failed to stopped`；`execute()` 对 stopped/failed/partial 直接进 `_run`，在全步完成后于 `verifying` 转换处抛非法转换。
+   - RED：`python3 -m pytest tests/unit/test_research_executor.py -q -k 'sibling_failure_then_stop or routes_resumable_terminal'` → `2 failed`（含上一行 ValueError 原文）。
+   - 修复：新增 `ResearchRun.stop()`（已是 failed/partial/stopped 时保持该可恢复终态，不再做非法转换），executor 的三处停止路径统一走 `_stop(...)`；`execute()` 对可恢复终态改走 `run.resume()`。
+   - GREEN：同命令 → `2 passed`（停止后停在合法可恢复终态；execute 只重跑未完成步骤，`tool` 调用 0 次）。
+
+5. **P2-5 编排层硬编码步骤 id**
+   - 根因：`ResearchAgent._execute` 用 `step_id == "answer"` 取结论；服务端检索桥/回答 handler 用 `step_id == "retrieve"`。模型自定义 id 的计划（`conclude`/`gather`）会拿不到结论/证据。
+   - RED：`python3 -m pytest tests/unit/test_research_agent.py -q -k finds_the_answer_step_by_kind` → `1 failed`（自由 id 计划 status 为 `partial`，结论为空）。
+   - 修复：新增 `ResearchRun.result_of_kind(kind)`，agent 与 server 的 handler 全部按 kind 选择步骤产物。
+   - GREEN：同命令 → `1 passed`（content 为自由 id 计划的结论、status completed）；`grep 'step_id == "' webapp/` 仅剩 planner 的 kind 依赖表。
+
+6. **P2-6 覆盖加固**
+   - (a) RED/GREEN：`python3 -m pytest tests/unit/test_research_executor.py -q -k persisted_running` → 顺序步骤与并行批次各一条用例；顺序用例在 handler 进入时读取持久化快照，断言此刻该步骤已是 `running` 而非 `completed`；并行用例断言每个步骤首次落盘的状态都是 `running` 且存在一条两个步骤同时 `running` 的记录（删掉调用前落盘即失败）。
+   - (b) RED：`python3 -m pytest tests/unit/test_chat_rendering_js.py -q -k dead_button` → `1 failed`（研究运行已 completed 时仍渲染按钮 HTML）。修复：`renderResearchRecovery(run, research_run)` 依据持久化研究状态判定资格（completed/verifying/awaiting_input 一律不渲染），前端刚停止、持久化状态未回页时仍保留入口；`resumeResearch` 在恢复流返回 `done` 后移除旧按钮（成功或再次失败都由新追加回答自带入口）。GREEN：同命令 → `1 passed`；浏览器断言「已完成会话 0 个继续研究按钮」「恢复成功后 0 个」。
+
+7. **P2-7 恢复流协作取消**
+   - 根因：恢复端点直接 `await asyncio.to_thread(...)`，没有 `Request` 参数，无法观察客户端断开，停止时阻塞中的外部调用仍会返回并可能伪装完成。
+   - RED：`python3 -m pytest tests/unit/test_server_api.py -q -k cancels_a_running_step` → `1 failed`：`resume_research_run() takes 2 positional arguments but 3 were given`；另外临时移除断开轮询后同一用例以「恢复流未观察断开」（`request.observed` 未置位）失败，证明该用例是真判别器。
+   - 修复：恢复端点改为与首次研究流一致的 queue + 生产者线程模式：循环内 `await request.is_disconnected()` 置 `stop_event`，`finally` 中任务未完成同样置位；事件实时转发给前端（恢复期间可见计划与步骤进度）。
+   - GREEN：同命令 → `1 passed`（外部调用返回后按 stopped 落盘，retrieve 步骤为 stopped，流中出现 `research_blocked`）。
+
+### 验证记录（第二轮）
+
+- 相关单测：`python3 -m pytest tests/unit/test_research_models.py tests/unit/test_research_planner.py tests/unit/test_research_executor.py tests/unit/test_research_agent.py tests/unit/test_research_store.py tests/unit/test_chat_rendering_js.py tests/unit/test_server_api.py -q -k 'research or executor or rendering or resume'`：68 passed, 127 deselected。
+- 研究/恢复 API 子集：`python3 -m pytest tests/unit/test_server_api.py -q -k 'research or resume'`：14 passed。
+- 浏览器流：`python3 -m pytest tests/browser/test_research_agent_flow.py -q`：4 passed（真实停止、历史重开、失败步骤重试、恢复后面板；1280x900/768x1000/390x844 三档无横向溢出，控制台与页面错误为空）。
+- 全量：`python3 -m pytest -q`：1047 passed, 2 skipped, 3 warnings；既有 skip 为宿主机 `Chrome --dump-dom` 15s 未退出与未设置 `GOLDEN_REPORT_DIR`，与本次改动无关。
+- `git diff --check HEAD~3`：通过；`python3 scripts/check_css.py`：通过（`style.css` 结构检查通过，本次未改 CSS）。
+- 前端行为变化已做真实浏览器 QA（见上浏览器流用例）。
+
+### 偏离与风险（第二轮）
+
+- 恢复检索不再携带首次请求的 `body.filters`/`priority_report_id`（无持久化契约）：恢复以冻结 Scope + 冻结 ToolPolicy 重新检索；权限边界不变，未新增字段，未在公开流暴露内部参数。
+- 「无提问轮次」的历史运行改为 409 业务化拒绝：刻意 fail-closed，避免拿会话里任意最新问题冒充原研究问题。
+- 并行批次在停止信号到达时只把当前在途步骤标记 stopped；失败路径的 sibling 结果保留仍由既有回归覆盖。
+- 未推送、未合并、未实现 M4；`docs/FEATURE-CATALOG.md`/`README.md` 的条目更新仍在合入 `main` 时执行。
+- 工作台账工具（`create_task_ledger_entry`/`update_task_ledger_entry`）不在本次执行者工具集内，未登记台账，需由协调方补录。
