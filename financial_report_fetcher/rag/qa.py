@@ -568,6 +568,15 @@ class RagQA:
                             yield {"type": "tool_result", "name": name, "summary": result, "ok": False}
                             messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
                             continue
+                        if name == "web_search":
+                            args = self._bind_web_query_to_scope(
+                                args, scope, self.company_code_resolver,
+                            )
+                            if args is None:
+                                result = "工具调用失败：网页查询参数超出本次问答范围"
+                                yield {"type": "tool_result", "name": name, "summary": result, "ok": False}
+                                messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+                                continue
                         if not self._tool_arguments_within_scope(args, scope, self.company_code_resolver):
                             result = "工具调用失败：工具参数超出本次问答范围"
                             yield {"type": "tool_result", "name": name, "summary": result, "ok": False}
@@ -714,6 +723,62 @@ class RagQA:
                 if code is None or code not in allowed_codes:
                     return False
         return True
+
+    @classmethod
+    def _bind_web_query_to_scope(
+        cls,
+        arguments: Dict[str, Any],
+        scope: Optional[Scope],
+        resolver: Optional[Callable[[str], Optional[str]]],
+    ) -> Optional[Dict[str, Any]]:
+        """Bind every scoped web query to server-owned company identity.
+
+        ``web_search.query`` is free text, so it cannot use the structured-argument
+        guard above.  For frozen company scopes, reject every query mention that
+        resolves to a company outside Scope, then prefix the provider query with the
+        frozen company identities.  Whole-corpus queries retain the legacy text
+        unchanged; they deliberately have no company boundary to bind.
+        """
+        if scope is None or scope.mode == "whole_corpus":
+            return arguments
+        query = arguments.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return None
+        allowed_codes = {report_id.split(":", 1)[0] for report_id in scope.report_ids}
+        allowed_codes.update(company.code for company in scope.companies)
+        if any(code not in allowed_codes for code in cls._query_identity_codes(query, resolver)):
+            return None
+        identities = [f"{company.name}（{company.code}）" for company in scope.companies]
+        identities.extend(code for code in sorted(allowed_codes) if code not in {company.code for company in scope.companies})
+        bound = dict(arguments)
+        bound["query"] = f"范围限定公司：{'、'.join(identities)}；{query.strip()}"
+        return bound
+
+    @staticmethod
+    def _query_identity_codes(
+        query: str, resolver: Optional[Callable[[str], Optional[str]]],
+    ) -> set[str]:
+        """Resolve explicit codes and Chinese company-name/alias mentions in a query.
+
+        The resolver remains the single company identity authority used by the
+        executor.  Chinese blocks are additionally split into bounded substrings so
+        names or aliases adjacent to words such as ``公告`` are still checked.
+        """
+        codes = set(re.findall(r"(?<!\d)(\d{6})(?!\d)", query))
+        if resolver is None:
+            return codes
+        candidates = set(re.findall(r"[\u4e00-\u9fff]{2,12}", query))
+        for block in tuple(candidates):
+            for length in range(2, min(12, len(block)) + 1):
+                candidates.update(block[start:start + length] for start in range(len(block) - length + 1))
+        for candidate in candidates:
+            try:
+                resolved = resolver(candidate)
+            except Exception:
+                continue
+            if isinstance(resolved, str) and re.fullmatch(r"\d{6}", resolved):
+                codes.add(resolved)
+        return codes
 
     @staticmethod
     def _identity_code(

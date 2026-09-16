@@ -1,4 +1,7 @@
+import json
 import time
+
+import pytest
 
 from financial_report_fetcher.rag.qa import RagQA, SUPPLEMENT_REQUEST_TOOL
 from webapp.chat_models import Scope, SourcePolicy, ToolPolicy
@@ -49,7 +52,7 @@ def test_realtime_policy_rejects_unapproved_tool_name():
 
 
 def test_structured_tool_result_is_emitted_for_json_object():
-    events = list(RagQA(_Store(), _AI([_tool("web_search")]), tool_executor=lambda *_: '{"price": 10}').answer_stream("今天如何？", scope=_scope(), tool_policy=_policy("realtime_market", ("web_search",)), tools=[{"type": "function", "function": {"name": "web_search"}}]))
+    events = list(RagQA(_Store(), _AI([_tool("web_search", '{"query":"农业银行 行情"}')]), tool_executor=lambda *_: '{"price": 10}').answer_stream("今天如何？", scope=_scope(), tool_policy=_policy("realtime_market", ("web_search",)), tools=[{"type": "function", "function": {"name": "web_search"}}]))
     assert any(event["type"] == "structured_tool_result" for event in events)
     assert events[-1]["tool_policy_intent"] == "realtime_market"
 
@@ -90,6 +93,62 @@ def test_scope_rejects_tool_call_with_another_company_name():
         event["type"] == "tool_result" and event["ok"] is False and "范围" in event["summary"]
         for event in events
     )
+
+
+@pytest.mark.parametrize("query", ("长江电力 公告", "600900 公告", "长电 公告"))
+def test_scope_rejects_out_of_scope_web_query_identity(query):
+    """冻结公司范围时，网页自由文本中可解析的范围外身份绝不抵达执行器。"""
+    executed = []
+    events = list(RagQA(
+        _Store(), _AI([_tool("web_search", json.dumps({"query": query}))]),
+        tool_executor=lambda *args: executed.append(args) or '{"source":"web_search","results":[]}',
+        company_code_resolver=lambda value: {
+            "农业银行": "601288", "农行": "601288", "长江电力": "600900", "长电": "600900",
+        }.get(value),
+    ).answer_stream(
+        "农业银行异动原因？", scope=_scope(),
+        tool_policy=_policy("event_attribution", ("web_search",)),
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+    ))
+
+    assert executed == []
+    assert any(
+        event["type"] == "tool_result" and event["ok"] is False and "范围" in event["summary"]
+        for event in events
+    )
+
+
+def test_scope_binds_in_scope_web_query_and_keeps_event_search_available():
+    executed = []
+    events = list(RagQA(
+        _Store(), _AI([_tool("web_search", '{"query": "农行 公告"}')]),
+        tool_executor=lambda *args: executed.append(args) or '{"source":"web_search","results":[]}',
+        company_code_resolver=lambda value: {"农业银行": "601288", "农行": "601288"}.get(value),
+    ).answer_stream(
+        "农业银行异动原因？", scope=_scope(),
+        tool_policy=_policy("event_attribution", ("web_search",)),
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+    ))
+
+    assert executed == [("web_search", {"query": "范围限定公司：农业银行（601288）；农行 公告"})]
+    assert any(event["type"] == "tool_call" for event in events)
+
+
+def test_whole_corpus_web_query_is_not_narrowed():
+    executed = []
+    query = "长江电力 公告"
+    events = list(RagQA(
+        _Store(), _AI([_tool("web_search", json.dumps({"query": query}))]),
+        tool_executor=lambda *args: executed.append(args) or '{"source":"web_search","results":[]}',
+        company_code_resolver=lambda value: {"长江电力": "600900"}.get(value),
+    ).answer_stream(
+        "长江电力异动原因？", scope=Scope.whole_corpus(),
+        tool_policy=_policy("event_attribution", ("web_search",)),
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+    ))
+
+    assert executed == [("web_search", {"query": query})]
+    assert any(event["type"] == "tool_call" for event in events)
 
 
 def test_scope_accepts_tool_call_with_the_scoped_company_name():
