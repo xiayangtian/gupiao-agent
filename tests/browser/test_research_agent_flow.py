@@ -26,6 +26,18 @@ def _wait_for_chat_text(browser_session, needle, timeout=12.0):
     return _chat_text(browser_session)
 
 
+def _wait_for_resume_button_count(browser_session, expected, timeout=12.0):
+    """轮询「继续研究」按钮数量：完成/不可恢复的运行不得留下死按钮。"""
+    deadline = time.monotonic() + timeout
+    count = None
+    while time.monotonic() < deadline:
+        count = _eval(browser_session, "JSON.stringify({count:document.querySelectorAll('[data-chat-action=\"resume-research\"]').length})")["count"]
+        if count == expected:
+            return count
+        time.sleep(0.25)
+    return count
+
+
 def _research(actual_app_url):
     return _chat_stream(actual_app_url, {
         "question": "请制定农业银行的研究计划", "scope_mode": "company_only",
@@ -39,8 +51,10 @@ def test_complex_question_shows_plan_and_completed_steps(browser_session, actual
     done = next(event["data"] for event in events if event["event"] == "done")
     assert done["run"]["research_run_id"]
     _run_browser(browser_session, "open", actual_app_url + "/#/chat")
-    rendered = _eval(browser_session, f"""(async () => {{ await openChatSession({json.dumps(session_id)}); await new Promise(r=>setTimeout(r,200)); return JSON.stringify({{text:document.querySelector('#chat-history').textContent, overflow:document.documentElement.scrollWidth > window.innerWidth}}); }})()""")
+    rendered = _eval(browser_session, f"""(async () => {{ await openChatSession({json.dumps(session_id)}); await new Promise(r=>setTimeout(r,200)); return JSON.stringify({{text:document.querySelector('#chat-history').textContent, overflow:document.documentElement.scrollWidth > window.innerWidth, resume:document.querySelectorAll('[data-chat-action="resume-research"]').length}}); }})()""")
     assert "研究计划" in rendered["text"] and "已完成" in rendered["text"] and rendered["overflow"] is False
+    # 已完成的研究运行不得留下点击后必然失败的「继续研究」死按钮。
+    assert rendered["resume"] == 0
 
 
 def test_stop_marks_research_stopped_and_reopen_preserves_steps(browser_session, actual_app_url):
@@ -71,6 +85,8 @@ def test_resume_retries_failed_research_step_through_browser_action(browser_sess
     _eval(browser_session, "document.querySelector('[data-chat-action=\"resume-research\"]').click(); JSON.stringify({clicked:true})")
     after = _wait_for_chat_text(browser_session, "已基于范围内披露恢复研究。")
     assert "已基于范围内披露恢复研究。" in after
+    # 恢复成功后该运行已完成：旧按钮必须消失，不得留下禁用/失效的恢复入口。
+    assert _wait_for_resume_button_count(browser_session, 0) == 0
 
 
 def test_research_layout_renders_without_overflow_at_three_viewports(browser_session, actual_app_url):

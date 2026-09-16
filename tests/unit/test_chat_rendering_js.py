@@ -445,6 +445,25 @@ def test_research_rendering_shows_business_steps_acceptance_and_recovery_only_wh
     assert result['completed'] == ''
 
 
+def test_research_recovery_hides_dead_button_for_finished_or_unavailable_runs():
+    """完成/不可恢复的研究运行不得再渲染点击后必然失败的「继续研究」按钮。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const stopped = {{status:'stopped', research_run_id:'r1', research_summary:{{status:'stopped', resume_from_step_id:'比较'}}}};
+        const finished = {{status:'stopped', research_run_id:'r1', research_summary:{{status:'completed'}}}};
+        const withCompletedRun = r.renderResearchRecovery({{status:'failed', research_run_id:'r1'}}, {{status:'completed'}});
+        const liveStopped = r.renderResearchRecovery({{status:'stopped', research_run_id:'r1'}}, {{status:'running'}});
+        console.log(JSON.stringify({{stopped:r.renderResearchRecovery(stopped), finished:r.renderResearchRecovery(finished), withCompletedRun, liveStopped}}));
+        """
+    )
+    assert '继续研究' in result['stopped'] and '从步骤：比较' in result['stopped']
+    assert result['finished'] == ''
+    assert result['withCompletedRun'] == ''
+    # 用户刚停止、持久化状态还没回到前端的运行仍要保留入口，不能把停止后的恢复入口也删掉。
+    assert '继续研究' in result['liveStopped']
+
+
 def test_research_steps_render_public_running_failed_and_blocked_states():
     result = _run_node(
         f"""

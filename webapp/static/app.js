@@ -3214,7 +3214,7 @@ function appendAssistantRun(sel, message) {
   wrapper.innerHTML = parts.join('');
   // 补充摘要紧跟证据之后、运行状态之前，重载历史与实时完成走同一条路径。
   appendSupplementSummary(wrapper, run);
-  var recoveryHtml = rendering ? rendering.renderResearchRecovery(run) : '';
+  var recoveryHtml = rendering ? rendering.renderResearchRecovery(run, message && message.research_run) : '';
   if (recoveryHtml) wrapper.insertAdjacentHTML('beforeend', recoveryHtml);
   if (statusHtml) wrapper.insertAdjacentHTML('beforeend', statusHtml);
   box.appendChild(wrapper);
@@ -3296,6 +3296,8 @@ function bindChatRunActions() {
 
 async function resumeResearch(runId, button) {
   if (!runId || !chatSessionId || !button) return;
+  var originalLabel = button.textContent;
+  var finished = false;
   button.disabled = true;
   button.textContent = '正在继续研究…';
   try {
@@ -3310,8 +3312,16 @@ async function resumeResearch(runId, button) {
       research_step_completed: function (data) { button.textContent = '已完成：' + (data.label || '研究步骤'); },
       research_step_failed: function (data) { button.textContent = '步骤失败：' + (data.label || '研究步骤'); },
       research_blocked: function (data) { button.textContent = data.reason || '研究受阻'; },
-      done: function (data) { appendAssistantRun('#chat-history', { content: data.answer, run: data.run }); }
+      done: function (data) { finished = true; appendAssistantRun('#chat-history', { content: data.answer, run: data.run }); }
     });
+    if (finished) {
+      // 本次恢复的结果已由新追加的回答（及其自身的恢复入口）表达；旧按钮可能已经
+      // 指向一个不可恢复的运行，保留它就会变成点击必然失败的死按钮。
+      if (button.parentNode) button.parentNode.removeChild(button);
+    } else {
+      button.textContent = originalLabel;
+      button.disabled = false;
+    }
   } catch (_) {
     button.textContent = '继续研究失败';
     button.disabled = false;
