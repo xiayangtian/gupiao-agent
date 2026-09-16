@@ -219,6 +219,7 @@ class _FakeRagQA:
         priority_report_id=None,
         scope=None,
         run_id=None,
+        tool_policy=None,
     ):
         question = str(question or "").strip()
         if "补报验收" in question and not getattr(self, "_supplement_requested", False):

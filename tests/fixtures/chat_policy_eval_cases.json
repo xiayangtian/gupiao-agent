@@ -1,0 +1,10 @@
+[
+  {"question":"农业银行半年报营收是多少？","scope":"company_only","intent":"report_fact","allowed_sources":["local_pdf"],"expected_fact_ids":["pdf_p40"],"forbidden_report_ids":["600900:2026-06-30:semi_annual"],"expected_status":"passed"},
+  {"question":"农业银行近两年营收趋势？","scope":"company_only","intent":"company_trend","allowed_sources":["local_pdf"],"expected_fact_ids":["pdf_trend"],"forbidden_report_ids":[],"expected_status":"passed"},
+  {"question":"农业银行与同业对比？","scope":"company_industry","intent":"industry_benchmark","allowed_sources":["local_pdf"],"expected_fact_ids":["peer_sample"],"forbidden_report_ids":[],"expected_status":"passed"},
+  {"question":"农业银行今天涨跌如何？","scope":"company_only","intent":"realtime_market","allowed_sources":["market_data","web"],"expected_fact_ids":["quote_as_of"],"forbidden_report_ids":[],"expected_status":"partial"},
+  {"question":"农业银行异动原因？","scope":"company_only","intent":"event_attribution","allowed_sources":["web","market_data"],"expected_fact_ids":[],"no_fact_outcome":true,"forbidden_report_ids":[],"expected_status":"partial"},
+  {"question":"长江电力营收是多少？","scope":"company_only","intent":"report_fact","allowed_sources":["local_pdf"],"expected_fact_ids":[],"no_fact_outcome":true,"forbidden_report_ids":["600900:2026-06-30:semi_annual"],"expected_status":"blocked"},
+  {"question":"农业银行营收冲突如何解释？","scope":"company_only","intent":"report_fact","allowed_sources":["local_pdf"],"expected_fact_ids":["revenue_pdf","revenue_external"],"forbidden_report_ids":[],"expected_status":"partial"},
+  {"question":"农业银行实时数据工具失败怎么办？","scope":"company_only","intent":"realtime_market","allowed_sources":["market_data"],"expected_fact_ids":[],"no_fact_outcome":true,"forbidden_report_ids":[],"expected_status":"partial"}
+]
