@@ -48,3 +48,11 @@
 - GREEN：`python3 -m pytest tests/browser/test_research_agent_flow.py -q`，4 passed；`python3 -m pytest -q`，1029 passed、2 skipped、3 warnings；`git diff --check` 通过；`python3 scripts/check_css.py` 通过。
 - 真实浏览器 QA：agent-browser 访问真实 fixture 应用并在 1280x900、768x1000、390x844 打开重开研究会话；三档均 `overflow=false`。浏览器回归同时验证控制台/页面错误为空。
 - 偏离：浏览器 fixture 使用确定性本地协作方，不调用 AI、MCP、网页或真实 RAG 摄取。
+
+## Stop/Resume corrective implementation (authorized)
+
+- 裁决：协调方确认 queue producer + disconnect watcher 是已确认 Task 5 的最小必要实现。
+- RED：原研究流在 `await asyncio.to_thread(...)` 期间无法观察断开；历史重开也未取回完整计划。
+- GREEN：`python3 -m pytest tests/browser/test_research_agent_flow.py tests/unit/test_server_api.py -q -k research`，5 passed、143 deselected；`git diff --check` 与 CSS 检查通过。
+- 实现边界：研究独立 producer thread 经 asyncio queue 转发事件，断开时设置同一 stop_event；会话历史仅依 owner-scoped endpoint 获取完整 ResearchRun；未引入依赖或 M4 功能。
+- 风险：默认 fixture 研究步骤非常快，浏览器无法稳定在中途断开；停止/重试的依赖与缓存语义由 Executor 单元回归覆盖。

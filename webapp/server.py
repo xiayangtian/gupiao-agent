@@ -1971,15 +1971,32 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 })
             yield _sse("run_started", {"run_id": run_id})
             if research_fallback:
-                # Research work is synchronous only inside its producer thread;
-                # ordinary chat streams retain their independent producer path.
-                research_events: list[dict[str, Any]] = []
+                # Research runs in their own producer thread.  The async side
+                # continuously observes disconnects and cooperatively sets the
+                # executor event, so a long research never blocks normal chat SSE.
+                loop = asyncio.get_running_loop()
+                research_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+                stop_event = threading.Event()
                 agent = ResearchAgent(persist=lambda research_run: chat_store.save_research_run(sid, research_run))
-                research_answer = await asyncio.to_thread(
+                def emit_research(event: dict[str, Any]) -> None:
+                    loop.call_soon_threadsafe(research_events.put_nowait, event)
+                research_task = asyncio.create_task(asyncio.to_thread(
                     agent.run, body.question, scope, decision, policy,
-                    stop_event=threading.Event(), emit=research_events.append,
-                )
-                for event in research_events:
+                    stop_event=stop_event, emit=emit_research,
+                ))
+                disconnected = False
+                while not research_task.done():
+                    if await request.is_disconnected():
+                        stop_event.set()
+                        disconnected = True
+                    try:
+                        event = await asyncio.wait_for(research_events.get(), timeout=0.05)
+                    except asyncio.TimeoutError:
+                        continue
+                    yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
+                research_answer = await research_task
+                while not research_events.empty():
+                    event = research_events.get_nowait()
                     yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
                 run = replace(
                     research_answer, id=run_id, created_at=created_at,

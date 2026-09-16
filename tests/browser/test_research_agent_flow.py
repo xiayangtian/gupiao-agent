@@ -24,7 +24,7 @@ def test_complex_question_shows_plan_and_completed_steps(browser_session, actual
     assert done["run"]["research_run_id"]
     _run_browser(browser_session, "open", actual_app_url + "/#/chat")
     rendered = _eval(browser_session, f"""(async () => {{ await openChatSession({json.dumps(session_id)}); await new Promise(r=>setTimeout(r,200)); return JSON.stringify({{text:document.querySelector('#chat-history').textContent, overflow:document.documentElement.scrollWidth > window.innerWidth}}); }})()""")
-    assert "已完成" in rendered["text"] and rendered["overflow"] is False
+    assert "研究计划" in rendered["text"] and "已完成" in rendered["text"] and rendered["overflow"] is False
 
 
 def test_stop_marks_research_stopped_and_reopen_preserves_completed_steps(actual_app_url):

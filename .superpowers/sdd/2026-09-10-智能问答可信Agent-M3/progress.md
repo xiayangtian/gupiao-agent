@@ -26,3 +26,5 @@
 
 - 浏览器 QA：1280x900、768x1000、390x844 均无横向溢出；控制台/页面错误为空。
 - 完整验证：`python3 -m pytest -q`：1029 passed, 2 skipped, 3 warnings；`git diff --check` 通过；`python3 scripts/check_css.py` 通过。
+- 已按授权修正：研究线程通过 queue 向 SSE 转发，断开时协作取消；历史按会话读取完整研究运行。
+- corrective GREEN：`python3 -m pytest tests/browser/test_research_agent_flow.py tests/unit/test_server_api.py -q -k research`：5 passed，143 deselected；CSS/diff 检查通过。
