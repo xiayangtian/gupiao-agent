@@ -174,3 +174,59 @@
 - 并行批次在停止信号到达时只把当前在途步骤标记 stopped；失败路径的 sibling 结果保留仍由既有回归覆盖。
 - 未推送、未合并、未实现 M4；`docs/FEATURE-CATALOG.md`/`README.md` 的条目更新仍在合入 `main` 时执行。
 - 工作台账工具（`create_task_ledger_entry`/`update_task_ledger_entry`）不在本次执行者工具集内，未登记台账，需由协调方补录。
+
+## 第三轮复审 P2 修复（2026-09-16，commit `4770ef5`）
+
+### Review 结论（单个 P2）
+
+恢复从 normalize/compare 起步时，webapp/server.py 的恢复流每次新建空的 `_RagRunState`，`normalize_research`/`compare_research` 只从 `state.facts` 派生，因此 `conflicts` 为空；首次运行会检出冲突。后果是恢复后运行可能被判 completed 而漏掉冲突披露，违背 M3 的“冲突必须披露”不变量。
+
+### 根因
+
+- 首次运行：`retrieve` 步骤经 `_relay_rag_event` 把归一事实累加到 `state.facts`，`compare_research` 用同一份内存状态调 `detect_conflicts`，冲突写进 compare 步骤产物，`ResearchAgent._evidence` 再把步骤产物汇总进 `AnswerRun`，`ClaimVerifier` 因此产生 `undisclosed_conflict`（partial）并披露。
+- 恢复运行：`retrieve` 已是 completed，executor 的 `_ready` 不会重跑它（这是刻意设计，避免重复外部调用），事实只存在于已落盘步骤目录 `run.step_runs`；而恢复流新建的 `state.facts` 为空，compare 步骤用空集调 `detect_conflicts`，于是 `conflicts=[]`、写盘 compare 步骤无冲突、`ClaimVerifier` 不发 `undisclosed_conflict`，验证可判 `passed`、`ResearchAgent` 把运行转成 `completed`——恢复后的 conflicts/verification 与首次运行不一致，冲突披露丢失。
+- 上一轮 P2-3 修复只解决了“恢复用空 lambda handler”，未覆盖“恢复起步步骤晚于检索”这一支。
+
+### RED（最小失败回归）
+
+新增 `tests/unit/test_server_api.py::test_resume_from_normalize_detects_conflicts_from_completed_retrieve`：先用带冲突外部取值的生产研究流跑一次“首次运行”作为参照（断言首次 `conflicts` 非空、`verification_report.status == "partial"`、status `partial`），再用首次运行真实落盘的计划与已完成 `retrieve` 步骤构造“检索已完成、normalize 未完成”的可恢复运行，走真实恢复端点，断言恢复后的 conflicts 非空、验证结论与首次运行一致、status 不为 completed、持久化 compare 步骤带 conflicts。
+
+```
+python3 -m pytest tests/unit/test_server_api.py -q -k resume_from_normalize
+>       assert resumed["conflicts"], resumed["facts"]
+E       AssertionError: [{'metric': 'revenue', 'value': 100.0, ...}, {'metric': 'revenue', 'value': 120.0, ...}]
+E       assert []
+tests/unit/test_server_api.py:3444: AssertionError
+1 failed, 151 deselected, 3 warnings in 1.38s
+```
+
+事实非空而冲突为空：正是“恢复后漏掉冲突披露”的可复现证据（修复前的恢复运行会被判 completed）。
+
+### 修复（`webapp/server.py`）
+
+- `_research_step_handlers` 新增内部函数 `merged_facts(current_run: ResearchRun)`：把本次流累积的 `state.facts` 与 `current_run.step_runs` 中已完成步骤已落盘的事实合并，并按 Fact 值去重；`Fact.from_dict` 失败的坏记录跳过（与 `ResearchAgent._evidence` 同一容错策略）。
+- `normalize_research`/`compare_research` 改用已有的 `run` 形参（此前为 `_run`）取合并后的事实：normalize 的步骤产物与 compare 的 `detect_conflicts` 都基于“当前流 + 已完成步骤”。
+- 不新增持久化字段、不改公开 SSE 契约、不新增依赖、不动 executor/模型/路由。
+
+### GREEN
+
+```
+python3 -m pytest tests/unit/test_server_api.py -q -k resume_from_normalize
+1 passed, 151 deselected, 3 warnings in 1.14s
+```
+
+临时观测（仅用于记录数值，已移除）：首次运行与恢复运行均为 `status=partial`、`verification_report.status=partial`，恢复 run 的 `conflicts` 为 1 条 `revenue` 冲突，facts 为 revenue 100/120。
+
+### 验证记录（第三轮）
+
+- 相关单测：`python3 -m pytest tests/unit/test_research_models.py tests/unit/test_research_planner.py tests/unit/test_research_executor.py tests/unit/test_research_agent.py tests/unit/test_research_store.py tests/unit/test_chat_rendering_js.py tests/unit/test_server_api.py -q`：196 passed, 3 warnings。
+- 研究/恢复 API 子集：`python3 -m pytest tests/unit/test_server_api.py -q -k 'research or resume'`：15 passed, 137 deselected。
+- 全量：`python3 -m pytest -q`：1048 passed, 2 skipped, 3 warnings（含 tests/browser；skip 为宿主机 `Chrome --dump-dom` 超时与未设置 `GOLDEN_REPORT_DIR`，与本次改动无关）。
+- `git diff --check`：通过；`python3 scripts/check_css.py`：`webapp/static/style.css 结构检查通过`。
+
+### 偏离与风险（第三轮）
+
+- 去重按 Fact 值（frozen dataclass，含 evidence_ids 元组）进行：首次运行的 facts/conflicts 结构与修复前逐字一致（首次运行时 `state.facts` 与已完成检索步骤的 facts 相同），只有“恢复时当前累积状态为空”的路径发生行为变化。
+- 本修复保证 compare 步骤在恢复后重新得出与首次运行一致的 conflicts；`AnswerRun.conflicts` 仍由研究步骤产物派生（`ResearchAgent._evidence`），未改动 `_evidence` 的重复事实呈现（首次运行原本就在 retrieve 与 normalize 两个步骤各存一份相同事实，属既有行为）。
+- 未推送、未合并、未实现 M4；`docs/FEATURE-CATALOG.md`/`README.md` 的条目更新仍在合入 `main` 时执行。
+- 工作台账工具（`create_task_ledger_entry`/`update_task_ledger_entry`）不在本次执行者工具集内，未登记台账，需由协调方补录。

@@ -14,6 +14,7 @@
 | 7 | 已完成 | 浏览器用例缺失 | 1029 passed, 2 skipped | `f6934ff` | 本地 fixture，无外网 |
 | 最终审查修复 | 已完成 | 见下方 RED | 1035 passed, 2 skipped | `3052017`、`87dbe48` | 无 |
 | 第二轮复审修复 | 已完成 | 见下方 RED | 1047 passed, 2 skipped | `5cb6674`、`922f8ca`、`eb421e7` | 无 |
+| 第三轮复审 P2 修复 | 已完成 | 见下方 RED | 1048 passed, 2 skipped | `4770ef5` | 无 |
 
 ## 命令日志
 
@@ -84,3 +85,26 @@
 - 无提问轮次的历史运行（只有持有 run id 的助手消息）改为 409 业务化拒绝，是 fail-closed 的刻意行为，不是兼容性回归（此前会拿会话里任意最新问题重放）。
 - P2-4 只保证并行批次在停止信号下落到合法可恢复终态；停止瞬间尚未处理的 sibling 结果不纳入本步（失败路径的 sibling 保留仍由既有 `parallel_failure_persists_*` 回归覆盖）。
 - `execute()` 对 `stopped/partial/failed` 现在等价于 `resume()`；对 `completed/verifying/awaiting_input` 仍抛 `ValueError`（终态不可执行）。
+
+## 第三轮复审 P2 修复（review → 根因 → RED/GREEN）
+
+约束：不实现 M4、不推送/合并、不调度子代理；未新增持久化字段、未改公开 SSE 契约、未放宽 Scope/ToolPolicy、未用 fake 绕过生产 handler。
+
+| 复审项 | 根因 | RED（最小失败回归） | GREEN | 提交 |
+|---|---|---|---|---|
+| P2 恢复从 normalize/compare 起步时 conflicts 为空，运行可能被判 completed 而漏掉冲突披露 | 恢复流每次新建空 `_RagRunState`；`normalize_research`/`compare_research` 只从 `state.facts` 派生。检索步骤已完成时它不会重跑，事实只留在已完成步骤目录 `run.step_runs` 里，于是 `detect_conflicts` 得到空集，`ClaimVerifier` 不再产生 `undisclosed_conflict`，恢复后的 `verification` 与 status 与首次运行不一致 | `python3 -m pytest tests/unit/test_server_api.py -q -k resume_from_normalize` → `1 failed`（`assert resumed["conflicts"]`：`[]`，而 `resumed["facts"]` 已含 revenue 100/120 两条） | 同命令 → `1 passed`（恢复后 conflicts 非空、verification partial、status partial，与首次运行一致） | `4770ef5` |
+
+### 命令日志（第三轮修复）
+
+- RED `python3 -m pytest tests/unit/test_server_api.py -q -k resume_from_normalize`：`1 failed, 151 deselected`；失败行为 `assert []`（`resumed["conflicts"]` 为空，`resumed["facts"]` 为 revenue 100/120 两条事实），首次运行的 `conflicts`/`partial` 断言此前已通过。
+- GREEN `python3 -m pytest tests/unit/test_server_api.py -q -k resume_from_normalize`：`1 passed, 151 deselected`。
+- 相关单测：`python3 -m pytest tests/unit/test_research_models.py tests/unit/test_research_planner.py tests/unit/test_research_executor.py tests/unit/test_research_agent.py tests/unit/test_research_store.py tests/unit/test_chat_rendering_js.py tests/unit/test_server_api.py -q`：196 passed, 3 warnings。
+- 研究/恢复 API 子集：`python3 -m pytest tests/unit/test_server_api.py -q -k 'research or resume'`：15 passed, 137 deselected。
+- 全量：`python3 -m pytest -q`：1048 passed, 2 skipped, 3 warnings（skip 与本次改动无关：宿主机 `Chrome --dump-dom` 超时、`GOLDEN_REPORT_DIR` 未设置）。
+- `git diff --check`：通过；`python3 scripts/check_css.py`：`webapp/static/style.css 结构检查通过`。
+
+### 风险与偏离（第三轮）
+
+- 合并按 Fact 值去重，因此首次运行的 facts/conflicts 结构与本次修复前逐字一致（首次运行时 `state.facts` 与已完成检索步骤的 facts 相同）；只有「恢复时当前累积状态为空」的路径发生变化。
+- 本修复只保证 compare 步骤在恢复后重新得出与首次运行一致的 conflicts；`AnswerRun.conflicts` 仍由研究步骤产物派生（`ResearchAgent._evidence`），未新增字段。
+- 台账工具（`create_task_ledger_entry`/`update_task_ledger_entry`）不在本次执行者工具集内，未登记台账，需由协调方补录。
