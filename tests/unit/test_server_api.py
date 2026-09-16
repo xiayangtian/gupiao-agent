@@ -3120,8 +3120,8 @@ def test_m2_blocked_run_replaces_only_the_unsupported_claims(client, env, monkey
     assert "未找到可核验的披露" in run["content"]
 
 
-def test_m2_research_task_answers_with_the_policy_fallback_message(client, env, monkeypatch):
-    """research_task 在 M2 无工具可用：按策略 fallback 如实说明，不调用模型。"""
+def test_research_task_streams_a_bounded_plan_without_calling_rag_model(client, env, monkeypatch):
+    """M3 research_task 走受限计划，且不把旧 RAG 流当作长研究执行器。"""
     class NoCallRag:
         def answer_stream(self, question, **kwargs):
             raise AssertionError("M2 的研究任务不应调用模型或工具")
@@ -3136,9 +3136,11 @@ def test_m2_research_task_answers_with_the_policy_fallback_message(client, env, 
     fallback = _event(events, "policy_fallback")
     assert fallback["intent"] == "research_task"
     assert "M3" in fallback["message"]
+    assert _event(events, "research_plan")["plan"]["acceptance"]
     run = _event(events, "done")["run"]
-    assert run["status"] == "partial"
-    assert run["content"] == fallback["message"]
+    assert run["status"] == "completed"
+    assert run["research_run_id"]
+    assert "已按计划" in run["content"]
     assert run["tool_policy"]["fallback_message"] == fallback["message"]
 
 

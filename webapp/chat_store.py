@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
 from webapp.chat_models import AnswerRun, ChatMessage
+from webapp.research_models import ResearchRun
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class ChatStore:
                     # 旧版或损坏的 supplements 字段（如数组）一律忽略，不影响会话读取。
                     supplements = {}
                 return {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "sessions": [
                         self._normalize_session(session)
                         for session in data["sessions"]
@@ -72,13 +73,19 @@ class ChatStore:
                         for key, value in supplements.items()
                         if isinstance(value, Mapping)
                     },
+                    "research_runs": {
+                        str(key): dict(value)
+                        for key, value in (data.get("research_runs") or {}).items()
+                        if isinstance(value, Mapping) and isinstance(value.get("session_id"), str)
+                        and isinstance(value.get("run"), Mapping)
+                    } if isinstance(data.get("research_runs", {}), Mapping) else {},
                 }
         except (OSError, json.JSONDecodeError, ValueError):
             pass
-        return {"schema_version": 2, "sessions": [], "supplements": {}}
+        return {"schema_version": 3, "sessions": [], "supplements": {}, "research_runs": {}}
 
     def _save(self) -> None:
-        self._data["schema_version"] = 2
+        self._data["schema_version"] = 3
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -234,6 +241,29 @@ class ChatStore:
                 return None
             return json.loads(json.dumps(record, ensure_ascii=False))
 
+    def save_research_run(self, sid: str, run: ResearchRun) -> Optional[Dict[str, Any]]:
+        """Persist a complete M3 run under its owner; no cross-session lookup exists."""
+        if not isinstance(run, ResearchRun):
+            raise ValueError("run must be a ResearchRun")
+        with self._lock:
+            if not any(session["id"] == sid for session in self._data["sessions"]):
+                return None
+            record = {"session_id": sid, "run": run.to_dict()}
+            self._data.setdefault("research_runs", {})[run.id] = record
+            self._save()
+            return json.loads(json.dumps(record, ensure_ascii=False))
+
+    def get_research_run(self, sid: str, run_id: str) -> Optional[ResearchRun]:
+        """Return only a run owned by sid; unknown or foreign records are invisible."""
+        with self._lock:
+            record = self._data.get("research_runs", {}).get(run_id)
+            if not isinstance(record, Mapping) or record.get("session_id") != sid:
+                return None
+            try:
+                return ResearchRun.from_dict(record.get("run", {}))
+            except ValueError:
+                return None
+
     def delete_session(self, sid: str) -> bool:
         """删除会话；不存在返回 False"""
         with self._lock:
@@ -244,6 +274,10 @@ class ChatStore:
             # 补充授权请求属于会话，随会话一并删除，避免跨会话残留。
             self._data["supplements"] = {
                 key: value for key, value in self._data["supplements"].items()
+                if value.get("session_id") != sid
+            }
+            self._data["research_runs"] = {
+                key: value for key, value in self._data.get("research_runs", {}).items()
                 if value.get("session_id") != sid
             }
             if len(self._data["sessions"]) == before:

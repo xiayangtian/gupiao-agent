@@ -76,6 +76,7 @@ from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
+from .research_agent import ResearchAgent
 from .chat_supplement import (
     SupplementCandidate,
     SupplementCandidateResolver,
@@ -562,6 +563,10 @@ class StreamChatRequest(BaseModel):
     use_mcp: bool = True             # 允许模型调用 MCP 工具获取更多信息
     focus_report: Optional[Dict[str, str]] = None  # {code, period}：提升该报告检索权重
     scope_mode: Literal["auto", "company_only", "company_industry", "whole_corpus"] = "auto"
+
+
+class ResumeResearchRequest(BaseModel):
+    session_id: str
 
 
 class RagIngestOneRequest(BaseModel):
@@ -1966,15 +1971,27 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 })
             yield _sse("run_started", {"run_id": run_id})
             if research_fallback:
-                run = _persist("partial", research_fallback)
+                # Research work is synchronous only inside its producer thread;
+                # ordinary chat streams retain their independent producer path.
+                research_events: list[dict[str, Any]] = []
+                agent = ResearchAgent(persist=lambda research_run: chat_store.save_research_run(sid, research_run))
+                research_answer = await asyncio.to_thread(
+                    agent.run, body.question, scope, decision, policy,
+                    stop_event=threading.Event(), emit=research_events.append,
+                )
+                for event in research_events:
+                    yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
+                run = replace(
+                    research_answer, id=run_id, created_at=created_at,
+                    completed_at=dt.datetime.now().isoformat(timespec="seconds"),
+                    elapsed_seconds=round(time.perf_counter() - started_at, 3),
+                )
+                chat_store.append_turn(sid, question=body.question, run=run)
+                saved = True
                 yield _sse("done", {
-                    "answer": research_fallback,
-                    "citations": [],
-                    "session_id": sid,
-                    "tools_used": [],
-                    "web_sources": [],
-                    "retrieval_degraded": False,
-                    "run": run.to_dict(),
+                    "answer": run.content, "citations": [], "session_id": sid,
+                    "tools_used": [], "web_sources": [], "retrieval_degraded": False,
+                    "run": run.to_dict(), "research_run": agent.last_run.to_dict() if agent.last_run else None,
                     "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                 })
                 return
@@ -2084,6 +2101,43 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             if not saved:
                 _persist("stopped", "".join(state.answer_parts).strip())
 
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/api/chat/research/{run_id}")
+def get_research_run(run_id: str, session_id: str = Query(...)) -> Dict[str, Any]:
+    run = chat_store.get_research_run(session_id, run_id)
+    if run is None:
+        raise HTTPException(404, "研究运行不存在")
+    return {"run": run.to_dict()}
+
+
+@app.post("/api/chat/research/{run_id}/resume")
+async def resume_research_run(run_id: str, body: ResumeResearchRequest) -> StreamingResponse:
+    research_run = chat_store.get_research_run(body.session_id, run_id)
+    if research_run is None:
+        raise HTTPException(404, "研究运行不存在")
+    if research_run.status not in {"stopped", "partial", "failed"}:
+        raise HTTPException(409, "该研究运行不可恢复")
+    session = chat_store.get_session(body.session_id)
+    if session is None:
+        raise HTTPException(404, "会话不存在")
+    question = _last_user_question(session)
+
+    async def gen():
+        events: list[dict[str, Any]] = []
+        agent = ResearchAgent(persist=lambda saved: chat_store.save_research_run(body.session_id, saved))
+        try:
+            answer = await asyncio.to_thread(agent.resume, research_run, stop_event=threading.Event(), emit=events.append)
+        except ValueError:
+            yield _sse("research_blocked", {"reason": "没有可安全恢复的未完成步骤。"})
+            return
+        for event in events:
+            yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
+        answer = replace(answer, id=uuid.uuid4().hex, created_at=dt.datetime.now().isoformat(timespec="seconds"),
+                         completed_at=dt.datetime.now().isoformat(timespec="seconds"))
+        chat_store.append_turn(body.session_id, question=question, run=answer)
+        yield _sse("done", {"session_id": body.session_id, "run": answer.to_dict(), "answer": answer.content})
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 

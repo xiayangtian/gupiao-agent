@@ -27,3 +27,10 @@
 - GREEN：`python3 -m pytest tests/unit/test_research_agent.py tests/unit/test_research_executor.py tests/unit/test_research_models.py -q`，11 passed。
 - 实现：串联 Planner、Executor 与 M2 ClaimVerifier；仅发出业务研究事件；核验 blocked 时严格降为 partial，不创建计划的简单意图走普通回答。
 - 偏离：无。
+
+## Task 5 — SSE、持久化与恢复端点
+
+- RED：研究存储/API 契约在新增实现前不可导入；现有 M2 research fallback 断言已更新为 M3 SSE 契约。
+- GREEN：`python3 -m pytest tests/unit/test_research_store.py tests/unit/test_research_agent.py tests/unit/test_server_api.py -q -k 'research or agent'`，5 passed、143 deselected。
+- 实现：ResearchRun 以会话 owner 索引持久化；研究流发出计划/步骤/终态事件；读取和恢复端点均按 session_id 隔离，普通 SSE 仍由既有独立 producer 路径服务。
+- 偏离：未使用 TaskManager 承载普通流式研究，避免改变其普通任务语义。
