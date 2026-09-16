@@ -36,3 +36,21 @@ def test_structured_tool_result_is_emitted_for_json_object():
     events = list(RagQA(_Store(), _AI([_tool("web_search")]), tool_executor=lambda *_: '{"price": 10}').answer_stream("今天如何？", scope=_scope(), tool_policy=_policy("realtime_market", ("web_search",)), tools=[{"type": "function", "function": {"name": "web_search"}}]))
     assert any(event["type"] == "structured_tool_result" for event in events)
     assert events[-1]["tool_policy_intent"] == "realtime_market"
+
+
+def test_scope_rejects_tool_call_with_another_company_code():
+    executed = []
+    events = list(RagQA(
+        _Store(), _AI([{"id": "1", "name": "get_quote", "arguments": '{"symbol": "600900"}'}]),
+        tool_executor=lambda *args: executed.append(args) or "{}",
+    ).answer_stream(
+        "今天如何？", scope=_scope(),
+        tool_policy=_policy("realtime_market", ("get_quote",)),
+        tools=[{"type": "function", "function": {"name": "get_quote"}}],
+    ))
+
+    assert executed == []
+    assert any(
+        event["type"] == "tool_result" and event["ok"] is False and "范围" in event["summary"]
+        for event in events
+    )

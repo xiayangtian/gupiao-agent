@@ -548,6 +548,11 @@ class RagQA:
                             yield {"type": "tool_result", "name": name, "summary": result, "ok": False}
                             messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
                             continue
+                        if not self._tool_arguments_within_scope(args, scope):
+                            result = "工具调用失败：工具参数超出本次问答范围"
+                            yield {"type": "tool_result", "name": name, "summary": result, "ok": False}
+                            messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+                            continue
                         yield {"type": "reasoning_stage", "stage": "retrieve", "round": round_no,
                                "message": f"正在补充信息：调用 {name}…"}
                         yield {"type": "tool_call", "name": name, "arguments": args}
@@ -642,6 +647,28 @@ class RagQA:
                     "tool_timings": tool_timings,
                 }
                 return
+
+    @staticmethod
+    def _tool_arguments_within_scope(arguments: Dict[str, Any], scope: Optional[Scope]) -> bool:
+        """Reject explicit company/report parameters that escape a frozen Scope.
+
+        Free-text search queries are not identity parameters.  Every structured
+        company identifier supplied to a tool is checked here before its executor
+        can resolve or send it to an external provider.
+        """
+        if scope is None or scope.mode == "whole_corpus":
+            return True
+        allowed_codes = {report_id.split(":", 1)[0] for report_id in scope.report_ids}
+        allowed_codes.update(company.code for company in scope.companies)
+        for key in ("symbol", "code", "company_code", "report_id", "report_ids"):
+            value = arguments.get(key)
+            values = value if isinstance(value, (list, tuple)) else (value,)
+            for item in values:
+                text = str(item or "").strip()
+                code = text.split(":", 1)[0] if key.startswith("report") else text
+                if re.fullmatch(r"\d{6}", code) and code not in allowed_codes:
+                    return False
+        return True
 
     @staticmethod
     def _tool_name(tool: Dict[str, Any]) -> str:

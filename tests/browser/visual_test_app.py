@@ -253,6 +253,70 @@ class _FakeRagQA:
             yield {"type": "delta", "text": "经营活动现金流量净额为 -621.69 亿元"}
             yield {"type": "delta", "text": "（最后一步尚未完成）"}
             return
+        if "实时验收" in question:
+            yield {"type": "tool_call", "name": "get_quote", "arguments": {"symbol": "601288"}}
+            yield {"type": "structured_tool_result", "name": "get_quote", "payload": {
+                "metric": "price", "value": 3.2, "unit": "元/股", "period": "as_of",
+                "period_kind": "point_in_time", "entity_scope": "consolidated",
+                "company_code": "601288", "evidence_ids": ["tool:quote:601288"],
+            }, "ok": True}
+            yield {"type": "tool_result", "name": "get_quote", "summary": '{"price": 3.2}', "ok": True}
+            yield {"type": "delta", "text": "外部参考：价格为 3.2 元/股。"}
+            yield {"type": "done", "answer": "外部参考：价格为 3.2 元/股。", "citations": [],
+                   "web_sources": [], "tools_used": ["get_quote"], "retrieval_report_ids": [],
+                   "retrieval_degraded": False, "model": "browser-acceptance-fake"}
+            return
+        if "公告事件验收" in question:
+            answer = "外部参考：公告事件仍需结合后续披露核对。"
+            yield {"type": "delta", "text": answer}
+            yield {"type": "done", "answer": answer, "citations": [], "tools_used": [],
+                   "web_sources": [{"url": "https://www.abchina.com/cn/announcement/event",
+                                    "title": "农业银行公告", "published_date": "2026-09-16",
+                                    "content": "农业银行公告事件"}], "retrieval_report_ids": [],
+                   "retrieval_degraded": False, "model": "browser-acceptance-fake"}
+            return
+        if "冲突验收" in question:
+            for name, value in (("get_quote", 100), ("web_search", 120)):
+                yield {"type": "tool_call", "name": name, "arguments": {"symbol": "601288"}}
+                yield {"type": "structured_tool_result", "name": name, "payload": {
+                    "metric": "revenue", "value": value, "unit": "亿元", "period": "2026-06-30",
+                    "period_kind": "semi_annual_cumulative", "entity_scope": "consolidated",
+                    "company_code": "601288", "evidence_ids": [f"tool:{name}:{value}"],
+                }, "ok": True}
+                yield {"type": "tool_result", "name": name, "summary": "{}", "ok": True}
+            yield {"type": "delta", "text": "营业收入为 100 亿元。"}
+            yield {"type": "done", "answer": "营业收入为 100 亿元。", "citations": [],
+                   "web_sources": [], "tools_used": ["get_quote", "web_search"], "retrieval_report_ids": [],
+                   "retrieval_degraded": False, "model": "browser-acceptance-fake"}
+            return
+        if "工具失败验收" in question:
+            yield {"type": "tool_call", "name": "get_quote", "arguments": {"symbol": "601288"}}
+            yield {"type": "tool_result", "name": "get_quote", "summary": "工具调用失败：fixture", "ok": False}
+            yield {"type": "delta", "text": "实时数据暂不可用。"}
+            yield {"type": "done", "answer": "实时数据暂不可用。", "citations": [], "web_sources": [],
+                   "tools_used": [], "retrieval_report_ids": [], "retrieval_degraded": False,
+                   "model": "browser-acceptance-fake"}
+            return
+        if "范围越界验收" in question:
+            yield {"type": "tool_call", "name": "get_quote", "arguments": {"symbol": "600900"}}
+            yield {"type": "structured_tool_result", "name": "get_quote", "payload": {
+                "metric": "price", "value": 10, "unit": "元/股", "period": "as_of",
+                "period_kind": "point_in_time", "entity_scope": "consolidated",
+                "company_code": "600900", "evidence_ids": ["tool:quote:600900"],
+            }, "ok": True}
+            yield {"type": "tool_result", "name": "get_quote", "summary": '{"price": 10}', "ok": True}
+            yield {"type": "delta", "text": "范围外数据未被采纳。"}
+            yield {"type": "done", "answer": "范围外数据未被采纳。", "citations": [], "web_sources": [],
+                   "tools_used": [], "retrieval_report_ids": [], "retrieval_degraded": False,
+                   "model": "browser-acceptance-fake"}
+            return
+        if "行业验收" in question:
+            answer = "已基于本地可检索同业样本进行比较。"
+            yield {"type": "delta", "text": answer}
+            yield {"type": "done", "answer": answer, "citations": [], "web_sources": [], "tools_used": [],
+                   "retrieval_report_ids": [FIXTURE_REPORT_ID, FIXTURE_PEER_REPORT_ID],
+                   "retrieval_degraded": False, "model": "browser-acceptance-fake"}
+            return
 
         yield {"type": "delta", "text": "经营活动现金流量净额为 -621.69 亿元"}
         yield {

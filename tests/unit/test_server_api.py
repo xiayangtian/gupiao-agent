@@ -3052,6 +3052,27 @@ class TestChatSupplementApi:
         assert captured["supplement_request_handler"] is server._handle_supplement_request
 
 
+def test_m2_raw_tool_json_does_not_bypass_fact_normalization(client, env, monkeypatch):
+    class RawToolRag:
+        def answer_stream(self, question, **kwargs):
+            yield {"type": "tool_call", "name": "get_quote", "arguments": {"symbol": "601288"}}
+            yield {"type": "tool_result", "name": "get_quote", "ok": True, "summary": json.dumps({
+                "metric": "price", "value": 3.2, "unit": "元/股", "period": "as_of",
+                "company_code": "601288", "as_of": "2026-09-16T10:00:00",
+            })}
+            yield {"type": "done", "answer": "实时数据仅供参考。", "citations": [], "model": "m", "usage": {}, "tools_used": ["get_quote"], "retrieval_report_ids": [], "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", RawToolRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "农业银行今天行情如何？",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+        "use_mcp": True,
+    }))
+
+    run = _event(events, "done")["run"]
+    assert run["facts"] == []
+
+
 def test_m2_policy_is_emitted_and_unsupported_numeric_is_degraded(client, env, monkeypatch):
     class PolicyRag:
         def answer_stream(self, question, **kwargs):

@@ -9,6 +9,28 @@ from webapp.chat_models import EvidenceArtifact, Fact, FactConflict, Scope, Veri
 _NUMBER_RE = re.compile(r"(?<![\d.])(-?\d+(?:\.\d+)?)\s*(亿元|万元|元/股|百分比|倍|股|元)")
 _MONEY_SCALES = {"元": 1e-8, "万元": 1e-4, "亿元": 1.0}
 
+# Controlled aliases make numeric support metric-specific without requiring the
+# model to use an internal metric key in Chinese prose.
+_METRIC_ALIASES = {
+    "revenue": ("revenue", "营业收入", "营收"),
+    "net_profit": ("net_profit", "净利润", "归母净利润"),
+    "operating_cash_flow": ("operating_cash_flow", "经营活动现金流", "经营现金流"),
+    "price": ("price", "价格", "股价"),
+}
+
+
+def _metric_terms(metric: str) -> tuple[str, ...]:
+    normalized = metric.strip().casefold()
+    for aliases in _METRIC_ALIASES.values():
+        if normalized in {alias.casefold() for alias in aliases}:
+            return aliases
+    return (metric,)
+
+
+def _mentions_metric(metric: str, answer: str) -> bool:
+    text = (answer or "").casefold()
+    return any(term.casefold() in text for term in _metric_terms(metric) if term)
+
 
 class ClaimVerifier:
     def verify(self, answer: str, scope: Scope, facts: Sequence[Fact], artifacts: Sequence[EvidenceArtifact], conflicts: Sequence[FactConflict]) -> VerificationReport:
@@ -26,7 +48,12 @@ class ClaimVerifier:
         for number, unit in _NUMBER_RE.findall(answer or ""):
             value = float(number) * _MONEY_SCALES.get(unit, 1.0)
             normalized_unit = "亿元" if unit in _MONEY_SCALES else unit
-            matches = [fact for fact in facts if fact.unit == normalized_unit and abs(fact.value - value) <= 1e-6]
+            matches = [
+                fact for fact in facts
+                if fact.unit == normalized_unit
+                and abs(fact.value - value) <= 1e-6
+                and _mentions_metric(fact.metric, answer)
+            ]
             if not matches:
                 issues.append(VerificationIssue("unsupported_numeric_claim", "blocked", "回答中的数值没有可核验证据。"))
                 continue
@@ -37,7 +64,7 @@ class ClaimVerifier:
                 if fact.verification == "reference" and "已确认" in answer:
                     issues.append(VerificationIssue("reference_marked_verified", "partial", "外部参考不能表述为已确认事实。", fact.evidence_ids))
         for conflict in conflicts:
-            if conflict.metric in answer and "存在口径/时间差异" not in answer:
+            if _mentions_metric(conflict.metric, answer) and "存在口径/时间差异" not in answer:
                 ids = tuple(evidence_id for fact in conflict.facts for evidence_id in fact.evidence_ids)
                 issues.append(VerificationIssue("undisclosed_conflict", "partial", "相关事实存在口径/时间差异，回答必须披露。", ids))
         if any(issue.severity == "blocked" for issue in issues):

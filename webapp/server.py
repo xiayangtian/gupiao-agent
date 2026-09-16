@@ -1765,19 +1765,18 @@ def _relay_rag_event(
             state.tool_artifacts.append(artifact)
             if not ok:
                 state.had_external_failure = True
-            try:
-                new_facts = normalizer.facts_from_structured_tool_payload(summary, artifact)
-            except ValueError:
-                # 非有限数值等受控字段异常：降级为 partial，不向上抛
-                state.had_external_failure = True
-                new_facts = ()
-            state.facts.extend(new_facts)
+            # Raw M1 tool text is retained only as a reference artifact.  M2 facts
+            # must originate from the policy-gated structured event below so every
+            # persisted value passes FactNormalizer's complete contract.
             # Only the RAG policy-gated JSON-object event is eligible for M2 Fact
             # normalization; raw tool text remains a reference artifact.
             for structured in [item for item in state.structured_tool_payloads if item["name"] == name]:
                 raw = dict(structured["payload"])
-                raw.setdefault("provider", artifact.provider)
-                raw.setdefault("as_of", artifact.as_of)
+                # Provider identity and as-of belong to the execution artifact, not
+                # to model/tool-controlled JSON, so structured payloads cannot
+                # claim a different source or timestamp.
+                raw["provider"] = artifact.provider
+                raw["as_of"] = artifact.as_of
                 fact = FactNormalizer().normalize(raw, artifact, state.scope)
                 if fact is not None:
                     state.facts.append(fact)

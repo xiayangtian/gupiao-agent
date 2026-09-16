@@ -39,3 +39,17 @@ def test_reference_requires_external_reference_wording():
     report = ClaimVerifier().verify("价格为 10 元/股", _scope(), [fact], (), ())
     assert report.status == "partial"
     assert any(issue.code == "external_reference_ambiguity" for issue in report.issues)
+
+
+def test_numeric_claim_requires_the_same_metric_not_just_the_same_value():
+    report = ClaimVerifier().verify("净利润为 100 亿元", _scope(), [_fact(value=100)], [_artifact()], ())
+    assert report.status == "blocked"
+    assert any(issue.code == "unsupported_numeric_claim" for issue in report.issues)
+
+
+def test_metric_alias_makes_relevant_conflict_require_disclosure():
+    facts = (_fact(value=100), _fact(value=120))
+    conflict = FactConflict("revenue", facts, "同指标同期间同口径数值不一致")
+    report = ClaimVerifier().verify("营业收入为 100 亿元", _scope(), facts, [_artifact()], [conflict])
+    assert report.status == "partial"
+    assert any(issue.code == "undisclosed_conflict" for issue in report.issues)
