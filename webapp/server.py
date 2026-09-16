@@ -1863,6 +1863,128 @@ def _make_answer_run(
     )
 
 
+@dataclass(frozen=True)
+class _ResearchResumeOrigin:
+    """恢复一次研究运行所需的最小原始上下文：原问题、当时上下文与冻结策略。"""
+
+    question: str
+    history: List[Dict[str, Any]]
+    intent: Optional[IntentDecision]
+    policy: Optional[ToolPolicy]
+
+
+def _preceding_user_index(messages: List[Dict[str, Any]], before: int) -> Optional[int]:
+    """返回 ``before`` 之前最近一条有内容的用户消息下标；没有则 None。"""
+    for index in range(before - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, Mapping) and message.get("role") == "user" and str(message.get("content") or "").strip():
+            return index
+    return None
+
+
+def _research_resume_origin(session: Mapping[str, Any], run_id: str) -> _ResearchResumeOrigin:
+    """定位该研究运行的原始提问轮次，并取回当时冻结的意图与工具策略。
+
+    恢复必须重放「产生该运行的那条用户问题」，不能拿会话里最新的问题充数；策略也
+    必须沿用当时冻结的那一份，不得在恢复时重新解析而扩大范围。两者都只能来自持有
+    该 run id 的助手消息及其之前最近的用户消息。若某个候选轮次的策略字段不可读（异
+    步写入失败的历史轮次），继续向更早的同 run 轮次回退，一个可读策略都没有时由
+    调用方 fail-closed 拒绝；找不到提问轮次同样返回空问题交由调用方拒绝。
+    """
+    messages = list(session.get("messages", []))
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            continue
+        saved = message.get("run")
+        if not isinstance(saved, Mapping) or saved.get("research_run_id") != run_id:
+            continue
+        try:
+            policy = ToolPolicy.from_dict(saved["tool_policy"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        try:
+            intent: Optional[IntentDecision] = IntentDecision.from_dict(saved["intent_decision"])
+        except (KeyError, TypeError, ValueError):
+            intent = None
+        origin = _preceding_user_index(messages, index)
+        if origin is None:
+            return _ResearchResumeOrigin("", [], intent, policy)
+        history = [dict(item) for item in messages[:origin] if isinstance(item, Mapping)][-8:]
+        return _ResearchResumeOrigin(str(messages[origin].get("content") or ""), history, intent, policy)
+    return _ResearchResumeOrigin("", [], None, None)
+
+
+def _research_step_handlers(
+    state: "_RagRunState",
+    *,
+    question: str,
+    history: List[Dict[str, Any]],
+    filters: Mapping[str, Any],
+    tools: Any,
+    priority_report_id: Optional[str],
+    scope: Scope,
+    policy: ToolPolicy,
+    run_id: str,
+) -> Dict[str, Callable[[Any, ResearchRun], Dict[str, Any]]]:
+    """首次研究与恢复共用的受控步骤 handler。
+
+    两组流程必须走同一组 handler：检索桥把既有 RagQA 的引用、工具产物与归一事实写成
+    步骤产物，normalize/compare 再从这些产物算出事实与冲突。恢复路径若另用空 handler，
+    就会得到与首次运行不同的 conflicts/verification。
+    """
+    normalizer = EvidenceNormalizer()
+    # 恢复与首次运行共用同一个检索桥：并行 retrieve 步骤只允许发生一次外部调用，
+    # 且累积状态不会被并发写入破坏。
+    retrieval_lock = threading.Lock()
+    cached: Optional[Dict[str, Any]] = None
+
+    def retrieve_research(_step: Any, _run: Any) -> Dict[str, Any]:
+        nonlocal cached
+        with retrieval_lock:
+            if cached is None:
+                kwargs = dict(question=question, history=history, filters=filters, tools=tools,
+                              priority_report_id=priority_report_id, scope=scope, run_id=run_id)
+                # M1 兼容的注入式适配器可能还没有 M2 参数；生产 RagQA 总能收到策略。
+                parameters = inspect.signature(rag_qa.answer_stream).parameters.values()
+                if any(parameter.name == "tool_policy" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                       for parameter in parameters):
+                    kwargs["tool_policy"] = policy
+                for event in rag_qa.answer_stream(**kwargs):
+                    _relay_rag_event(event, state, normalizer)
+                if state.error_text:
+                    raise ValueError(state.error_text)
+                if state.empty or not (state.evidence_artifacts or state.facts):
+                    raise ValueError("未取得可核验的范围内来源")
+                cached = {
+                    "artifacts": [item.to_dict() for item in state.evidence_artifacts],
+                    "facts": [item.to_dict() for item in state.facts],
+                    "result_summary": (state.done_payload or {}).get("answer") or "".join(state.answer_parts).strip(),
+                }
+            return cached
+
+    def normalize_research(_step: Any, _run: Any) -> Dict[str, Any]:
+        return {"facts": [item.to_dict() for item in state.facts]}
+
+    def compare_research(_step: Any, _run: Any) -> Dict[str, Any]:
+        state.conflicts = list(detect_conflicts(state.facts))
+        return {"conflicts": [item.to_dict() for item in state.conflicts]}
+
+    def verify_research(_step: Any, _run: Any) -> Dict[str, Any]:
+        # 步骤级核验是空操作：ResearchAgent 在全部步骤完成后用 M2 ClaimVerifier 核验。
+        return {}
+
+    def answer_research(_step: Any, current_run: ResearchRun) -> Dict[str, Any]:
+        answer = ((state.done_payload or {}).get("answer") or "".join(state.answer_parts).strip()
+                  or current_run.result_of_kind("retrieve"))
+        if not answer:
+            raise ValueError("未形成可核验的研究结论")
+        return {"answer": answer}
+
+    return {"retrieve": retrieve_research, "normalize": normalize_research, "compare": compare_research,
+            "verify": verify_research, "answer": answer_research}
+
+
 def _mark_research_stopped(sid: str, run_id: str) -> Optional[ResearchRun]:
     """Persist the honest stopped state for a research run whose client disconnected.
 
@@ -2009,42 +2131,10 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 # Scope and ToolPolicy are passed unchanged, and its citations,
                 # tool artifacts and normalized facts become the durable step data.
                 research_state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
-                research_normalizer = EvidenceNormalizer()
-                retrieved = False
-                def retrieve_research(_step, _run):
-                    nonlocal retrieved
-                    if retrieved:
-                        return {"artifacts": [item.to_dict() for item in research_state.evidence_artifacts],
-                                "facts": [item.to_dict() for item in research_state.facts]}
-                    retrieved = True
-                    kwargs = dict(question=body.question, history=history, filters=body.filters, tools=tools,
-                                  priority_report_id=priority_report_id, scope=scope, run_id=run_id)
-                    parameters = inspect.signature(rag_qa.answer_stream).parameters.values()
-                    if any(parameter.name == "tool_policy" or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
-                        kwargs["tool_policy"] = policy
-                    for event in rag_qa.answer_stream(**kwargs):
-                        _relay_rag_event(event, research_state, research_normalizer)
-                    if research_state.error_text:
-                        raise ValueError(research_state.error_text)
-                    if research_state.empty or not (research_state.evidence_artifacts or research_state.facts):
-                        raise ValueError("未取得可核验的范围内来源")
-                    return {"artifacts": [item.to_dict() for item in research_state.evidence_artifacts],
-                            "facts": [item.to_dict() for item in research_state.facts],
-                            "result_summary": (research_state.done_payload or {}).get("answer") or "".join(research_state.answer_parts).strip()}
-                def normalize_research(_step, _run):
-                    return {"facts": [item.to_dict() for item in research_state.facts]}
-                def compare_research(_step, _run):
-                    research_state.conflicts = list(detect_conflicts(research_state.facts))
-                    return {"conflicts": [item.to_dict() for item in research_state.conflicts]}
-                def verify_research(_step, _run):
-                    return {}
-                def answer_research(_step, current_run):
-                    saved_retrieve = next((item for item in current_run.step_runs if item.step_id == "retrieve"), None)
-                    answer = ((research_state.done_payload or {}).get("answer") or "".join(research_state.answer_parts).strip()
-                              or (saved_retrieve.result_summary if saved_retrieve else ""))
-                    if not answer:
-                        raise ValueError("未形成可核验的研究结论")
-                    return {"answer": answer}
+                handlers = _research_step_handlers(
+                    research_state, question=body.question, history=history, filters=body.filters, tools=tools,
+                    priority_report_id=priority_report_id, scope=scope, policy=policy, run_id=run_id,
+                )
                 def persist_research(research_run):
                     nonlocal research_run_id
                     research_run_id = research_run.id
@@ -2053,11 +2143,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 loop = asyncio.get_running_loop()
                 research_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
                 stop_event = threading.Event()
-                agent = ResearchAgent(
-                    executor=ResearchExecutor({"retrieve": retrieve_research, "normalize": normalize_research,
-                        "compare": compare_research, "verify": verify_research, "answer": answer_research}),
-                    persist=persist_research,
-                )
+                agent = ResearchAgent(executor=ResearchExecutor(handlers), persist=persist_research)
                 def emit_research(event: dict[str, Any]) -> None:
                     loop.call_soon_threadsafe(research_events.put_nowait, event)
                 research_task: asyncio.Task[Any] | None = None
@@ -2227,7 +2313,7 @@ def get_research_run(run_id: str, session_id: str = Query(...)) -> Dict[str, Any
 
 
 @app.post("/api/chat/research/{run_id}/resume")
-async def resume_research_run(run_id: str, body: ResumeResearchRequest) -> StreamingResponse:
+async def resume_research_run(run_id: str, body: ResumeResearchRequest, request: Request) -> StreamingResponse:
     research_run = chat_store.get_research_run(body.session_id, run_id)
     if research_run is None:
         raise HTTPException(404, "研究运行不存在")
@@ -2236,54 +2322,57 @@ async def resume_research_run(run_id: str, body: ResumeResearchRequest) -> Strea
     session = chat_store.get_session(body.session_id)
     if session is None:
         raise HTTPException(404, "会话不存在")
-    question = _last_user_question(session)
-    original_policy = None
-    for message in reversed(session.get("messages", [])):
-        saved = (message.get("run") or {}) if isinstance(message, dict) else {}
-        if saved.get("research_run_id") != run_id:
-            continue
-        try:
-            original_policy = ToolPolicy.from_dict(saved["tool_policy"])
-        except (KeyError, TypeError, ValueError):
-            pass
-        break
-    if original_policy is None:
+    origin = _research_resume_origin(session, run_id)
+    if origin.policy is None:
         raise HTTPException(409, "缺少原始工具策略，不能安全恢复研究")
+    if not origin.question.strip():
+        raise HTTPException(409, "找不到该研究运行的原研究问题，不能安全恢复")
 
     async def gen():
-        events: list[dict[str, Any]] = []
-        state = _RagRunState(scope=research_run.plan.scope, intent_decision=IntentDecision("research_task"), tool_policy=original_policy)
-        normalizer = EvidenceNormalizer()
-        def retrieve_research(_step, _run):
-            kwargs = dict(question=question, history=[], filters={}, tools=None, scope=research_run.plan.scope, run_id=run_id,
-                          tool_policy=original_policy)
-            for event in rag_qa.answer_stream(**kwargs):
-                _relay_rag_event(event, state, normalizer)
-            if state.error_text or state.empty or not (state.evidence_artifacts or state.facts):
-                raise ValueError(state.error_text or "未取得可核验的范围内来源")
-            return {"artifacts": [item.to_dict() for item in state.evidence_artifacts],
-                    "facts": [item.to_dict() for item in state.facts],
-                    "result_summary": (state.done_payload or {}).get("answer") or "".join(state.answer_parts).strip()}
-        def answer_research(_step, current_run):
-            retrieved = next((item for item in current_run.step_runs if item.step_id == "retrieve"), None)
-            answer = (state.done_payload or {}).get("answer") or "".join(state.answer_parts).strip() or (retrieved.result_summary if retrieved else "")
-            if not answer:
-                raise ValueError("未形成可核验的研究结论")
-            return {"answer": answer}
-        handlers = {"retrieve": retrieve_research, "normalize": lambda *_: {}, "compare": lambda *_: {},
-                    "verify": lambda *_: {}, "answer": answer_research}
+        # 恢复使用与首次研究流同一组受控 handler，且只用已完成步骤之外要重跑的步骤。
+        state = _RagRunState(scope=research_run.plan.scope, intent_decision=origin.intent, tool_policy=origin.policy)
+        handlers = _research_step_handlers(
+            state, question=origin.question, history=origin.history, filters={}, tools=None,
+            priority_report_id=None, scope=research_run.plan.scope, policy=origin.policy, run_id=run_id,
+        )
         agent = ResearchAgent(executor=ResearchExecutor(handlers),
                               persist=lambda saved: chat_store.save_research_run(body.session_id, saved))
+        loop = asyncio.get_running_loop()
+        events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        stop_event = threading.Event()
+
+        def emit(event: Dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(events.put_nowait, event)
+
+        resume_task: asyncio.Task[Any] | None = None
         try:
-            answer = await asyncio.to_thread(agent.resume, research_run, stop_event=threading.Event(), emit=events.append)
+            resume_task = asyncio.create_task(asyncio.to_thread(
+                agent.resume, research_run, stop_event=stop_event, emit=emit,
+                intent=origin.intent, policy=origin.policy,
+            ))
+            while not resume_task.done():
+                # 与首次研究流一致：客户端断开（停止）时置协作停止事件，让阻塞中的外部
+                # 调用返回后按 stopped 落盘，而不是把它当成完整研究。
+                if await request.is_disconnected():
+                    stop_event.set()
+                try:
+                    event = await asyncio.wait_for(events.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    continue
+                yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
+            answer = await resume_task
+            while not events.empty():
+                event = events.get_nowait()
+                yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
         except ValueError:
             yield _sse("research_blocked", {"reason": "没有可安全恢复的未完成步骤。"})
             return
-        for event in events:
-            yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
+        finally:
+            if resume_task is not None and not resume_task.done():
+                stop_event.set()
         answer = replace(answer, id=uuid.uuid4().hex, created_at=dt.datetime.now().isoformat(timespec="seconds"),
                          completed_at=dt.datetime.now().isoformat(timespec="seconds"))
-        chat_store.append_turn(body.session_id, question=question, run=answer)
+        chat_store.append_turn(body.session_id, question=origin.question, run=answer)
         yield _sse("done", {"session_id": body.session_id, "run": answer.to_dict(), "answer": answer.content})
     return StreamingResponse(gen(), media_type="text/event-stream")
 

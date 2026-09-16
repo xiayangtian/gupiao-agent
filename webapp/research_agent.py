@@ -39,9 +39,16 @@ class ResearchAgent:
         emit({"type": "research_plan", "plan": plan.to_dict()})
         return self._execute(ResearchRun.new(plan), scope, intent, policy, stop_event, emit)
 
-    def resume(self, research_run: ResearchRun, *, stop_event: Event, emit: Callable[[dict[str, Any]], None]) -> AnswerRun:
+    def resume(self, research_run: ResearchRun, *, stop_event: Event, emit: Callable[[dict[str, Any]], None],
+               intent: IntentDecision | None = None, policy: ToolPolicy | None = None) -> AnswerRun:
+        """Resume an incomplete run while re-persisting its original intent and policy.
+
+        The orchestration layer has no other authority source for a resumed run, so
+        both must be passed through: otherwise the resumed AnswerRun loses the frozen
+        policy and the next resume cannot recover it any more.
+        """
         emit({"type": "research_plan", "plan": research_run.plan.to_dict(), "resumed": True})
-        return self._execute(research_run, research_run.plan.scope, None, None, stop_event, emit, resume=True)
+        return self._execute(research_run, research_run.plan.scope, intent, policy, stop_event, emit, resume=True)
 
     def _execute(self, run: ResearchRun, scope: Scope, intent: IntentDecision | None, policy: ToolPolicy | None,
                  stop_event: Event, emit: Callable[[dict[str, Any]], None], resume: bool = False) -> AnswerRun:
@@ -58,8 +65,8 @@ class ResearchAgent:
         emit({"type": "research_running", "status": "running"})
         executed = self.executor.resume(run, stop_event=stop_event, emit=relay) if resume else self.executor.execute(run, stop_event=stop_event, emit=relay)
         artifacts, facts, conflicts = self._evidence(executed)
-        answer_step = next((item for item in executed.step_runs if item.step_id == "answer"), None)
-        content = answer_step.result_summary if answer_step else ""
+        # 计划步骤 id 由模型定义，结论必须按 kind 取，不能硬编码 "answer"。
+        content = executed.result_of_kind("answer")
         verification = None
         if executed.status == "verifying" and not (artifacts or facts):
             executed = executed.transition("partial")

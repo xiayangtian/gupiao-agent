@@ -3,6 +3,7 @@ from threading import Event
 from webapp.chat_models import IntentDecision, Scope, ToolPolicy, VerificationReport
 from webapp.research_agent import ResearchAgent
 from webapp.research_executor import ResearchExecutor
+from webapp.research_models import ResearchPlan, ResearchRun, ResearchStep, ResearchStepRun
 from webapp.research_planner import ResearchPlanner
 
 
@@ -70,3 +71,51 @@ def test_simple_question_uses_normal_answer_without_plan():
     answer = agent.run("营收是多少？", _scope(), IntentDecision("report_fact"), _policy(), stop_event=Event(), emit=lambda _: None)
     assert answer.content == "普通回答"
     assert answer.research_run_id == ""
+
+
+class FixedPlanPlanner:
+    last_awaiting_input = ""
+
+    def __init__(self, plan): self._plan = plan
+
+    def plan(self, *args): return self._plan
+
+
+def test_agent_finds_the_answer_step_by_kind_not_by_generated_id():
+    """计划步骤 id 由模型自定义：编排层必须按 kind 取结论，不得硬编码 "answer"。"""
+    plan = ResearchPlan("研究", _scope(), (
+        ResearchStep("gather", "retrieve", "检索已授权披露"),
+        ResearchStep("check", "verify", "核对来源与结论", ("gather",)),
+        ResearchStep("conclude", "answer", "形成研究结论", ("check",)),
+    ), ("核对来源",))
+    handlers = {
+        "retrieve": lambda *_: {"artifacts": [{"source": "pdf", "report_id": "601288:2024-12-31:annual",
+                                                "pdf_filename": "annual.pdf", "page": 1, "snippet": "可核验披露"}]},
+        "verify": lambda *_: {},
+        "answer": lambda *_: {"answer": "自由 id 计划的研究结论。"},
+    }
+    agent = ResearchAgent(planner=FixedPlanPlanner(plan), executor=ResearchExecutor(handlers), verifier=PassedVerifier())
+
+    answer = agent.run("比较近三年盈利质量", _scope(), IntentDecision("research_task"), _policy(),
+                       stop_event=Event(), emit=lambda _: None)
+
+    assert answer.status == "completed"
+    assert answer.content == "自由 id 计划的研究结论。"
+
+
+def test_resume_persists_the_original_intent_and_tool_policy():
+    """恢复落盘必须保真原意图与冻结策略，否则再次恢复会拿不到可恢复的策略。"""
+    policy = ToolPolicy("research_task", fallback_message="研究将严格按当前范围与工具策略执行。")
+    intent = IntentDecision("research_task", "high", True)
+    plan = ResearchPlan("研究", _scope(), (
+        ResearchStep("retrieve", "retrieve", "检索已授权披露"),
+        ResearchStep("answer", "answer", "形成研究结论", ("retrieve",)),
+    ), ("核对来源",))
+    run = ResearchRun("run-1", plan, "stopped", (ResearchStepRun("retrieve", "stopped"),))
+    agent = ResearchAgent(executor=ResearchExecutor(_production_handlers()), verifier=PassedVerifier())
+
+    answer = agent.resume(run, stop_event=Event(), emit=lambda _: None, intent=intent, policy=policy)
+
+    assert answer.research_run_id == "run-1"
+    assert answer.intent_decision == intent
+    assert answer.tool_policy == policy
