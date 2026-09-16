@@ -62,3 +62,21 @@
 - Manual agent-browser QA: actual fixture URL `http://127.0.0.1:58732/#/chat`; DOM showed `本次查证方式本地财报查证`, the safe numeric explanation, and `overflow: false`.
 - Process note: Task 7 fixture schema did not retain an independent pre-fixture RED command; do not represent that as compliant TDD evidence.
 - Commit: `1209913` (`test: 覆盖智能问答策略与事实核验闭环`).
+
+## M2 final-review Important fixes — completed
+
+Review feedback was reproduced against `4ea57ad` before each fix. No M3/M4 behavior was added.
+
+| Finding | Root cause | RED | GREEN | Commit |
+| --- | --- | --- | --- | --- |
+| Scope tool-parameter bypass | `RagQA.answer_stream()` checked only tool names; a policy-approved tool could receive another company’s `symbol`/`code`/`report_id`. | `python3 -m pytest tests/unit/test_rag_policy_m2.py -q` → `1 failed, 3 passed` (`600900` reached executor). | Same command → `4 passed, 3 warnings`; explicit out-of-Scope identity parameters emit failed tool result before executor. | `c4eaf72` |
+| M1 loose fact bypassed M2 normalization | Server persisted `EvidenceNormalizer.facts_from_structured_tool_payload()` from raw tool-result text before `FactNormalizer`; incomplete facts could enter `AnswerRun`. | `python3 -m pytest tests/unit/test_server_api.py -q -k raw_tool_json_does_not_bypass_fact_normalization` → `1 failed, 140 deselected` (raw JSON persisted as a fact). | Same command → `1 passed, 140 deselected, 3 warnings`; only `structured_tool_result` passing complete `FactNormalizer` is persisted. | `c4eaf72` |
+| ClaimVerifier metric/conflict false positives | Numeric matching used unit/value only; conflict relevance used raw metric-string inclusion, so same-value different metrics passed and `revenue` conflicts were skipped for `营业收入`. | `python3 -m pytest tests/unit/test_chat_verifier.py -q` → `2 failed, 4 passed`. | Same command → `6 passed`; controlled revenue/net-profit/cash-flow/price aliases now bind claims and relevant conflict disclosure. | `c4eaf72` |
+| Task 7 acceptance coverage was insufficient | The JSON schema fixture was metadata-only and the browser fake had one generic path, so industry/realtime/event/conflict/tool-failure/Scope cases did not exercise SSE persistence and rendering. | `python3 -m pytest tests/browser/test_chat_policy_flow.py -q` → `1 failed, 1 passed` (realtime run had no persisted reference Fact). | Same command → `2 passed`; fixture exercises all six paths through real SSE and agent-browser rendering. | `c4eaf72` |
+
+### Final-review validation
+- Affected unit suite: `python3 -m pytest tests/unit/test_chat_verifier.py tests/unit/test_chat_facts.py tests/unit/test_chat_evidence.py tests/unit/test_rag_policy_m2.py tests/unit/test_rag_qa.py tests/unit/test_server_api.py -q` → `208 passed, 3 warnings in 9.03s`.
+- Browser/SSE: `python3 -m pytest tests/browser/test_chat_policy_flow.py tests/browser/test_chat_trust_flow.py -q` → `8 passed in 31.29s`. These start the real FastAPI fixture app and use agent-browser; the added flow reopened industry, realtime, event and conflict runs and asserted no horizontal overflow, console error or page error.
+- Full suite: `python3 -m pytest -q` → `972 passed, 2 skipped, 3 warnings in 126.06s`.
+- `git diff --check` and `git diff --cached --check` → passed; no staged files before the remediation commit.
+- `python3 scripts/check_css.py` still fails only on duplicate `.history-view-pane`; `git show HEAD:webapp/static/style.css | grep -n '\.history-view-pane' | wc -l` → `2`, proving the duplicate is unchanged and outside this scope.
