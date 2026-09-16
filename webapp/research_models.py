@@ -244,6 +244,30 @@ class ResearchRun:
             raise ValueError("research run has no dependency-safe incomplete step")
         return replace(self, status="running", started_at=_now(), finished_at="", resume_from_step_id=step_id)
 
+    def stop(self) -> "ResearchRun":
+        """Freeze the run as ``stopped``; an already resumable terminal state is kept.
+
+        A parallel batch can persist a sibling failure before a later cooperative
+        stop arrives.  ``failed`` and ``partial`` are as resumable as ``stopped``,
+        so the stop must not attempt the illegal ``failed → stopped`` transition.
+        """
+        if self.status in _TERMINAL_RESUMABLE:
+            return self
+        return self.transition("stopped")
+
+    def result_of_kind(self, kind: ResearchStepKind) -> str:
+        """Result summary of the newest completed step of ``kind``.
+
+        Step ids are model-defined in an AI plan, so orchestration must select the
+        answer/normalize step by kind instead of by a hardcoded id.
+        """
+        kinds = {step.id: step.kind for step in self.plan.steps}
+        result = ""
+        for item in self.step_runs:
+            if kinds.get(item.step_id) == kind and item.status == "completed" and item.result_summary:
+                result = item.result_summary
+        return result
+
     def with_step_run(self, step_run: ResearchStepRun) -> "ResearchRun":
         if step_run.step_id not in {step.id for step in self.plan.steps}:
             raise ValueError("step run is outside plan")

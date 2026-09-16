@@ -19,7 +19,11 @@ class ResearchExecutor:
     def execute(self, run: ResearchRun, *, stop_event: Event, emit: Callable[[dict[str, Any]], None]) -> ResearchRun:
         if run.status == "planned":
             run = run.transition("running")
-        elif run.status not in {"running", "stopped", "failed", "partial"}:
+        elif run.status in {"stopped", "partial", "failed"}:
+            # A resumable terminal run can only take the legal resume() path; a
+            # plain execute() would hit an illegal terminal transition.
+            run = run.resume()
+        elif run.status != "running":
             raise ValueError("research run is not executable")
         return self._run(run, stop_event, emit)
 
@@ -50,6 +54,13 @@ class ResearchExecutor:
         suffix = "started" if status == "running" else status
         emit({"type": "research_step_" + suffix, "step_id": step.id, "label": step.label, "status": status, **extra})
 
+    def _stop(self, run: ResearchRun, emit: Callable[[dict[str, Any]], None], step: ResearchStep) -> ResearchRun:
+        """Cooperatively stop: in-flight step becomes stopped and the run stays resumable."""
+        stopped = ResearchStepRun(step.id, "stopped", input_summary=step.label).transition("stopped")
+        run = self._save(run.with_step_run(stopped).stop())
+        self._event(emit, step, "stopped", reason="用户已停止研究")
+        return run
+
     def _run(self, run: ResearchRun, stop_event: Event, emit: Callable[[dict[str, Any]], None]) -> ResearchRun:
         while True:
             ready = self._ready(run)
@@ -58,11 +69,7 @@ class ResearchExecutor:
                     return self._save(run.transition("verifying"))
                 return self._save(run.transition("failed"))
             if stop_event.is_set():
-                step = ready[0]
-                stopped = ResearchStepRun(step.id, "stopped", input_summary=step.label).transition("stopped")
-                run = self._save(run.with_step_run(stopped).transition("stopped"))
-                self._event(emit, step, "stopped", reason="用户已停止研究")
-                return run
+                return self._stop(run, emit, ready[0])
 
             # Only independent external retrieval can overlap. All normalization,
             # comparison, verification and answer work remains ordered.
@@ -87,10 +94,7 @@ class ResearchExecutor:
                     if stop_event.is_set():
                         for pending in futures:
                             pending.cancel()
-                        stopped = ResearchStepRun(step.id, "stopped", input_summary=step.label).transition("stopped")
-                        run = self._save(run.with_step_run(stopped).transition("stopped"))
-                        self._event(emit, step, "stopped", reason="用户已停止研究")
-                        return run
+                        return self._stop(run, emit, step)
                     try:
                         result = future.result()
                     except Exception as exc:
@@ -108,10 +112,7 @@ class ResearchExecutor:
 
     def _execute_one(self, run: ResearchRun, step: ResearchStep, stop_event: Event, emit: Callable[[dict[str, Any]], None]) -> tuple[ResearchRun, bool]:
         if stop_event.is_set():
-            stopped = ResearchStepRun(step.id, "stopped", input_summary=step.label).transition("stopped")
-            run = self._save(run.with_step_run(stopped).transition("stopped"))
-            self._event(emit, step, "stopped", reason="用户已停止研究")
-            return run, True
+            return self._stop(run, emit, step), True
         running = ResearchStepRun(step.id, "running", input_summary=step.label).transition("running")
         run = self._save(run.with_step_run(running))
         self._event(emit, step, "running")
@@ -120,10 +121,7 @@ class ResearchExecutor:
         except Exception as exc:
             return self._fail(run, step, str(exc), emit), True
         if stop_event.is_set():
-            stopped = ResearchStepRun(step.id, "stopped", input_summary=step.label).transition("stopped")
-            run = self._save(run.with_step_run(stopped).transition("stopped"))
-            self._event(emit, step, "stopped", reason="用户已停止研究")
-            return run, True
+            return self._stop(run, emit, step), True
         return self._complete(run, step, result, emit), False
 
     def _call(self, step: ResearchStep, run: ResearchRun) -> Mapping[str, Any]:
