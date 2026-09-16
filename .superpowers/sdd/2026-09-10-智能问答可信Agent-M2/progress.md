@@ -80,3 +80,4 @@ Review feedback was reproduced against `4ea57ad` before each fix. No M3/M4 behav
 - Full suite: `python3 -m pytest -q` → `972 passed, 2 skipped, 3 warnings in 126.06s`.
 - `git diff --check` and `git diff --cached --check` → passed; no staged files before the remediation commit.
 - `python3 scripts/check_css.py` still fails only on duplicate `.history-view-pane`; `git show HEAD:webapp/static/style.css | grep -n '\.history-view-pane' | wc -l` → `2`, proving the duplicate is unchanged and outside this scope.
+- Manual real-browser QA: launched `tests/browser/visual_test_app.py` at `http://127.0.0.1:58765/#/chat`, created an actual conflict SSE run, then opened it with agent-browser. DOM contained both external reference values, the textual `存在口径/时间差异` disclosure and `⚠️ 部分完成`; measured `overflow: false`.

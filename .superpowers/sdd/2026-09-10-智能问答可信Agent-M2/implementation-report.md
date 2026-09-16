@@ -60,6 +60,7 @@ M2 Task 1–7 已在 `feat/trusted-chat-m2` 完成；未实现 M3 Planner、恢�
 
 - 受影响单测：`python3 -m pytest tests/unit/test_chat_verifier.py tests/unit/test_chat_facts.py tests/unit/test_chat_evidence.py tests/unit/test_rag_policy_m2.py tests/unit/test_rag_qa.py tests/unit/test_server_api.py -q` → `208 passed, 3 warnings in 9.03s`。
 - M2 SSE/真实浏览器：`python3 -m pytest tests/browser/test_chat_policy_flow.py tests/browser/test_chat_trust_flow.py -q` → `8 passed in 31.29s`。测试用 agent-browser 打开真实 fixture FastAPI URL，重开行业、实时、事件和冲突会话并验证无横向溢出、console errors 或 page errors。
+- 手工真实浏览器 QA：实际启动 URL `http://127.0.0.1:58765/#/chat`，经 SSE 创建冲突 run 后以 agent-browser 重开。DOM 显示两条外部 reference、`存在口径/时间差异`、`⚠️ 部分完成`；测量 `overflow: false`。
 - 全量：`python3 -m pytest -q` → `972 passed, 2 skipped, 3 warnings in 126.06s`。
 - `git diff --check`、`git diff --cached --check` → passed；修复提交前没有 staged files。
 - `python3 scripts/check_css.py` → failed only on既有 `.history-view-pane` duplicate selector；`git show HEAD:webapp/static/style.css | grep -n '\.history-view-pane' | wc -l` → `2`，本修复没有触及 CSS。
