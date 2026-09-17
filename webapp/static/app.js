@@ -2276,7 +2276,8 @@ async function loadResearchWorkspace(filters) {
 
 function refreshResearchWorkspaceIfOpen() {
   var panel = $('#research-workspace');
-  if (panel && !panel.classList.contains('hidden')) {
+  var chatPage = $('#page-chat');
+  if (panel && chatPage && !panel.classList.contains('hidden') && !chatPage.classList.contains('hidden')) {
     return loadResearchWorkspace(researchWorkspaceFilters());
   }
   return Promise.resolve();

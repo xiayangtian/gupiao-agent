@@ -499,11 +499,12 @@
   // Only safe aggregate booleans are rendered.  The API deliberately omits case,
   // prompt, and failure details, and this renderer must never infer or expose them.
   function renderResearchQuality(summary) {
+    var refreshCommand = '<code>python3 scripts/run_chat_evaluation.py</code>';
     if (!summary || summary.available !== true
       || !summary.health || typeof summary.health.passed !== 'boolean'
       || !summary.probe || typeof summary.probe.passed !== 'boolean') {
       return '<p class="research-quality-unavailable"><span aria-hidden="true">○</span> '
-        + '尚无本地质量摘要。可运行 <code>python3 scripts/run_chat_evaluation.py</code> 生成。</p>';
+        + '尚无本地质量摘要。可运行 ' + refreshCommand + ' 生成。</p>';
     }
     function suite(label, passed) {
       return '<p class="research-quality-status research-quality-' + (passed ? 'passed' : 'failed') + '">'
@@ -513,7 +514,9 @@
     return '<div class="research-quality-summary">'
       + suite('健康评测', summary.health.passed)
       + suite('负向探针', summary.probe.passed)
-      + '</div>';
+      + '<p class="research-quality-generated-at">生成时间：'
+      + escapeHtml(String(summary.generated_at || '未记录')) + '</p>'
+      + '<p class="research-quality-refresh">可运行 ' + refreshCommand + ' 刷新。</p></div>';
   }
 
   function renderArtifactActions(run) {

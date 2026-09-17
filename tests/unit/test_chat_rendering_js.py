@@ -553,13 +553,14 @@ def test_fact_without_stable_id_has_no_memory_action():
 
 
 def test_quality_renderer_shows_safe_health_and_probe_statuses():
-    """质量 UI 只显示健康/探针聚合状态，绝不回显任意失败原文。"""
+    """质量 UI 显示转义刷新时间和本地命令，绝不回显任意失败原文。"""
     result = _run_node(
         f"""
         const r = require({json.dumps(str(CHAT_RENDERING_JS))});
         console.log(JSON.stringify({{
           available: r.renderResearchQuality({{
             available: true,
+            generated_at: '<img src=x onerror=alert(1)>',
             health: {{passed: true, case_name: 'scope-leak-case'}},
             probe: {{passed: true, failure_prose: 'scope-leak-case'}}
           }}),
@@ -570,8 +571,53 @@ def test_quality_renderer_shows_safe_health_and_probe_statuses():
 
     assert "健康评测" in result["available"]
     assert "负向探针" in result["available"]
+    assert "生成时间：&lt;img src=x onerror=alert(1)&gt;" in result["available"]
+    assert "<img src=x onerror=alert(1)>" not in result["available"]
     assert "scope-leak-case" not in result["available"]
+    command = "python3 scripts/run_chat_evaluation.py"
+    assert command in result["available"]
+    assert command in result["unavailable"]
     assert "尚无本地质量摘要" in result["unavailable"]
+
+
+def test_refresh_workspace_requires_visible_chat_page_and_workspace_panel():
+    """离开聊天页后的异步写入不能刷新隐藏的工作台。"""
+    result = _run_node(
+        f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('function refreshResearchWorkspaceIfOpen() {{');
+        const end = src.indexOf('async function loadResearchQuality()', start);
+        if (start < 0 || end < 0) throw new Error('refreshResearchWorkspaceIfOpen 未找到');
+        const fnSource = src.slice(start, end);
+
+        async function refreshCount(workspaceHidden, chatHidden) {{
+          let calls = 0;
+          const workspace = {{classList: {{contains: () => workspaceHidden}}}};
+          const chatPage = {{classList: {{contains: () => chatHidden}}}};
+          const sandbox = {{
+            $: (selector) => selector === '#research-workspace' ? workspace :
+              (selector === '#page-chat' ? chatPage : null),
+            researchWorkspaceFilters: () => ({{status: 'completed'}}),
+            loadResearchWorkspace: () => {{ calls += 1; return Promise.resolve(); }},
+            Promise,
+          }};
+          vm.createContext(sandbox);
+          vm.runInContext(fnSource, sandbox);
+          await sandbox.refreshResearchWorkspaceIfOpen();
+          return calls;
+        }}
+
+        (async () => console.log(JSON.stringify({{
+          visible: await refreshCount(false, false),
+          workspaceHidden: await refreshCount(true, false),
+          chatHidden: await refreshCount(false, true),
+        }})))();
+        """
+    )
+
+    assert result == {"visible": 1, "workspaceHidden": 0, "chatHidden": 0}
 
 
 def test_delete_result_discloses_retained_memory_and_export_state_is_textual():
