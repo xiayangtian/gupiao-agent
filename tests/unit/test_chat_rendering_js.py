@@ -477,3 +477,54 @@ def test_research_steps_render_public_running_failed_and_blocked_states():
     assert '检索已授权披露' in result['running']
     assert '进行中' in result['running']
     assert '失败' in result['failed']
+
+
+def test_workspace_item_shows_persisted_scope_status_and_favorite_actions():
+    """工作台行显示持久化范围/状态，不能只依赖会话标题。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{html: r.renderWorkspaceItem({{
+          session_id: 'session-1', run_id: 'run-1', title: '现金流核验',
+          company_codes: ['601288'], industry: '银行业', periods: ['2026-06-30'],
+          intent: 'report_fact', status: 'completed', updated_at: '2026-09-17T10:00:00Z',
+          favorite: false, searchable_summary: '农业银行'
+        }})}}));
+        """
+    )
+    html = result['html']
+    assert '农业银行' in html
+    assert 'completed' in html
+    assert '收藏' in html
+    assert '601288' in html
+    assert 'data-research-action="favorite"' in html
+
+
+def test_reference_fact_has_no_save_to_memory_action():
+    """reference/conflict/unavailable 事实绝不渲染保存为确认事实的动作。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{
+          reference: r.renderFactActions({{verification: 'reference', source_type: 'tool'}}, {{id: 'run-1', status: 'completed'}}),
+          verified: r.renderFactActions({{verification: 'verified', source_type: 'pdf', evidence_ids: ['pdf-1']}}, {{id: 'run-1', status: 'completed', verification_report: {{status: 'passed', supported_fact_ids: ['pdf-1']}}}})
+        }}));
+        """
+    )
+    assert '保存到研究记忆' not in result['reference']
+    assert '保存到研究记忆' in result['verified']
+
+
+def test_delete_result_discloses_retained_memory_and_export_state_is_textual():
+    """删除保留记忆和导出状态均以文本表达，不能只用颜色传达。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{
+          deleted: r.renderDeleteResult({{retained_memory_count: 2}}),
+          export: r.renderExportState('partial')
+        }}));
+        """
+    )
+    assert '2 条研究记忆仍被保留' in result['deleted']
+    assert '部分完成' in result['export']
