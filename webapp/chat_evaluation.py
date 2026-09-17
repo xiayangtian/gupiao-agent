@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from math import ceil, isfinite
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from webapp.chat_models import AnswerRun, EvidenceArtifact
 from webapp.evidence_identity import artifact_evidence_ids, validated_pdf_url
@@ -22,12 +22,15 @@ from webapp.research_models import ResearchRun
 
 
 #: The only fixture schema this evaluator can replay.
-FIXTURE_SCHEMA_VERSION = 1
+FIXTURE_SCHEMA_VERSION = 2
+QUALITY_SUMMARY_SCHEMA_VERSION = 2
 
 _CASE_FIELDS = frozenset((
-    "id", "question", "scope", "intent", "allowed_sources", "expected_fact_ids",
-    "expected_company_codes", "expected_report_ids", "forbidden_report_ids", "expected_status",
+    "id", "suite", "expected_failure_codes", "question", "scope", "intent", "allowed_sources",
+    "expected_fact_ids", "expected_company_codes", "expected_report_ids", "forbidden_report_ids",
+    "expected_status",
 ))
+_SUITE_NAMES = frozenset(("health", "probe"))
 _FIXTURE_OUTPUT_FIELDS = frozenset(("answer_run", "research_run"))
 _ALLOWED_SOURCES = frozenset(("local_pdf", "market_data", "web"))
 
@@ -78,6 +81,8 @@ class EvaluationCase:
     """Versionable input expectations for one controlled question."""
 
     id: str
+    suite: Literal["health", "probe"]
+    expected_failure_codes: tuple[str, ...]
     question: str
     scope: str
     intent: str
@@ -91,6 +96,17 @@ class EvaluationCase:
     def __post_init__(self) -> None:
         for name in ("id", "question", "scope", "intent", "expected_status"):
             _text(getattr(self, name), name)
+        if self.suite not in _SUITE_NAMES:
+            raise ValueError("suite must be health or probe")
+        if not isinstance(self.expected_failure_codes, tuple):
+            raise ValueError("expected_failure_codes must be a tuple")
+        _texts(self.expected_failure_codes, "expected_failure_codes")
+        if not set(self.expected_failure_codes).issubset(FAILURE_CODES):
+            raise ValueError("expected_failure_codes contains unsupported code")
+        if self.suite == "health" and self.expected_failure_codes:
+            raise ValueError("health cases must not declare expected_failure_codes")
+        if self.suite == "probe" and not self.expected_failure_codes:
+            raise ValueError("probe cases require expected_failure_codes")
         for name in (
             "allowed_sources", "expected_fact_ids", "expected_company_codes",
             "expected_report_ids", "forbidden_report_ids",
@@ -112,6 +128,8 @@ class EvaluationCase:
             raise ValueError(f"evaluation case missing required fields: {', '.join(sorted(missing))}")
         return cls(
             id=_text(value.get("id"), "id"),
+            suite=_text(value.get("suite"), "suite"),  # type: ignore[arg-type]
+            expected_failure_codes=_texts(value.get("expected_failure_codes"), "expected_failure_codes"),
             question=_text(value.get("question"), "question"),
             scope=_text(value.get("scope"), "scope"),
             intent=_text(value.get("intent"), "intent"),
@@ -317,20 +335,74 @@ class QualitySummary:
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in self.failure_codes.values()):
             raise ValueError("failure_codes counts must be non-negative integers")
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize only safe counters, never case ids or raw failure prose."""
+        return {
+            "passed": self.passed,
+            "case_count": self.case_count,
+            "citation_coverage": self.citation_coverage,
+            "scope_precision": self.scope_precision,
+            "page_link_pass_rate": self.page_link_pass_rate,
+            "tool_success_rate": self.tool_success_rate,
+            "stop_recovery_pass_rate": self.stop_recovery_pass_rate,
+            "p95_stage_duration": self.p95_stage_duration,
+            "failure_codes": {
+                code: self.failure_codes[code] for code in _FAILURE_ORDER if self.failure_codes.get(code)
+            },
+        }
 
-def quality_summary_payload(summary: QualitySummary) -> dict[str, Any]:
-    """Serialize only safe aggregate fields, never case ids or raw failure prose."""
+
+def quality_summary_payload(
+    health: QualitySummary, probe: QualitySummary, generated_at: str,
+) -> dict[str, Any]:
+    """Build the versioned, safe health/probe sidecar payload."""
+    if not isinstance(health, QualitySummary) or not isinstance(probe, QualitySummary):
+        raise ValueError("health and probe must be QualitySummary records")
+    _text(generated_at, "generated_at")
+    probe_payload = probe.to_dict()
+    probe_payload["detected_failure_codes"] = probe_payload.pop("failure_codes")
     return {
-        "passed": summary.passed,
-        "case_count": summary.case_count,
-        "citation_coverage": summary.citation_coverage,
-        "scope_precision": summary.scope_precision,
-        "page_link_pass_rate": summary.page_link_pass_rate,
-        "tool_success_rate": summary.tool_success_rate,
-        "stop_recovery_pass_rate": summary.stop_recovery_pass_rate,
-        "p95_stage_duration": summary.p95_stage_duration,
-        "failure_codes": {code: summary.failure_codes[code] for code in _FAILURE_ORDER if summary.failure_codes.get(code)},
+        "schema_version": QUALITY_SUMMARY_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "health": health.to_dict(),
+        "probe": probe_payload,
     }
+
+
+def build_quality_summary(
+    fixture: EvaluationFixture, generated_at: str | None = None,
+) -> dict[str, Any]:
+    """Replay fixture suites independently and return their safe aggregate summary."""
+    if not isinstance(fixture, EvaluationFixture):
+        raise ValueError("fixture must be an EvaluationFixture")
+    if generated_at is None:
+        generated_at = datetime.now(timezone.utc).isoformat()
+    _text(generated_at, "generated_at")
+    evaluator = ChatEvaluator()
+    health = QualityGate.evaluate(evaluator.run_suite(fixture, "health"))
+    probe_results = evaluator.run_suite(fixture, "probe")
+    detected = QualityGate.evaluate(probe_results)
+    results_by_id = {result.case_id: result for result in probe_results}
+    probes_passed = all(
+        set(case.expected_failure_codes).issubset(
+            QualityGate.evaluate([results_by_id[case.id]]).failure_codes
+        )
+        for case in fixture.cases
+        if case.suite == "probe"
+    )
+    probe = QualitySummary(
+        passed=probes_passed,
+        failures=detected.failures,
+        failure_codes=detected.failure_codes,
+        case_count=detected.case_count,
+        citation_coverage=detected.citation_coverage,
+        scope_precision=detected.scope_precision,
+        page_link_pass_rate=detected.page_link_pass_rate,
+        tool_success_rate=detected.tool_success_rate,
+        stop_recovery_pass_rate=detected.stop_recovery_pass_rate,
+        p95_stage_duration=detected.p95_stage_duration,
+    )
+    return quality_summary_payload(health, probe, generated_at)
 
 
 def _ratio(numerator: int, denominator: int) -> float:
@@ -382,6 +454,15 @@ def _duration_between(started_at: str, finished_at: str) -> float | None:
 
 class ChatEvaluator:
     """Run one controlled case against its fixed fixture output only."""
+
+    def run_suite(self, fixture: EvaluationFixture, suite: Literal["health", "probe"]) -> tuple[EvaluationResult, ...]:
+        """Replay exactly one named suite against its fixed offline fixture."""
+        if not isinstance(fixture, EvaluationFixture):
+            raise ValueError("fixture must be an EvaluationFixture")
+        if suite not in _SUITE_NAMES:
+            raise ValueError("suite must be health or probe")
+        agent = FixtureAgent(fixture)
+        return tuple(self.run(case, agent) for case in fixture.cases if case.suite == suite)
 
     def run(self, case: EvaluationCase, fixture_agent: FixtureAgent) -> EvaluationResult:
         if not isinstance(case, EvaluationCase):

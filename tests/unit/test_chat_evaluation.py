@@ -6,14 +6,17 @@ from pathlib import Path
 
 import pytest
 
+from scripts.run_chat_evaluation import main as quality_command_main
 from webapp.chat_evaluation import (
     FAILURE_CODES,
+    FIXTURE_SCHEMA_VERSION,
     ChatEvaluator,
     EvaluationCase,
     EvaluationFixture,
     EvaluationResult,
     FixtureAgent,
     QualityGate,
+    build_quality_summary,
     quality_summary_payload,
 )
 
@@ -59,8 +62,9 @@ def test_fixture_is_versioned_and_carries_one_fixed_serialized_output_per_case()
     raw = _payload()
     fixture = EvaluationFixture.load(FIXTURE_PATH)
 
-    assert raw["schema_version"] == fixture.schema_version == 1
+    assert raw["schema_version"] == fixture.schema_version == FIXTURE_SCHEMA_VERSION == 2
     assert {case.id for case in fixture.cases} >= REQUIRED_CASE_IDS
+    assert {case.suite for case in fixture.cases} == {"health", "probe"}
     assert set(fixture.outputs) == {case.id for case in fixture.cases}
     for case in fixture.cases:
         answer_run, research_run = fixture.outputs[case.id]
@@ -74,6 +78,13 @@ def test_fixture_is_versioned_and_carries_one_fixed_serialized_output_per_case()
     serialized = json.dumps(raw, ensure_ascii=False)
     for internal in ("prompt", "reasoning", "chain_of_thought", "api_key"):
         assert internal not in serialized
+
+
+def test_fixture_requires_a_suite_for_each_case():
+    payload = _payload()
+    payload["cases"][0].pop("suite")
+    with pytest.raises(ValueError, match="suite"):
+        EvaluationFixture.from_dict(payload)
 
 
 def test_fixture_requires_a_supported_schema_version_and_fixed_outputs():
@@ -123,7 +134,7 @@ def test_evaluator_reuses_shared_pdf_url_validation_for_unsafe_urls():
     assert chat_evaluation.validated_pdf_url is validated_pdf_url
 
 
-def test_fixture_cases_detect_each_deliberate_contract_violation():
+def test_health_summary_can_pass_while_probe_records_expected_detections():
     fixture = EvaluationFixture.load(FIXTURE_PATH)
     results = {result.case_id: result for result in _fixture_outputs(fixture)}
 
@@ -139,11 +150,25 @@ def test_fixture_cases_detect_each_deliberate_contract_violation():
     assert results["realtime-market"].disallowed_sources == ()
     assert results["news-attribution"].disallowed_sources == ()
 
-    summary = QualityGate.evaluate(list(results.values()))
-    assert summary.passed is False
-    assert summary.failure_codes == {"scope_leak": 1}
-    assert summary.citation_coverage == 1.0
-    assert summary.page_link_pass_rate == 1.0
+    payload = build_quality_summary(fixture, generated_at="2026-09-17T00:00:00+00:00")
+    assert payload["health"]["passed"] is True
+    assert payload["probe"]["passed"] is True
+    assert payload["probe"]["detected_failure_codes"] == {"scope_leak": 1}
+    assert "scope-leak" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_probe_fails_when_a_declared_failure_is_not_detected():
+    payload = _payload()
+    scope_leak = next(case for case in payload["cases"] if case["id"] == "scope-leak")
+    scope_leak["expected_failure_codes"].append("invalid_pdf_page_url")
+
+    summary = build_quality_summary(
+        EvaluationFixture.from_dict(payload), generated_at="2026-09-17T00:00:00+00:00",
+    )
+
+    assert summary["health"]["passed"] is True
+    assert summary["probe"]["passed"] is False
+    assert summary["probe"]["detected_failure_codes"] == {"scope_leak": 1}
 
 
 def test_scope_boundary_mismatch_fails_the_gate():
@@ -223,20 +248,37 @@ def test_external_web_identity_uses_shared_artifact_identity(monkeypatch):
 
 def test_quality_summary_payload_exposes_only_fixed_codes_and_metrics():
     fixture = EvaluationFixture.load(FIXTURE_PATH)
-    summary = QualityGate.evaluate(_fixture_outputs(fixture))
+    payload = build_quality_summary(fixture, generated_at="2026-09-17T00:00:00+00:00")
 
-    payload = quality_summary_payload(summary)
-
-    assert set(payload) == {
-        "passed", "case_count", "citation_coverage", "scope_precision", "page_link_pass_rate",
-        "tool_success_rate", "stop_recovery_pass_rate", "p95_stage_duration", "failure_codes",
-    }
-    assert payload["failure_codes"]["scope_leak"] == 1
-    assert set(payload["failure_codes"]) <= FAILURE_CODES
+    assert set(payload) == {"schema_version", "generated_at", "health", "probe"}
+    assert payload["health"]["failure_codes"] == {}
+    assert payload["probe"]["detected_failure_codes"]["scope_leak"] == 1
+    assert set(payload["probe"]["detected_failure_codes"]) <= FAILURE_CODES
     serialized = json.dumps(payload, ensure_ascii=False)
     assert "scope leak" not in serialized
     for case_id in REQUIRED_CASE_IDS:
         assert case_id not in serialized
+
+
+def test_quality_command_failure_does_not_replace_existing_summary(tmp_path):
+    output = tmp_path / "research_quality_summary.json"
+    previous = '{"schema_version": 2, "health": {"passed": true}}'
+    output.write_text(previous, encoding="utf-8")
+
+    assert quality_command_main(["--fixture", str(tmp_path / "missing.json"), "--output", str(output)]) != 0
+    assert output.read_text(encoding="utf-8") == previous
+
+
+def test_quality_command_writes_a_safe_summary_atomically(tmp_path):
+    output = tmp_path / "research_quality_summary.json"
+
+    assert quality_command_main(["--fixture", str(FIXTURE_PATH), "--output", str(output)]) == 0
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert payload["health"]["passed"] is True
+    assert payload["probe"]["passed"] is True
+    assert not (tmp_path / "research_quality_summary.json.tmp").exists()
 
 
 @pytest.mark.parametrize(

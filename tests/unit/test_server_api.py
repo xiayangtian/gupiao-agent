@@ -3772,11 +3772,19 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert saved.status_code == 200
         with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
             json.dump({
-                "passed": False, "case_count": 10, "citation_coverage": 1.0,
-                "scope_precision": 1.0, "page_link_pass_rate": 1.0,
-                "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
-                "p95_stage_duration": 1.5, "failure_codes": {"scope_leak": 1},
-                "failures": ["fixture-scope-leak: scope leak (600900:2026-06-30:semi_annual)"],
+                "schema_version": 2, "generated_at": "2026-09-17T00:00:00+00:00",
+                "health": {
+                    "passed": True, "case_count": 9, "citation_coverage": 1.0,
+                    "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+                    "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                    "p95_stage_duration": 1.5, "failure_codes": {},
+                },
+                "probe": {
+                    "passed": True, "case_count": 1, "citation_coverage": 1.0,
+                    "scope_precision": 0.75, "page_link_pass_rate": 1.0,
+                    "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                    "p95_stage_duration": 1.5, "detected_failure_codes": {"scope_leak": 1},
+                },
                 "raw_cases": ["must not leak"],
             }, target)
 
@@ -3784,13 +3792,9 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         deleted = client.delete(f"/api/chat/sessions/{sid}")
 
         assert quality.status_code == 200
-        assert quality.json()["passed"] is False
-        assert quality.json()["failure_codes"] == {"scope_leak": 1}
-        assert set(quality.json()) == {
-            "available", "passed", "case_count", "citation_coverage", "scope_precision",
-            "page_link_pass_rate", "tool_success_rate", "stop_recovery_pass_rate",
-            "p95_stage_duration", "failure_codes",
-        }
+        assert quality.json()["health"]["passed"] is True
+        assert quality.json()["probe"]["detected_failure_codes"] == {"scope_leak": 1}
+        assert set(quality.json()) == {"available", "schema_version", "generated_at", "health", "probe"}
         assert "raw_cases" not in quality.json() and "failures" not in quality.json()
         assert "600900" not in quality.text and "fixture-scope-leak" not in quality.text
         assert deleted.json()["retained_memory_count"] == 1
@@ -3801,12 +3805,30 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         self._configure_research_api(monkeypatch, tmp_path)
         with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
             json.dump({
-                "passed": True, "case_count": 1, "citation_coverage": 1.0,
-                "scope_precision": 1.0, "page_link_pass_rate": 1.0,
-                "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
-                "p95_stage_duration": 0.0, "failure_codes": {"raw_prompt_leak": 1},
+                "schema_version": 2, "generated_at": "2026-09-17T00:00:00+00:00",
+                "health": {
+                    "passed": True, "case_count": 1, "citation_coverage": 1.0,
+                    "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+                    "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                    "p95_stage_duration": 0.0, "failure_codes": {"raw_prompt_leak": 1},
+                },
+                "probe": {
+                    "passed": True, "case_count": 0, "citation_coverage": 1.0,
+                    "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+                    "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                    "p95_stage_duration": 0.0, "detected_failure_codes": {},
+                },
             }, target)
 
+        assert client.get("/api/research/quality").json() == {"available": False}
+
+    def test_quality_rejects_pre_versioned_or_malformed_nested_summaries(self, client, env, monkeypatch, tmp_path):
+        self._configure_research_api(monkeypatch, tmp_path)
+        with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
+            json.dump({
+                "schema_version": 1, "generated_at": "2026-09-17T00:00:00+00:00",
+                "health": {}, "probe": {},
+            }, target)
         assert client.get("/api/research/quality").json() == {"available": False}
 
     def test_workspace_period_filter_rejects_impossible_dates(self, client, env, monkeypatch, tmp_path):

@@ -19,6 +19,7 @@ import json
 import inspect
 import logging
 import logging.handlers
+from math import isfinite
 import os
 import re
 import threading
@@ -2893,29 +2894,59 @@ def _safe_failure_codes(value: object) -> Dict[str, int] | None:
     return {code: counts[code] for code in sorted(counts)}
 
 
+def _safe_quality_suite(value: object, failure_code_field: str) -> Dict[str, Any] | None:
+    """Read one safe health/probe aggregate without retaining arbitrary sidecar data."""
+    if not isinstance(value, Mapping):
+        return None
+    case_count = value.get("case_count")
+    if (
+        not isinstance(value.get("passed"), bool)
+        or isinstance(case_count, bool)
+        or not isinstance(case_count, int)
+        or case_count < 0
+    ):
+        return None
+    metrics: Dict[str, float | int] = {}
+    for name in _QUALITY_METRIC_FIELDS:
+        metric = value.get(name)
+        if isinstance(metric, bool) or not isinstance(metric, (int, float)) or not isfinite(metric) or metric < 0:
+            return None
+        metrics[name] = metric
+    failure_codes = _safe_failure_codes(value.get(failure_code_field))
+    if failure_codes is None:
+        return None
+    return {
+        "passed": value["passed"],
+        "case_count": case_count,
+        **metrics,
+        failure_code_field: failure_codes,
+    }
+
+
 def _load_precomputed_quality_summary() -> Dict[str, Any]:
-    """Read only safe aggregate fields; this endpoint never executes evaluation."""
+    """Read only a version-2 safe aggregate; this endpoint never executes evaluation."""
     try:
         with open(QUALITY_SUMMARY_PATH, encoding="utf-8") as source:
             raw = json.load(source)
     except (OSError, json.JSONDecodeError):
         return {"available": False}
-    if not isinstance(raw, Mapping):
+    if (
+        not isinstance(raw, Mapping)
+        or raw.get("schema_version") != 2
+        or not isinstance(raw.get("generated_at"), str)
+        or not raw["generated_at"].strip()
+    ):
         return {"available": False}
-    case_count = raw.get("case_count")
-    if not isinstance(raw.get("passed"), bool) or isinstance(case_count, bool) or not isinstance(case_count, int):
-        return {"available": False}
-    if any(isinstance(raw.get(name), bool) or not isinstance(raw.get(name), (int, float)) for name in _QUALITY_METRIC_FIELDS):
-        return {"available": False}
-    failure_codes = _safe_failure_codes(raw.get("failure_codes"))
-    if failure_codes is None:
+    health = _safe_quality_suite(raw.get("health"), "failure_codes")
+    probe = _safe_quality_suite(raw.get("probe"), "detected_failure_codes")
+    if health is None or probe is None:
         return {"available": False}
     return {
         "available": True,
-        "passed": raw["passed"],
-        "case_count": case_count,
-        "failure_codes": failure_codes,
-        **{name: raw[name] for name in _QUALITY_METRIC_FIELDS},
+        "schema_version": 2,
+        "generated_at": raw["generated_at"],
+        "health": health,
+        "probe": probe,
     }
 
 

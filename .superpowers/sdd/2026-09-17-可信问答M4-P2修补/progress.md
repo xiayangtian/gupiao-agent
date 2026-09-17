@@ -22,6 +22,7 @@ Task 1: minor deferred: add an explicit full supplied `fact_` ID round-trip test
 | --- | --- | --- | --- | --- |
 | Task 1 — 稳定 Fact ID 与统一证据身份 | 已完成 | `95487aa` | RED: focused collection failed as expected (`ModuleNotFoundError`); GREEN: `36 passed`; related regression: `44 passed`; `git diff --check` passed | 新 Fact 生成 `fact_` ID；旧序列化 Fact 保持空 ID。完整记录见 `task-1-report.md`。 |
 | Task 2 — 使用 Fact ID 保存研究记忆并迁移后端消费者 | 已完成 | `HEAD` | RED: `2 failed, 1 passed`（legacy Fact 未拒绝、Fact ID API 查找失败）；GREEN: focused `10 passed`; Task 2 regression `210 passed`; related contracts `246 passed`; `git diff --check` passed | memory 拒绝空 ID legacy Fact；API 精确匹配 Fact ID；memory/export/evaluator 复用 evidence_identity；覆盖 unsafe PDF URL、同页多 Fact 与完整 supplied `fact_` ID round-trip。完整记录见 `task-2-report.md`。 |
+| Task 3 — 健康/负向评测分组与显式质量摘要命令 | 已完成 | `HEAD` | RED: focused collection exited 2（缺失 `scripts.run_chat_evaluation`）；GREEN: focused `5 passed`; Task 3 regression `189 passed, 3 warnings`; explicit quality command passed; `git diff --check` passed | fixture v2 强制 health/probe 与预期失败码；CLI 原子写安全 summary，失败保留旧文件；API 只读取 v2 health/probe 白名单聚合。完整记录见 `task-3-report.md`。 |
 
 ## Task 2 Fix round 1（审查 P1）
 

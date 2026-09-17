@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cases": [
     {
       "id": "report-number",
@@ -101,7 +101,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "cross-period",
@@ -237,7 +239,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "local-industry",
@@ -378,7 +382,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "realtime-market",
@@ -471,7 +477,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "news-attribution",
@@ -549,7 +557,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "scope-leak",
@@ -664,7 +674,11 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "probe",
+      "expected_failure_codes": [
+        "scope_leak"
+      ]
     },
     {
       "id": "pdf-without-page",
@@ -742,7 +756,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "tool-failure",
@@ -815,7 +831,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "fact-conflict",
@@ -984,7 +1002,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "stop-recovery",
@@ -1116,7 +1136,9 @@
         "started_at": "2026-09-16T09:00:00+08:00",
         "finished_at": "2026-09-16T09:01:30+08:00",
         "resume_from_step_id": "retrieve"
-      }
+      },
+      "suite": "health",
+      "expected_failure_codes": []
     }
   ]
 }
