@@ -2116,6 +2116,7 @@ if (ragIngestAllBtn) {
 var chatSessionId = null;   // 当前会话 id（null = 新会话）
 var chatSessions = [];       // 历史会话列表
 var researchWorkspaceItems = [];
+var researchWorkspaceLoadGeneration = 0;
 var researchRunOwners = {};
 var researchRunEvidenceIds = {};
 // 进行中的流式请求：sessionKey -> { reader, stopped, answerText, hasContent }
@@ -2250,11 +2251,16 @@ async function loadResearchWorkspace(filters) {
   var status = $('#research-workspace-status');
   var list = $('#research-workspace-list');
   if (!list) return;
+  // Opening the panel starts a load before a user can apply filters.  Only the
+  // newest request may update this shared panel, otherwise a late unfiltered
+  // response can overwrite the user's persisted-metadata filter result.
+  var generation = ++researchWorkspaceLoadGeneration;
   if (status) status.textContent = '正在读取已持久化的研究资产…';
   try {
     var response = await fetch('/api/research/workspace?' + researchWorkspaceQuery(filters || researchWorkspaceFilters()));
     if (!response.ok) throw new Error('HTTP ' + response.status);
     var payload = await response.json();
+    if (generation !== researchWorkspaceLoadGeneration) return;
     researchWorkspaceItems = Array.isArray(payload.items) ? payload.items : [];
     researchWorkspaceItems.forEach(function (item) { researchRunOwners[item.run_id] = item.session_id; });
     list.innerHTML = researchWorkspaceItems.length && window.ChatRendering
@@ -2262,6 +2268,7 @@ async function loadResearchWorkspace(filters) {
       : '<p class="hint">没有符合条件的研究资产。筛选仅检索已持久化元数据。</p>';
     if (status) status.textContent = '已显示 ' + researchWorkspaceItems.length + ' 条研究资产。';
   } catch (_) {
+    if (generation !== researchWorkspaceLoadGeneration) return;
     list.innerHTML = '<p class="hint">研究工作台暂时不可用，请稍后重试。</p>';
     if (status) status.textContent = '读取研究工作台失败。';
   }

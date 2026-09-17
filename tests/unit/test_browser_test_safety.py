@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BROWSER_TEST = ROOT / "tests" / "browser" / "test_analysis_dialog_layout.py"
 STRUCTURE_BROWSER_TEST = ROOT / "tests" / "browser" / "test_financial_structure_visuals.py"
 CHAT_TRUST_BROWSER_TEST = ROOT / "tests" / "browser" / "test_chat_trust_flow.py"
+WORKSPACE_BROWSER_TEST = ROOT / "tests" / "browser" / "test_research_workspace_flow.py"
 STRUCTURE_LAUNCHER = ROOT / "tests" / "browser" / "visual_test_app.py"
 
 
@@ -96,6 +97,36 @@ def test_acceptance_app_disables_real_rag_ingest_and_injects_local_fakes():
     assert "chat_store = ChatStore" in launcher
     assert "fetch_reports" in launcher
     assert "uvicorn" in launcher
+
+
+def test_workspace_browser_flow_uses_isolated_deterministic_m4_fixtures():
+    """M4 workbench acceptance uses only temporary persisted contracts and localhost."""
+    source = WORKSPACE_BROWSER_TEST.read_text(encoding="utf-8")
+    launcher = STRUCTURE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "actual_app_url" in source
+    assert "browser_session" in source
+    assert "visual_test_app" in source
+    assert "fixture-completed-run" in source
+    assert "fixture-completed-run" in launcher
+    assert "_seed_workspace_fixtures" in launcher
+    assert "ResearchWorkspaceStore(" in launcher
+    assert "ResearchMemoryStore(" in launcher
+    assert "tempfile.mkdtemp" in launcher
+    assert "server.research_workspace = ResearchWorkspaceStore" in launcher
+    assert "server.research_memory = ResearchMemoryStore" in launcher
+    assert "IngestionService" not in launcher
+    assert "ReportDownloader" not in launcher
+    assert "CNINFODatasource" not in launcher
+    assert "requests.get" not in launcher
+    assert "requests.post" not in launcher
+    assert "urlopen" not in launcher
+    assert "httpx." not in launcher
+    assert "(1280, 900), (768, 1000), (390, 844)" in source
+    assert "scrollWidth" in source
+    assert "_console_errors" in source
+    assert "_page_errors" in source
+    assert "_failed_requests" in source
 
 
 def test_acceptance_teardown_only_fails_when_the_process_survives_kill():

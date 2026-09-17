@@ -46,7 +46,14 @@ if ROOT not in sys.path:
 import webapp.server as server  # noqa: E402  （必须先定位仓库根目录再导入）
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType  # noqa: E402
 from financial_report_fetcher.report_identity import build_report_filename  # noqa: E402
+from webapp.chat_evidence import pdf_page_url  # noqa: E402
+from webapp.chat_models import (  # noqa: E402
+    AnswerRun, EvidenceArtifact, Fact, FactConflict, IntentDecision, Scope, VerificationReport,
+)
 from webapp.chat_store import ChatStore  # noqa: E402
+from webapp.research_memory import ResearchMemoryStore  # noqa: E402
+from webapp.research_models import ResearchPlan, ResearchRun, ResearchStep, ResearchStepRun  # noqa: E402
+from webapp.research_workspace import ResearchWorkspaceStore  # noqa: E402
 
 
 FIXTURE_REPORT_ID = "601288:2026-06-30:semi_annual"
@@ -378,6 +385,100 @@ class _FakeRagQA:
         }
 
 
+def _fixture_research_run(scope: Scope, run_id: str, status: str) -> ResearchRun:
+    """Create a minimal persisted M3 run without any model or external collaborator."""
+    plan = ResearchPlan(
+        objective="fixture 研究验收",
+        scope=scope,
+        steps=(ResearchStep("retrieve", "retrieve", "本地证据核对", report_ids=scope.report_ids),),
+        acceptance=("fixture evidence is persisted",),
+    )
+    step_status = "completed" if status == "completed" else "stopped"
+    return ResearchRun(
+        id=run_id,
+        plan=plan,
+        status=status,
+        step_runs=(ResearchStepRun("retrieve", status=step_status, result_summary="fixture 摘要"),),
+        started_at="2026-09-17T09:00:00+00:00",
+        finished_at="2026-09-17T09:01:00+00:00",
+    )
+
+
+def _seed_workspace_fixtures(store: ChatStore) -> tuple[str, str, str]:
+    """Persist completed/partial/stopped M4 fixtures and an explicit saved decision.
+
+    Fixtures are immutable AnswerRun/Fact/Artifact/ResearchRun records.  They are
+    intentionally written through ChatStore into the launcher's temporary directory
+    and never call RAG ingestion, MCP, AI, web, or production data providers.
+    """
+    scope = Scope.company_only("601288", "农业银行", (FIXTURE_REPORT_ID,))
+    artifact = EvidenceArtifact.pdf(
+        FIXTURE_REPORT_ID,
+        FIXTURE_PDF_FILENAME,
+        40,
+        "fixture 已验证 PDF 事实",
+        pdf_url=pdf_page_url(FIXTURE_PDF_FILENAME, 40, 0),
+    )
+    fact = Fact(
+        metric="经营活动现金流量净额", value=-621.69, unit="亿元", period="2026-06-30",
+        period_kind="semi_annual_cumulative", entity_scope="consolidated", company_code="601288",
+        source_type="pdf", evidence_ids=(f"{FIXTURE_REPORT_ID}#p40",), verification="verified",
+    )
+    external_reference = Fact(
+        metric="外部参考价格", value=3.2, unit="元/股", period="as_of", period_kind="point_in_time",
+        entity_scope="consolidated", company_code="601288", source_type="tool",
+        evidence_ids=("tool:fixture:quote",), verification="reference", as_of="2026-09-17T09:00:00+00:00",
+    )
+    completed_research = _fixture_research_run(scope, "fixture-completed-research", "completed")
+    completed = AnswerRun(
+        id="fixture-completed-run", content="fixture 已验证 PDF 结论", status="completed", scope=scope,
+        facts=(fact, external_reference), artifacts=(artifact,), intent_decision=IntentDecision(intent="report_fact"),
+        verification_report=VerificationReport("passed", supported_fact_ids=fact.evidence_ids),
+        research_run_id=completed_research.id,
+        research_summary={"status": "completed", "decision_summaries": ["关注现金流变化"]},
+        created_at="2026-09-17T09:00:00+00:00", completed_at="2026-09-17T09:01:00+00:00",
+        model="browser-acceptance-fake",
+    )
+
+    reference = Fact(
+        metric="参考价格", value=3.2, unit="元/股", period="as_of", period_kind="point_in_time",
+        entity_scope="consolidated", company_code="601288", source_type="tool",
+        evidence_ids=("tool:fixture:quote",), verification="reference", as_of="2026-09-17T09:00:00+00:00",
+    )
+    conflict = Fact(
+        metric="营业收入", value=120, unit="亿元", period="2026-06-30", period_kind="semi_annual_cumulative",
+        entity_scope="consolidated", company_code="601288", source_type="tool",
+        evidence_ids=("tool:fixture:revenue",), verification="conflict", as_of="2026-09-17T09:00:00+00:00",
+    )
+    partial_research = _fixture_research_run(scope, "fixture-partial-research", "partial")
+    partial = AnswerRun(
+        id="fixture-reference-run", content="fixture 外部参考与冲突", status="partial", scope=scope,
+        facts=(reference, conflict), artifacts=(artifact,), intent_decision=IntentDecision(intent="realtime_market", needs_local_pdf=False, needs_market_data=True),
+        conflicts=(FactConflict("营业收入", (reference, conflict), "fixture 口径冲突"),),
+        verification_report=VerificationReport("partial"), research_run_id=partial_research.id,
+        research_summary={"status": "partial", "decision_summaries": []},
+        created_at="2026-09-17T09:02:00+00:00", completed_at="2026-09-17T09:03:00+00:00",
+        model="browser-acceptance-fake",
+    )
+    stopped_research = _fixture_research_run(scope, "fixture-stopped-research", "stopped")
+    stopped = AnswerRun(
+        id="fixture-stopped-run", content="fixture 已停止残片", status="stopped", scope=scope,
+        artifacts=(artifact,), intent_decision=IntentDecision(intent="research_task"),
+        research_run_id=stopped_research.id, research_summary={"status": "stopped"},
+        created_at="2026-09-17T09:04:00+00:00", completed_at="2026-09-17T09:05:00+00:00",
+        model="browser-acceptance-fake",
+    )
+
+    records = (("fixture 完成研究", completed, completed_research), ("fixture 部分研究", partial, partial_research), ("fixture 已停止研究", stopped, stopped_research))
+    session_ids = []
+    for title, run, research_run in records:
+        session = store.create_session()
+        assert store.append_turn(session["id"], question=title, run=run) is not None
+        assert store.save_research_run(session["id"], research_run) is not None
+        session_ids.append(session["id"])
+    return tuple(session_ids)
+
+
 def build_app():
     """返回关闭 RAG 摄取/外部数据源、注入可控 fake RAG 的实时应用。"""
     tmp_dir = tempfile.mkdtemp(prefix="trusted-chat-browser-")
@@ -402,6 +503,18 @@ def build_app():
     server.REPORTS_DIR = reports_dir
     server.ANALYSIS_DIR = analysis_dir
     server.chat_store = ChatStore(os.path.join(tmp_dir, "chat_sessions.json"))
+    # server.py's module globals are instantiated at import time; replace these
+    # sidecars as well so browser acceptance cannot read repository/user state.
+    server.research_workspace = ResearchWorkspaceStore(
+        server.chat_store, os.path.join(tmp_dir, "research_workspace.json")
+    )
+    server.research_memory = ResearchMemoryStore(os.path.join(tmp_dir, "research_memory.json"))
+    _completed_session, _partial_session, _stopped_session = _seed_workspace_fixtures(server.chat_store)
+    # This is fixture construction for an already explicit decision, not a product
+    # auto-save path.  It verifies session deletion leaves independent memory alone.
+    server.research_memory.save_decision(
+        "关注现金流变化", "fixture-completed-run", (f"{FIXTURE_REPORT_ID}#p40",)
+    )
     return server.app
 
 
