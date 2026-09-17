@@ -2,7 +2,15 @@
 
 import json
 
-from webapp.chat_models import AnswerRun, CompanyRef, EvidenceArtifact, IndustryRef, IntentDecision, Scope
+from webapp.chat_models import (
+    AnswerRun,
+    CompanyRef,
+    EvidenceArtifact,
+    IndustryRef,
+    IntentDecision,
+    Scope,
+    ToolArtifact,
+)
 from webapp.chat_store import ChatStore
 from webapp.research_workspace import ResearchWorkspaceQuery, ResearchWorkspaceStore
 
@@ -19,6 +27,10 @@ def _run(
     intent: str = "report_fact",
     decision_summaries: tuple[str, ...] = (),
     artifact_snippet: str = "原始 PDF 片段不应进入搜索索引",
+    created_at: str = "2026-09-16T10:00:00",
+    completed_at: str = "2026-09-16T10:00:00",
+    artifacts: tuple[EvidenceArtifact, ...] | None = None,
+    tool_artifacts: tuple[ToolArtifact, ...] = (),
 ) -> AnswerRun:
     scope = Scope(
         mode="company_industry" if industry else "company_only",
@@ -36,14 +48,15 @@ def _run(
         scope=scope,
         intent_decision=IntentDecision(intent=intent),
         research_summary={"decision_summaries": list(decision_summaries)},
-        artifacts=(EvidenceArtifact.pdf(
+        artifacts=artifacts if artifacts is not None else (EvidenceArtifact.pdf(
             report_id=f"{code}:{period}:semi_annual",
             pdf_filename=f"{code}-{period}.pdf",
             page=40,
             snippet=artifact_snippet,
         ),),
-        created_at="2026-09-16T10:00:00",
-        completed_at="2026-09-16T10:00:00",
+        tool_artifacts=tool_artifacts,
+        created_at=created_at,
+        completed_at=completed_at,
     )
 
 
@@ -123,3 +136,82 @@ def test_deleting_session_removes_workspace_items_but_not_favorites_in_other_ses
     assert [item.run_id for item in items] == ["second"]
     assert items[0].favorite is True
     assert sidecar["favorites"] == [{"session_id": sessions["second"], "run_id": "second"}]
+
+
+def test_workspace_normalizes_mixed_naive_and_aware_timestamps_to_utc(tmp_path):
+    """Naive and offset timestamps must be compared as instants, not as strings.
+
+    ``ChatStore`` writes naive local ``updated_at`` while ``AnswerRun`` carries
+    offset-aware timestamps, so a lexicographic maximum can pick the older run.
+    """
+    naive_newer = _run(
+        "naive-newer", code="601288", name="农业银行",
+        created_at="2099-09-16T23:30:00", completed_at="2099-09-16T23:30:00",
+    )
+    aware_older = _run(
+        "aware-older", code="601288", name="农业银行",
+        created_at="2099-09-17T02:00:00+08:00", completed_at="2099-09-17T02:00:00+08:00",
+    )
+    store, _, _ = _workspace_with_runs(tmp_path, [("农业银行研究", [aware_older, naive_newer])])
+
+    items = store.list_items()
+
+    assert [item.run_id for item in items] == ["naive-newer", "aware-older"]
+    assert items[0].updated_at == "2099-09-16T23:30:00+00:00"
+    assert items[1].updated_at == "2099-09-16T18:00:00+00:00"
+
+
+def test_workspace_favorites_reload_from_sidecar_and_prune_orphan_runs(tmp_path):
+    """Favorites persist across reloads; entries without a live run are pruned."""
+    store, chats, sessions = _workspace_with_runs(
+        tmp_path, [("农业银行研究", [_run("first", code="601288", name="农业银行")])],
+    )
+    store.set_favorite(sessions["农业银行研究"], "first", True)
+    sidecar_path = tmp_path / "research_workspace.json"
+
+    reloaded = ResearchWorkspaceStore(chats, str(sidecar_path))
+
+    assert [item.run_id for item in reloaded.list_items(ResearchWorkspaceQuery(favorite_only=True))] == ["first"]
+
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["favorites"].append({"session_id": sessions["农业银行研究"], "run_id": "removed-run"})
+    sidecar_path.write_text(json.dumps(sidecar, ensure_ascii=False), encoding="utf-8")
+
+    orphaned = ResearchWorkspaceStore(chats, str(sidecar_path))
+    items = orphaned.list_items(ResearchWorkspaceQuery(favorite_only=True))
+
+    assert [item.run_id for item in items] == ["first"]
+    assert json.loads(sidecar_path.read_text(encoding="utf-8"))["favorites"] == [
+        {"session_id": sessions["农业银行研究"], "run_id": "first"},
+    ]
+
+
+def test_workspace_text_search_ignores_raw_tool_and_web_bodies(tmp_path):
+    """Only title and saved decision summaries are searchable, never raw evidence text."""
+    run = _run(
+        "raw-bodies", code="601288", name="农业银行",
+        artifacts=(
+            EvidenceArtifact.pdf(
+                report_id="601288:2026-06-30:semi_annual",
+                pdf_filename="601288-2026-06-30.pdf",
+                page=40,
+                snippet="原始 PDF 片段不应进入搜索索引",
+            ),
+            EvidenceArtifact.web(
+                "https://example.com/news", "异动新闻", "独家涨停原因解读",
+                fetched_at="2026-09-16T10:00:00+00:00",
+            ),
+        ),
+        tool_artifacts=(
+            ToolArtifact(
+                "market", "quote", "2026-09-16T10:00:00+08:00", "success",
+                result_summary="机构专用席位净买入",
+            ),
+        ),
+    )
+    store, _, _ = _workspace_with_runs(tmp_path, [("农业银行研究", [run])])
+
+    assert store.list_items(ResearchWorkspaceQuery(text="机构专用席位净买入")) == []
+    assert store.list_items(ResearchWorkspaceQuery(text="独家涨停原因解读")) == []
+    assert store.list_items(ResearchWorkspaceQuery(text="原始 PDF 片段")) == []
+    assert [item.run_id for item in store.list_items(ResearchWorkspaceQuery(text="农业银行"))] == ["raw-bodies"]

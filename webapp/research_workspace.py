@@ -11,11 +11,39 @@ import json
 import os
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
 from webapp.chat_store import ChatStore, ChatSessionRun
 
 DEFAULT_PATH = "data/research_workspace.json"
+
+
+def _utc_instant(value: object) -> datetime | None:
+    """Parse one persisted timestamp as an aware UTC instant, or ``None``.
+
+    ``ChatStore`` writes naive local ``updated_at`` values while ``AnswerRun`` and
+    ``ResearchRun`` carry offset-aware timestamps.  A naive value is read as UTC
+    because it is only used for ordering and display, and an unparseable value is
+    ignored rather than allowed to win the comparison.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _utc_timestamp(*values: object) -> str:
+    """Return the newest value as a normalized UTC ISO timestamp ("" if none)."""
+    instants = [instant for value in values if (instant := _utc_instant(value)) is not None]
+    if not instants:
+        return ""
+    return max(instants).isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -149,13 +177,15 @@ class ResearchWorkspaceStore:
         periods = cls._periods(scope.report_ids) if scope else ()
         intent = run.intent_decision.intent if run.intent_decision else ""
         decisions = cls._saved_decision_summaries(record)
-        updated_at = max(filter(None, (
+        # Normalize before comparing: lexicographic maxima over mixed naive/aware
+        # ISO strings can select the older run.
+        updated_at = _utc_timestamp(
             run.completed_at,
             run.created_at,
             record.research_run.finished_at if record.research_run else "",
             record.research_run.started_at if record.research_run else "",
             record.updated_at,
-        )), default="")
+        )
         return ResearchWorkspaceItem(
             session_id=record.session_id,
             run_id=run.id,
