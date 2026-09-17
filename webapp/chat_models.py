@@ -14,6 +14,8 @@ from numbers import Real
 from typing import Any, ClassVar, Literal, Mapping, Sequence
 from urllib.parse import urlparse
 
+from webapp.evidence_identity import make_fact_id
+
 ScopeMode = Literal["company_only", "company_industry", "whole_corpus"]
 AnswerStatus = Literal["completed", "partial", "stopped", "failed", "waiting_consent"]
 FactVerification = Literal["verified", "reference", "conflict", "unavailable"]
@@ -25,6 +27,7 @@ _ANSWER_STATUSES = frozenset(("completed", "partial", "stopped", "failed", "wait
 _FACT_VERIFICATIONS = frozenset(("verified", "reference", "conflict", "unavailable"))
 _INTENTS = frozenset(("report_fact", "company_trend", "industry_benchmark", "realtime_market", "event_attribution", "research_task"))
 _VERIFICATION_STATUSES = frozenset(("passed", "partial", "blocked"))
+_FACT_ID_UNSET = object()
 
 # 补充授权摘要的受控字段：只允许候选人可读信息，禁止 URL、文件路径和模型原始参数。
 SUPPLEMENT_MAX_CANDIDATES = 5
@@ -464,6 +467,9 @@ class Fact:
     as_of: str = ""
     original_value: float | None = None
     original_unit: str = ""
+    # A sentinel distinguishes newly constructed facts from historical payloads
+    # whose absent ID must remain empty and therefore non-saveable.
+    id: str = field(default=_FACT_ID_UNSET)  # type: ignore[arg-type]
 
     def __post_init__(self) -> None:
         for name in ("metric", "unit", "period", "period_kind", "entity_scope", "company_code", "source_type"):
@@ -480,6 +486,19 @@ class Fact:
         if self.original_value is not None and (isinstance(self.original_value, bool) or not isinstance(self.original_value, Real) or not isfinite(self.original_value)):
             raise ValueError("original_value must be a finite number or null")
         _string(self.original_unit, "original_unit", required=False)
+        if self.id is _FACT_ID_UNSET:
+            object.__setattr__(
+                self,
+                "id",
+                make_fact_id(
+                    self.metric, self.value, self.unit, self.period, self.period_kind,
+                    self.entity_scope, self.company_code, self.evidence_ids,
+                ),
+            )
+        elif not isinstance(self.id, str):
+            raise ValueError("fact id must be a string")
+        elif self.id and not self.id.startswith("fact_"):
+            raise ValueError("fact id must begin with fact_")
         if self.source_type in {"tool", "web"} and not self.as_of and self.verification != "unavailable":
             raise ValueError("external facts without as_of must be unavailable")
 
@@ -527,6 +546,7 @@ class Fact:
             "as_of": self.as_of,
             "original_value": self.original_value,
             "original_unit": self.original_unit,
+            "id": self.id,
         }
 
     @classmethod
@@ -546,6 +566,7 @@ class Fact:
             as_of=_string(data.get("as_of", ""), "as_of", required=False),
             original_value=data.get("original_value"),
             original_unit=_string(data.get("original_unit", ""), "original_unit", required=False),
+            id=_string(data.get("id", ""), "fact id", required=False),
         )
 
 
