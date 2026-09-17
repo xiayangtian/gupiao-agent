@@ -39,15 +39,15 @@ def _fact(*, verification: str = "verified") -> Fact:
     )
 
 
-def _research_run() -> ResearchRun:
-    scope = _scope()
+def _research_run(*, run_id: str = "research-1", scope: Scope | None = None) -> ResearchRun:
+    scope = scope or _scope()
     plan = ResearchPlan(
         "核验营业收入", scope,
         (ResearchStep("retrieve", "retrieve", "检索范围内 PDF"),),
         ("保留页码证据",),
     )
     return ResearchRun(
-        "research-1", plan, "completed",
+        run_id, plan, "completed",
         (ResearchStepRun("retrieve", "completed", result_summary="已检索 PDF"),),
     )
 
@@ -137,6 +137,25 @@ def test_export_escapes_untrusted_markdown_and_only_links_validated_artifact_url
     assert "\\[模型链接\\]\\(javascript:alert\\(1\\)\\)" in text
     assert "[PDF 第 40 页](" not in text
     assert "PDF 第 40 页（链接不可用）" in text
+
+
+def test_export_rejects_research_run_with_another_identity_or_scope():
+    """A provided ResearchRun must be the AnswerRun's own run with the same scope."""
+    from webapp.research_export import ExportValidationError, ResearchExporter
+
+    exporter = ResearchExporter()
+    run = _completed_run()
+
+    with pytest.raises(ExportValidationError, match="来源不一致"):
+        exporter.to_json(run, _research_run(run_id="research-2"))
+    with pytest.raises(ExportValidationError, match="范围不一致"):
+        exporter.to_json(run, _research_run(scope=Scope.company_only(
+            "601288", "农业银行", ("601288:2025-12-31:annual",),
+        )))
+    with pytest.raises(ExportValidationError, match="来源不一致"):
+        exporter.to_markdown(run, _research_run(run_id="research-2"))
+
+    assert exporter.to_json(run, _research_run()) == ResearchExporter().to_json(run, _research_run())
 
 
 def test_json_export_is_full_canonical_payload_with_export_timestamp():

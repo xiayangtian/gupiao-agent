@@ -98,8 +98,15 @@ class ResearchExporter:
             raise ExportValidationError("导出缺少运行状态")
         if run.legacy_evidence_unavailable or not (run.artifacts or run.tool_artifacts):
             raise ExportValidationError("导出缺少可复核证据")
-        if research_run is not None and not isinstance(research_run, ResearchRun):
-            raise ExportValidationError("研究步骤必须引用 ResearchRun")
+        if research_run is not None:
+            if not isinstance(research_run, ResearchRun):
+                raise ExportValidationError("研究步骤必须引用 ResearchRun")
+            # An export is a review record: a research run that is not this answer's
+            # own run (or that froze another scope) must never be merged into it.
+            if run.research_run_id != research_run.id:
+                raise ExportValidationError("研究步骤与 AnswerRun 的来源不一致")
+            if run.scope != research_run.plan.scope:
+                raise ExportValidationError("研究步骤与 AnswerRun 的范围不一致")
 
     def to_json(self, run: AnswerRun, research_run: ResearchRun | None) -> dict[str, Any]:
         """Return the full canonical payload, with no presentation-time summary."""
