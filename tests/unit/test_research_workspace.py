@@ -138,6 +138,43 @@ def test_deleting_session_removes_workspace_items_but_not_favorites_in_other_ses
     assert sidecar["favorites"] == [{"session_id": sessions["second"], "run_id": "second"}]
 
 
+def test_workspace_item_reports_evidence_availability_from_persisted_artifacts(tmp_path):
+    """A row may only claim evidence is available when a persisted artifact reopens.
+
+    Legacy runs migrated from bare messages keep no artifact, and an unavailable PDF
+    cannot send a reader back to the page, so both must report no usable evidence.
+    """
+    with_pdf = _run("with-pdf", code="601288", name="农业银行")
+    web_only = _run(
+        "web-only", code="600900", name="长江电力",
+        artifacts=(EvidenceArtifact.web(
+            url="https://example.test/disclosure", title="外部披露",
+            snippet="外部原文片段", fetched_at="2026-09-16T10:00:00+08:00",
+        ),),
+    )
+    no_artifact = _run("no-artifact", code="601288", name="农业银行", artifacts=())
+    unavailable_pdf = _run(
+        "unavailable-pdf", code="601288", name="农业银行",
+        artifacts=(EvidenceArtifact.pdf(
+            report_id="601288:2026-06-30:semi_annual", pdf_filename="601288.pdf", page=40,
+            snippet="原文件已不可用", availability="unavailable",
+        ),),
+    )
+    store, _, _ = _workspace_with_runs(tmp_path, [
+        ("农业银行研究", [with_pdf, no_artifact, unavailable_pdf]),
+        ("长江电力研究", [web_only]),
+    ])
+
+    items = {item.run_id: item for item in store.list_items()}
+
+    assert items["with-pdf"].evidence_available is True
+    assert items["web-only"].evidence_available is True
+    assert items["no-artifact"].evidence_available is False
+    assert items["unavailable-pdf"].evidence_available is False
+    assert items["with-pdf"].to_dict()["evidence_available"] is True
+    assert items["no-artifact"].to_dict()["evidence_available"] is False
+
+
 def test_workspace_normalizes_mixed_naive_and_aware_timestamps_to_utc(tmp_path):
     """Naive and offset timestamps must be compared as instants, not as strings.
 

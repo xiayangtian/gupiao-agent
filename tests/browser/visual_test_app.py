@@ -491,6 +491,10 @@ def build_app():
     """返回关闭 RAG 摄取/外部数据源、注入可控 fake RAG 的实时应用。"""
     tmp_dir = tempfile.mkdtemp(prefix="trusted-chat-browser-")
     atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
+    # ``TaskManager()`` resolves its SQLite path from ``TASK_DB_PATH``, so without
+    # this the acceptance app would open and write the repository's own
+    # ``data/tasks.sqlite3`` instead of the launcher's temporary directory.
+    os.environ["TASK_DB_PATH"] = os.path.join(tmp_dir, "tasks.sqlite3")
     reports_dir = os.path.join(tmp_dir, "reports")
     analysis_dir = os.path.join(reports_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
@@ -516,13 +520,15 @@ def build_app():
     server.research_workspace = ResearchWorkspaceStore(
         server.chat_store, os.path.join(tmp_dir, "research_workspace.json")
     )
+    completed_session, _partial_session, _stopped_session = _seed_workspace_fixtures(server.chat_store)
+    # This is fixture construction for an already explicit decision, not a product
+    # auto-save path.  It verifies session deletion leaves independent memory alone.
+    # The owner is the fixture session that already owns the source run.
     server.research_memory = ResearchMemoryStore(
         os.path.join(tmp_dir, "research_memory.json"),
         run_lookup=_fixture_run_lookup,
+        owner_session_id=completed_session,
     )
-    _completed_session, _partial_session, _stopped_session = _seed_workspace_fixtures(server.chat_store)
-    # This is fixture construction for an already explicit decision, not a product
-    # auto-save path.  It verifies session deletion leaves independent memory alone.
     server.research_memory.save_decision(
         "关注现金流变化", "fixture-completed-run", (f"{FIXTURE_REPORT_ID}#p40",)
     )

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
+from webapp.chat_models import AnswerRun
 from webapp.chat_store import ChatStore, ChatSessionRun
 
 DEFAULT_PATH = "data/research_workspace.json"
@@ -60,6 +61,7 @@ class ResearchWorkspaceItem:
     favorite: bool
     searchable_summary: str = ""
     industry_provider: str = ""
+    evidence_available: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +77,7 @@ class ResearchWorkspaceItem:
             "favorite": self.favorite,
             "searchable_summary": self.searchable_summary,
             "industry_provider": self.industry_provider,
+            "evidence_available": self.evidence_available,
         }
 
 
@@ -163,6 +166,19 @@ class ResearchWorkspaceStore:
             return ()
         return tuple(value.strip() for value in values if isinstance(value, str) and value.strip())
 
+    @staticmethod
+    def _evidence_available(run: AnswerRun) -> bool:
+        """Report whether the immutable run persisted a reopenable evidence artifact.
+
+        Derived from the persisted artifacts only: an unavailable PDF or a run
+        migrated from a legacy message kept no evidence a reader can open, and the
+        workbench row must not claim otherwise.
+        """
+        return any(
+            artifact.url if artifact.source == "web" else artifact.availability == "available"
+            for artifact in run.artifacts
+        )
+
     @classmethod
     def _item_from_record(cls, record: ChatSessionRun, favorites: set[tuple[str, str]]) -> ResearchWorkspaceItem | None:
         run = record.run
@@ -199,6 +215,7 @@ class ResearchWorkspaceStore:
             favorite=(record.session_id, run.id) in favorites,
             searchable_summary="\n".join(decisions),
             industry_provider=provider,
+            evidence_available=cls._evidence_available(run),
         )
 
     def _all_items(self) -> list[ResearchWorkspaceItem]:

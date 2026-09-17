@@ -39,6 +39,7 @@ class MemoryEntry:
     created_at: str
     expires_at: str | None
     revoked_at: str | None
+    owner_session_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id:
@@ -47,6 +48,8 @@ class MemoryEntry:
             raise ValueError("memory kind must be fact, artifact, or decision")
         if not isinstance(self.source_run_id, str) or not self.source_run_id:
             raise ValueError("source_run_id must be a non-empty string")
+        if self.owner_session_id is not None:
+            _text(self.owner_session_id, "owner_session_id")
         if not isinstance(self.payload_json, str):
             raise ValueError("memory payload must be serialized JSON")
         try:
@@ -72,6 +75,7 @@ class MemoryEntry:
             "id": self.id,
             "kind": self.kind,
             "source_run_id": self.source_run_id,
+            "owner_session_id": self.owner_session_id,
             "payload": self.payload,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
@@ -84,10 +88,13 @@ class MemoryEntry:
             raise ValueError("memory entry must be an object")
         expires_at = value.get("expires_at")
         revoked_at = value.get("revoked_at")
+        owner_session_id = value.get("owner_session_id")
         if expires_at is not None and not isinstance(expires_at, str):
             raise ValueError("expires_at must be a string or null")
         if revoked_at is not None and not isinstance(revoked_at, str):
             raise ValueError("revoked_at must be a string or null")
+        if owner_session_id is not None and not isinstance(owner_session_id, str):
+            raise ValueError("owner_session_id must be a string or null")
         return cls(
             id=_text(value.get("id"), "memory id"),
             kind=_text(value.get("kind"), "memory kind"),
@@ -96,6 +103,7 @@ class MemoryEntry:
             created_at=_text(value.get("created_at"), "created_at"),
             expires_at=expires_at,
             revoked_at=revoked_at,
+            owner_session_id=owner_session_id,
         )
 
 
@@ -199,13 +207,27 @@ class ResearchMemoryStore:
     particular session store.  Fact saves fail closed without it because eligibility
     depends on the immutable source AnswerRun.  API callers supply an owner-checked
     lookup after verifying the session boundary.
+
+    ``owner_session_id`` is the session that already passed that boundary check; a
+    store without it cannot write, so no save path can persist an entry whose owner
+    is unknown.  Entries written before owners were recorded stay readable and
+    revocable but carry no owner.
     """
 
-    def __init__(self, path: str | None = None, *, run_lookup: RunLookup | None = None) -> None:
+    def __init__(
+        self,
+        path: str | None = None,
+        *,
+        run_lookup: RunLookup | None = None,
+        owner_session_id: str | None = None,
+    ) -> None:
         if run_lookup is not None and not callable(run_lookup):
             raise ValueError("run_lookup must be callable")
+        if owner_session_id is not None:
+            _text(owner_session_id, "owner_session_id")
         self.path = path or DEFAULT_PATH
         self._run_lookup = run_lookup
+        self._owner_session_id = owner_session_id
         self._lock = threading.RLock()
         self._entries = self._load()
 
@@ -231,7 +253,7 @@ class ResearchMemoryStore:
         temporary_path = f"{self.path}.tmp"
         with open(temporary_path, "w", encoding="utf-8") as target:
             json.dump(
-                {"schema_version": 1, "entries": [entry.to_dict() for entry in self._entries]},
+                {"schema_version": 2, "entries": [entry.to_dict() for entry in self._entries]},
                 target,
                 ensure_ascii=False,
                 indent=2,
@@ -247,6 +269,11 @@ class ResearchMemoryStore:
         expires_after_days: int | None,
     ) -> MemoryEntry:
         source_run_id = _text(source_run_id, "source_run_id")
+        owner_session_id = self._owner_session_id
+        if owner_session_id is None:
+            # A save must record the session that already passed the ownership check;
+            # an ownerless entry could never be scoped back to its owner afterwards.
+            raise ValueError("保存研究记忆必须绑定已校验的会话归属")
         created_at = _now()
         entry = MemoryEntry(
             id=uuid4().hex,
@@ -256,6 +283,7 @@ class ResearchMemoryStore:
             created_at=created_at,
             expires_at=_expires_after(expires_after_days, created_at) if expires_after_days else None,
             revoked_at=None,
+            owner_session_id=owner_session_id,
         )
         self._entries.append(entry)
         self._save()
@@ -347,6 +375,7 @@ class ResearchMemoryStore:
                     created_at=entry.created_at,
                     expires_at=entry.expires_at,
                     revoked_at=_now(),
+                    owner_session_id=entry.owner_session_id,
                 )
                 self._save()
                 return True
@@ -366,3 +395,18 @@ class ResearchMemoryStore:
                 if entry.revoked_at is None
                 and (entry.expires_at is None or _parse_time(entry.expires_at, "expires_at") > now)
             ]
+
+    def list_owned_active(self, owner_session_id: str | None = None) -> list[MemoryEntry]:
+        """List active entries whose owner session is recorded, newest order preserved.
+
+        Entries persisted before owners were recorded are fail-closed here: their
+        owner cannot be guessed, so they stay out of every owner-scoped listing while
+        remaining revocable by id.
+        """
+        if owner_session_id is not None:
+            _text(owner_session_id, "owner_session_id")
+        return [
+            entry for entry in self.list_active()
+            if entry.owner_session_id is not None
+            and (owner_session_id is None or entry.owner_session_id == owner_session_id)
+        ]

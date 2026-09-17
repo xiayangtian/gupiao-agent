@@ -62,12 +62,65 @@ def _run(
     )
 
 
-def _store(tmp_path, *runs: AnswerRun) -> ResearchMemoryStore:
+def _store(tmp_path, *runs: AnswerRun, owner: str | None = "session-1") -> ResearchMemoryStore:
     by_id = {run.id: run for run in runs}
     return ResearchMemoryStore(
         str(tmp_path / "research_memory.json"),
         run_lookup=by_id.get,
+        owner_session_id=owner,
     )
+
+
+def test_saved_memory_records_the_owner_session_and_bumps_the_sidecar_schema(tmp_path):
+    """A save persists the already ownership-checked session, never a client choice."""
+    path = tmp_path / "research_memory.json"
+    store = _store(tmp_path, _run("run-1"), owner="session-a")
+
+    entry = store.save_decision("关注减值变化", "run-1", (PDF_EVIDENCE_ID,))
+
+    assert entry.owner_session_id == "session-a"
+    assert entry.to_dict()["owner_session_id"] == "session-a"
+    sidecar = json.loads(path.read_text(encoding="utf-8"))
+    assert sidecar["schema_version"] == 2
+    assert sidecar["entries"][0]["owner_session_id"] == "session-a"
+    assert ResearchMemoryStore(str(path)).list_owned_active("session-a")[0].id == entry.id
+
+
+def test_save_without_a_checked_owner_session_fails_closed(tmp_path):
+    store = _store(tmp_path, _run("run-1"), owner=None)
+
+    with pytest.raises(ValueError, match="会话归属"):
+        store.save_fact(_fact(), "run-1")
+    with pytest.raises(ValueError, match="会话归属"):
+        store.save_decision("关注减值变化", "run-1", (PDF_EVIDENCE_ID,))
+
+
+def test_owner_scoped_listing_hides_entries_without_a_recorded_owner(tmp_path):
+    """An entry written before owners existed cannot be guessed into any owner scope."""
+    path = tmp_path / "research_memory.json"
+    store = _store(tmp_path, _run("run-1"), owner="session-a")
+    owned = store.save_fact(_fact(), "run-1")
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    del legacy["entries"][0]["owner_session_id"]
+    legacy["schema_version"] = 1
+    path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    reloaded = ResearchMemoryStore(str(path))
+
+    assert [entry.id for entry in reloaded.list_active()] == [owned.id]
+    assert reloaded.list_owned_active() == []
+    assert reloaded.list_owned_active("session-a") == []
+    assert reloaded.revoke(owned.id) is True
+    assert reloaded.list_active() == []
+
+
+def test_revoking_memory_keeps_the_recorded_owner_session(tmp_path):
+    store = _store(tmp_path, _run("run-1"), owner="session-a")
+    entry = store.save_fact(_fact(), "run-1")
+
+    assert store.revoke(entry.id) is True
+
+    assert ResearchMemoryStore(store.path).list_entries()[0].owner_session_id == "session-a"
 
 
 def test_verified_pdf_fact_can_be_saved_with_source_and_expiry(tmp_path):

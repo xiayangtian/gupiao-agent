@@ -178,7 +178,9 @@ def _workspace_script(company: str = "", status: str = "", favorite_only: bool =
   document.querySelector('#research-filter-favorite').checked = {str(favorite_only).lower()};
   document.querySelector('#research-filter-apply').click();
   const deadline = Date.now() + 10000;
-  while (!document.querySelector('#research-workspace-status').textContent.includes('已显示') && Date.now() < deadline) {{
+  while ((!document.querySelector('#research-workspace-status').textContent.includes('已显示')
+      || !document.querySelector('#research-memory-status').textContent.includes('已显示'))
+      && Date.now() < deadline) {{
     await new Promise(resolve => setTimeout(resolve, 100));
   }}
   if ({str(delay_initial).lower()}) await new Promise(resolve => setTimeout(resolve, 450));
@@ -204,6 +206,7 @@ def test_workspace_filters_by_company_and_status(browser_session, actual_app_url
     assert len(rendered["items"]) == 1
     assert rendered["items"][0]["runId"] == "fixture-completed-run"
     assert "状态：completed" in rendered["items"][0]["text"]
+    assert "证据：可用" in rendered["items"][0]["text"]
     favorite = _eval(browser_session, """
 (async () => {
   const card = document.querySelector('[data-research-run-id="fixture-completed-run"]');
@@ -352,6 +355,151 @@ def test_workspace_mobile_has_no_horizontal_overflow(browser_session, actual_app
     assert geometry["scrollWidth"] <= geometry["innerWidth"], (
         f"{viewport} 工作台横向溢出：{geometry['scrollWidth']} > {geometry['innerWidth']}"
     )
+    assert _console_errors(browser_session) == []
+    assert _page_errors(browser_session) == []
+    assert _failed_requests(browser_session, actual_app_url) == []
+
+
+def test_workbench_memory_list_persists_across_refresh_and_revokes(browser_session, actual_app_url):
+    """刷新后仍能在工作台管理持久化记忆；已删除会话的记忆单独分组且仍可撤销。"""
+    _start_observing(browser_session)
+    rendered = _eval(browser_session, """
+(async () => {
+  const deadline = () => Date.now() + 10000;
+  const toggle = document.querySelector('#research-workspace-toggle');
+  if (document.querySelector('#research-workspace').classList.contains('hidden')) toggle.click();
+  let until = deadline();
+  while (!document.querySelector('#research-memory-list .research-memory-row') && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const fixtureRows = document.querySelectorAll('#research-memory-list .research-memory-row').length;
+  const items = (await (await fetch('/api/research/workspace')).json()).items;
+  const completed = items.find(item => item.run_id === 'fixture-completed-run');
+  await openChatSession(completed.session_id);
+  until = deadline();
+  while (!document.querySelector('[data-research-memory-kind="fact"]') && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const save = document.querySelector('[data-research-memory-kind="fact"]');
+  if (save) save.click();
+  until = deadline();
+  while (document.querySelectorAll('#research-memory-list .research-memory-row').length < fixtureRows + 1 && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const savedRows = document.querySelectorAll('#research-memory-list .research-memory-row').length;
+  window.confirm = () => true;
+  await deleteChatSession(completed.session_id);
+  until = deadline();
+  while (document.querySelector('#research-memory-list .research-memory-group h4').textContent !== '来自已删除会话' && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const groups = [...document.querySelectorAll('#research-memory-list .research-memory-group')].map(group => ({
+    label: group.querySelector('h4').textContent,
+    rows: group.querySelectorAll('.research-memory-row').length,
+  }));
+  const revoke = document.querySelector('#research-memory-list [data-research-action="revoke-memory"]');
+  if (revoke) revoke.click();
+  until = deadline();
+  while (document.querySelectorAll('#research-memory-list .research-memory-row').length >= savedRows && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const remaining = document.querySelectorAll('#research-memory-list .research-memory-row').length;
+  const persisted = (await (await fetch('/api/research/memory')).json()).entries.length;
+  return JSON.stringify({ fixtureRows, savedRows, groups, remaining, persisted });
+})()
+""")
+
+    assert rendered["fixtureRows"] == 1
+    assert rendered["savedRows"] == 2
+    assert rendered["groups"] == [{"label": "来自已删除会话", "rows": 2}]
+    assert rendered["remaining"] == 1
+    assert rendered["persisted"] == 1
+
+    # 真实重新加载页面：剩下的那条记忆由服务端重建，仍可撤销。
+    _run_browser(browser_session, "open", actual_app_url + "/#/chat")
+    reloaded = _eval(browser_session, """
+(async () => {
+  const deadline = () => Date.now() + 10000;
+  const toggle = document.querySelector('#research-workspace-toggle');
+  if (document.querySelector('#research-workspace').classList.contains('hidden')) toggle.click();
+  let until = deadline();
+  while (!document.querySelector('#research-memory-list .research-memory-row') && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const groups = [...document.querySelectorAll('#research-memory-list .research-memory-group')].map(group => ({
+    label: group.querySelector('h4').textContent,
+    rows: group.querySelectorAll('.research-memory-row').length,
+  }));
+  const rowsAfterReload = document.querySelectorAll('#research-memory-list .research-memory-row').length;
+  window.confirm = () => true;
+  const revoke = document.querySelector('#research-memory-list [data-research-action=\"revoke-memory\"]');
+  if (revoke) revoke.click();
+  until = deadline();
+  while (document.querySelectorAll('#research-memory-list .research-memory-row').length >= rowsAfterReload && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const remaining = document.querySelectorAll('#research-memory-list .research-memory-row').length;
+  const persisted = (await (await fetch('/api/research/memory')).json()).entries.length;
+  return JSON.stringify({ rowsAfterReload, groups, remaining, persisted });
+})()
+""")
+
+    assert reloaded["rowsAfterReload"] == 1
+    assert reloaded["groups"] == [{"label": "来自已删除会话", "rows": 1}]
+    assert reloaded["remaining"] == 0
+    assert reloaded["persisted"] == 0
+    assert _console_errors(browser_session) == []
+    assert _page_errors(browser_session) == []
+    assert _failed_requests(browser_session, actual_app_url) == []
+
+
+def test_run_reuse_actions_keep_history_and_branch_into_a_new_session(browser_session, actual_app_url):
+    """编辑重问只回填问题；分支追问用既有端点新建会话，不复制证据、不改写历史。"""
+    _start_observing(browser_session)
+    rendered = _eval(browser_session, """
+(async () => {
+  const deadline = () => Date.now() + 10000;
+  const items = (await (await fetch('/api/research/workspace')).json()).items;
+  const completed = items.find(item => item.run_id === 'fixture-completed-run');
+  await openChatSession(completed.session_id);
+  let until = deadline();
+  while (!document.querySelector('[data-chat-action="edit-reask"]') && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const question = document.querySelector('#chat-history .chat-msg.user').textContent.trim();
+  document.querySelector('[data-chat-action="edit-reask"]').click();
+  const inputAfterEdit = document.querySelector('#chat-input').value;
+  const editNotice = document.body.textContent.indexOf('已回填该轮原始问题') >= 0;
+  document.querySelector('[data-chat-action="branch-followup"]').click();
+  until = deadline();
+  while (chatSessionId === completed.session_id && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const branchSessionId = chatSessionId;
+  while (document.querySelector('#chat-input').value !== question && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const branchNotice = document.body.textContent.indexOf('已在新会话中分支追问') >= 0;
+  const oldDetail = await (await fetch('/api/chat/sessions/' + encodeURIComponent(completed.session_id))).json();
+  const newDetail = await (await fetch('/api/chat/sessions/' + encodeURIComponent(branchSessionId))).json();
+  return JSON.stringify({
+    question, inputAfterEdit, editNotice, branchNotice,
+    branched: branchSessionId !== completed.session_id,
+    branchInput: document.querySelector('#chat-input').value,
+    sourceMessages: oldDetail.messages.length,
+    branchMessages: newDetail.messages.length
+  });
+})()
+""")
+
+    assert rendered["inputAfterEdit"] == rendered["question"]
+    assert rendered["editNotice"] is True
+    assert rendered["branched"] is True
+    assert rendered["branchInput"] == rendered["question"]
+    assert rendered["branchNotice"] is True
+    # 历史轮次不变，新会话不复制任何证据包（只预填问题，等待用户发送）。
+    assert rendered["sourceMessages"] == 2
+    assert rendered["branchMessages"] == 0
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
     assert _failed_requests(browser_session, actual_app_url) == []

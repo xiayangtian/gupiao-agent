@@ -2338,16 +2338,51 @@ async function saveResearchMemoryEntry(kind, id, runId) {
     });
     if (!response.ok) throw new Error('save failed');
     appendResearchMemoryNotice((await response.json()).entry);
+    refreshResearchMemoryPanel();
   } catch (_) { appendResearchMemoryNotice(null, '保存失败：该证据可能不符合研究记忆条件。'); }
 }
 
 function appendResearchMemoryNotice(entry, fallback) {
+  appendChatNotice(entry && window.ChatRendering
+    ? window.ChatRendering.renderMemoryEntry(entry)
+    : '<div role="status">' + escapeHtml(fallback || '保存失败。') + '</div>');
+}
+
+function appendChatNotice(html) {
   var box = $('#chat-history');
   if (!box) return;
   var div = document.createElement('div');
   div.className = 'research-memory-notice';
-  div.innerHTML = entry && window.ChatRendering ? window.ChatRendering.renderMemoryEntry(entry) : '<div role="status">' + escapeHtml(fallback || '保存失败。') + '</div>';
+  div.innerHTML = html;
   box.appendChild(div); scrollChatToBottom();
+}
+
+// 持久化研究记忆列表：与内存提示不同，刷新页面后仍由服务端重建。
+async function loadResearchMemory() {
+  var list = $('#research-memory-list');
+  if (!list) return;
+  var status = $('#research-memory-status');
+  if (status) status.textContent = '正在读取已持久化的研究记忆…';
+  try {
+    var response = await fetch('/api/research/memory');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    var payload = await response.json();
+    var entries = Array.isArray(payload.entries) ? payload.entries : [];
+    var titles = {};
+    chatSessions.forEach(function (session) { titles[session.id] = session.title || '新会话'; });
+    list.innerHTML = entries.length && window.ChatRendering
+      ? window.ChatRendering.renderMemoryList(entries, titles)
+      : '<p class="hint">暂无已保存的研究记忆；在回答中显式保存后会出现在这里。</p>';
+    if (status) status.textContent = '已显示 ' + entries.length + ' 条已保存研究记忆。';
+  } catch (_) {
+    list.innerHTML = '<p class="hint">研究记忆暂时不可用，请稍后重试。</p>';
+    if (status) status.textContent = '读取研究记忆失败。';
+  }
+}
+
+function refreshResearchMemoryPanel() {
+  var panel = $('#research-workspace');
+  if (panel && !panel.classList.contains('hidden')) loadResearchMemory();
 }
 
 async function revokeResearchMemory(id) {
@@ -2357,6 +2392,7 @@ async function revokeResearchMemory(id) {
     if (!response.ok) throw new Error('revoke failed');
     var button = document.querySelector('[data-research-memory-id="' + CSS.escape(id) + '"]');
     if (button && button.parentNode) button.parentNode.textContent = '研究记忆已撤销。';
+    refreshResearchMemoryPanel();
   } catch (_) { appendResearchMemoryNotice(null, '撤销研究记忆失败，请重试。'); }
 }
 
@@ -2368,7 +2404,7 @@ function bindResearchWorkspace() {
   toggle.dataset.bound = '1';
   function setOpen(open) {
     panel.classList.toggle('hidden', !open); toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (open) loadResearchWorkspace(researchWorkspaceFilters());
+    if (open) { loadResearchWorkspace(researchWorkspaceFilters()); loadResearchMemory(); }
   }
   toggle.addEventListener('click', function () { setOpen(panel.classList.contains('hidden')); });
   close.addEventListener('click', function () { setOpen(false); toggle.focus(); });
@@ -2381,6 +2417,7 @@ function bindResearchWorkspace() {
   panel.addEventListener('click', function (event) {
     var button = event.target.closest && event.target.closest('[data-research-action]');
     if (!button) return;
+    if (button.dataset.researchAction === 'revoke-memory') { revokeResearchMemory(button.dataset.researchMemoryId); return; }
     var item = button.closest('.research-workspace-item');
     if (!item) return;
     var runId = item.dataset.researchRunId;
@@ -2403,6 +2440,7 @@ function bindResearchWorkspace() {
       });
       if (!response.ok) throw new Error('decision save failed');
       decisionDialog.close(); appendResearchMemoryNotice((await response.json()).entry);
+      refreshResearchMemoryPanel();
     } catch (_) { appendResearchMemoryNotice(null, '保存失败：研究决策必须引用来源运行中的证据。'); }
   });
   if (window.matchMedia && window.matchMedia('(max-width: 390px)').matches) $('#research-workspace-filters').open = false;
@@ -2502,6 +2540,7 @@ async function deleteChatSession(sid) {
     var st = chatStreams[sid];
     if (st && st.reader) { try { await st.reader.cancel(); } catch (_) {} }
     delete chatStreams[sid];
+    refreshResearchMemoryPanel();
     if (chatSessionId === sid) {
       chatSessionId = null;
       var box = $('#chat-history');
@@ -3438,6 +3477,8 @@ function appendAssistantRun(sel, message) {
   var recoveryHtml = rendering ? rendering.renderResearchRecovery(run, message && message.research_run) : '';
   if (recoveryHtml) wrapper.insertAdjacentHTML('beforeend', recoveryHtml);
   if (statusHtml) wrapper.insertAdjacentHTML('beforeend', statusHtml);
+  var reuseHtml = rendering && rendering.renderRunReuseActions ? rendering.renderRunReuseActions(run) : '';
+  if (reuseHtml) wrapper.insertAdjacentHTML('beforeend', reuseHtml);
   box.appendChild(wrapper);
   box.scrollTop = box.scrollHeight;
 }
@@ -3524,6 +3565,16 @@ function bindChatRunActions() {
       resumeResearch(resume.dataset.researchRunId, resume);
       return;
     }
+    var editReask = e.target && e.target.closest ? e.target.closest('[data-chat-action="edit-reask"]') : null;
+    if (editReask) {
+      editAndReask(editReask);
+      return;
+    }
+    var branch = e.target && e.target.closest ? e.target.closest('[data-chat-action="branch-followup"]') : null;
+    if (branch) {
+      branchFollowup(branch);
+      return;
+    }
     var regen = e.target && e.target.closest ? e.target.closest('.chat-run-regenerate') : null;
     if (!regen) return;
     var runBlock = regen.closest ? regen.closest('.chat-run') : null;
@@ -3577,6 +3628,43 @@ function chatRunQuestion(runBlock) {
     prev = prev.previousElementSibling;
   }
   return '';
+}
+
+// 「编辑重问」：只把该轮原始问题回填输入框供编辑；发送仍走既有 /api/chat/stream，
+// 在同一会话新增一个 run——不改写也不删除历史轮次。
+function editAndReask(button) {
+  var runBlock = button.closest ? button.closest('.chat-run') : null;
+  var question = chatRunQuestion(runBlock).trim();
+  var input = $('#chat-input');
+  if (!question || !input) return;
+  input.value = question;
+  input.focus();
+  appendChatNotice('<div role="status">已回填该轮原始问题，可编辑后发送。</div>');
+}
+
+// 「分支追问」：用既有 POST /api/chat/sessions 新建（或复用空）会话并预填原问题，
+// 不复制证据、不新建特权端点，scope/所有权校验与普通提问完全一致。
+async function branchFollowup(button) {
+  var runBlock = button.closest ? button.closest('.chat-run') : null;
+  var question = chatRunQuestion(runBlock).trim();
+  var input = $('#chat-input');
+  if (!question || !input) return;
+  button.disabled = true;
+  try {
+    var response = await fetch('/api/chat/sessions', { method: 'POST' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    var created = await response.json();
+    if (!created || !created.session_id) throw new Error('missing session id');
+    await openChatSession(created.session_id);
+    await loadChatSessions();
+    input.value = question;
+    input.focus();
+    appendChatNotice('<div role="status">已在新会话中分支追问：确认或修改问题后发送。</div>');
+  } catch (_) {
+    appendChatNotice('<div role="status">分支追问失败，请重试。</div>');
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ── 引用卡片：智能问答页 / 分析页 / 历史页复用 ──

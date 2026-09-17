@@ -1,11 +1,13 @@
 """webapp.server API 测试（TestClient + monkeypatch 替换模块级组件）"""
 
+import itertools
 import json
 import logging
 import os
 import threading
 import time
 from datetime import date, datetime
+from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
@@ -3620,6 +3622,8 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert response.status_code == 200
         assert all(item["company_codes"] == ["601288"] for item in response.json()["items"])
         assert response.json()["items"][0]["session_id"] == sid
+        # 证据可用性由持久化 artifacts 派生，不能只靠前端猜测
+        assert response.json()["items"][0]["evidence_available"] is True
         assert favorite.json()["item"]["favorite"] is True
         assert client.get("/api/research/workspace?text=" + "x" * 101).status_code == 422
         assert client.get("/api/research/workspace?favorite_only=not-a-bool").status_code == 422
@@ -3660,6 +3664,54 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert client.get("/api/research/runs/r1/export", params={"session_id": sid, "format": "csv"}).status_code == 422
         assert client.get("/api/research/runs/r1/export", params={"session_id": sid, "format": "json"}).json()["answer_run"]["id"] == "r1"
 
+    def test_memory_list_is_owner_scoped_and_survives_session_deletion(self, client, env, monkeypatch, tmp_path):
+        sid, foreign_sid = self._configure_research_api(monkeypatch, tmp_path)
+        saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
+            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+        })
+        foreign = client.post("/api/research/memory/facts", params={"session_id": foreign_sid}, json={
+            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+        })
+        entry_id = saved.json()["entry"]["id"]
+
+        listed = client.get("/api/research/memory")
+        scoped = client.get("/api/research/memory", params={"owner_session_id": sid})
+        deleted = client.delete(f"/api/chat/sessions/{sid}")
+        retained = client.get("/api/research/memory", params={"owner_session_id": sid})
+        revoked = client.delete(f"/api/research/memory/{entry_id}")
+
+        assert foreign.status_code == 404
+        assert saved.json()["entry"]["owner_session_id"] == sid
+        assert [entry["id"] for entry in listed.json()["entries"]] == [entry_id]
+        assert [entry["owner_session_id"] for entry in scoped.json()["entries"]] == [sid]
+        assert deleted.json()["retained_memory_count"] == 1
+        # 记忆独立于会话：会话删除后仍能按 owner 列出并撤销。
+        assert [entry["id"] for entry in retained.json()["entries"]] == [entry_id]
+        assert revoked.json() == {"revoked": True, "id": entry_id}
+        assert client.get("/api/research/memory").json() == {"entries": []}
+
+    def test_memory_list_hides_entries_without_a_recorded_owner_but_still_revokes_them(
+        self, client, env, monkeypatch, tmp_path,
+    ):
+        """旧 sidecar 条目无记录归属：不得进入任何 owner 列表，仍可按 id 撤销。"""
+        self._configure_research_api(monkeypatch, tmp_path)
+        with open(server.research_memory.path, "w", encoding="utf-8") as target:
+            json.dump({
+                "schema_version": 1,
+                "entries": [{
+                    "id": "legacy-entry", "kind": "decision", "source_run_id": "r1",
+                    "payload": {"text": "旧决策", "evidence_ids": [PDF_EVIDENCE_ID]},
+                    "created_at": "2026-09-16T10:00:00+00:00",
+                    "expires_at": None, "revoked_at": None,
+                }],
+            }, target)
+
+        listed = client.get("/api/research/memory")
+        revoked = client.delete("/api/research/memory/legacy-entry")
+
+        assert listed.json() == {"entries": []}
+        assert revoked.json() == {"revoked": True, "id": "legacy-entry"}
+
     def test_quality_loads_only_precomputed_safe_summary_and_session_delete_retains_memory(self, client, env, monkeypatch, tmp_path):
         sid, _ = self._configure_research_api(monkeypatch, tmp_path)
         saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
@@ -3668,18 +3720,165 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert saved.status_code == 200
         with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
             json.dump({
-                "passed": True, "case_count": 10, "citation_coverage": 1.0,
+                "passed": False, "case_count": 10, "citation_coverage": 1.0,
                 "scope_precision": 1.0, "page_link_pass_rate": 1.0,
                 "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
-                "p95_stage_duration": 1.5, "failures": [], "raw_cases": ["must not leak"],
+                "p95_stage_duration": 1.5, "failure_codes": {"scope_leak": 1},
+                "failures": ["fixture-scope-leak: scope leak (600900:2026-06-30:semi_annual)"],
+                "raw_cases": ["must not leak"],
             }, target)
 
         quality = client.get("/api/research/quality")
         deleted = client.delete(f"/api/chat/sessions/{sid}")
 
         assert quality.status_code == 200
-        assert quality.json()["passed"] is True
-        assert "raw_cases" not in quality.json()
+        assert quality.json()["passed"] is False
+        assert quality.json()["failure_codes"] == {"scope_leak": 1}
+        assert set(quality.json()) == {
+            "available", "passed", "case_count", "citation_coverage", "scope_precision",
+            "page_link_pass_rate", "tool_success_rate", "stop_recovery_pass_rate",
+            "p95_stage_duration", "failure_codes",
+        }
+        assert "raw_cases" not in quality.json() and "failures" not in quality.json()
+        assert "600900" not in quality.text and "fixture-scope-leak" not in quality.text
         assert deleted.json()["retained_memory_count"] == 1
         from webapp.research_memory import ResearchMemoryStore
         assert len(ResearchMemoryStore(server.research_memory.path).list_entries()) == 1
+
+    def test_quality_rejects_a_summary_with_unknown_failure_codes(self, client, env, monkeypatch, tmp_path):
+        self._configure_research_api(monkeypatch, tmp_path)
+        with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
+            json.dump({
+                "passed": True, "case_count": 1, "citation_coverage": 1.0,
+                "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+                "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                "p95_stage_duration": 0.0, "failure_codes": {"raw_prompt_leak": 1},
+            }, target)
+
+        assert client.get("/api/research/quality").json() == {"available": False}
+
+    def test_workspace_period_filter_rejects_impossible_dates(self, client, env, monkeypatch, tmp_path):
+        sid, _ = self._configure_research_api(monkeypatch, tmp_path)
+
+        assert client.get("/api/research/workspace?period=2026-13-45").status_code == 422
+        assert client.get("/api/research/workspace?period=2026-02-30").status_code == 422
+        matched = client.get("/api/research/workspace?period=2026-06-30")
+        assert matched.status_code == 200
+        assert [item["session_id"] for item in matched.json()["items"]] == [sid]
+
+    def test_fact_save_rechecks_session_ownership_inside_the_coordination_lock(self, client, env, monkeypatch, tmp_path):
+        """A save whose pre-check passed before a delete must be rejected, never written late.
+
+        The gate pauses the save thread inside its lock-free pre-check, so the test
+        itself never holds ``_research_memory_lock`` while a request is in flight
+        (doing that self-deadlocks: the delete handler needs the same lock).
+        """
+        sid, _ = self._configure_research_api(monkeypatch, tmp_path)
+        precheck_done = threading.Event()
+        delete_done = threading.Event()
+        save_done = threading.Event()
+        outcome: Dict[str, Any] = {}
+        checks = itertools.count(1)
+        owned_or_404 = server._owned_or_404
+
+        def gated_precheck(session_id: str, run_id: str):
+            owned = owned_or_404(session_id, run_id)
+            if next(checks) == 1:
+                # Only the lock-free pre-check is gated; the second call happens
+                # inside ``_research_memory_lock`` and must never block again.
+                precheck_done.set()
+                assert delete_done.wait(timeout=5), "删除必须在保存进入协调锁前提交"
+            return owned
+
+        def save_fact() -> None:
+            try:
+                outcome["save"] = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
+                    "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+                })
+            finally:
+                save_done.set()
+
+        monkeypatch.setattr(server, "_owned_or_404", gated_precheck)
+        worker = threading.Thread(target=save_fact)
+        try:
+            worker.start()
+            assert precheck_done.wait(timeout=5), "保存请求未到达会话归属预检"
+            assert not save_done.is_set(), "预检通过后保存必须仍被闸门挂起"
+            deleted = client.delete(f"/api/chat/sessions/{sid}")
+        finally:
+            delete_done.set()
+            assert save_done.wait(timeout=5), "放行后保存请求未结束"
+            worker.join(timeout=5)
+            assert not worker.is_alive(), "保存线程未在放行后退出"
+
+        assert deleted.status_code == 200
+        assert deleted.json()["retained_memory_count"] == 0
+        assert outcome["save"].status_code == 404
+        from webapp.research_memory import ResearchMemoryStore
+        assert ResearchMemoryStore(server.research_memory.path).list_active() == []
+
+    def test_session_delete_counts_a_memory_write_that_raced_the_deletion(self, client, env, monkeypatch, tmp_path):
+        """A save that resolved its run before deletion writes under the lock and is counted.
+
+        The save is gated inside the critical section, after its ownership re-check
+        and before the write.  The delete commits while it waits for the lock, then
+        the save is released, so the disclosed count must include that write.
+        """
+        sid, _ = self._configure_research_api(monkeypatch, tmp_path)
+        save_in_critical_section = threading.Event()
+        allow_save = threading.Event()
+        delete_committed = threading.Event()
+        save_done = threading.Event()
+        delete_done = threading.Event()
+        responses: Dict[str, Any] = {}
+        owned_inside_lock = server._owned_run_inside_memory_lock
+        delete_session = server.chat_store.delete_session
+
+        def gated_owned_inside_lock(session_id: str, run_id: str):
+            owned = owned_inside_lock(session_id, run_id)
+            save_in_critical_section.set()
+            assert allow_save.wait(timeout=5), "删除提交后必须放行保存线程"
+            return owned
+
+        def committed_delete_session(target_sid: str) -> bool:
+            result = delete_session(target_sid)
+            delete_committed.set()
+            return result
+
+        def save_fact() -> None:
+            try:
+                responses["save"] = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
+                    "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+                })
+            finally:
+                save_done.set()
+
+        def remove_session() -> None:
+            try:
+                responses["delete"] = client.delete(f"/api/chat/sessions/{sid}")
+            finally:
+                delete_done.set()
+
+        monkeypatch.setattr(server, "_owned_run_inside_memory_lock", gated_owned_inside_lock)
+        monkeypatch.setattr(server.chat_store, "delete_session", committed_delete_session)
+        saver = threading.Thread(target=save_fact)
+        deleter = threading.Thread(target=remove_session)
+        try:
+            saver.start()
+            assert save_in_critical_section.wait(timeout=5), "保存请求未进入协调锁临界区"
+            deleter.start()
+            assert delete_committed.wait(timeout=5), "删除未在保存释放前提交"
+        finally:
+            allow_save.set()
+            assert save_done.wait(timeout=5), "放行后保存请求未结束"
+            assert delete_done.wait(timeout=5), "保存结束后删除请求未结束"
+            saver.join(timeout=5)
+            deleter.join(timeout=5)
+            assert not saver.is_alive() and not deleter.is_alive(), "并发请求线程未退出"
+
+        assert responses["save"].status_code == 200
+        assert responses["delete"].status_code == 200
+        assert responses["delete"].json()["retained_memory_count"] == 1
+        from webapp.research_memory import ResearchMemoryStore
+        active = ResearchMemoryStore(server.research_memory.path).list_active()
+        assert [entry.source_run_id for entry in active] == ["r1"]

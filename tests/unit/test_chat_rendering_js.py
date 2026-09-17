@@ -500,6 +500,27 @@ def test_workspace_item_shows_persisted_scope_status_and_favorite_actions():
     assert 'data-research-action="favorite"' in html
 
 
+def test_workspace_item_shows_persisted_evidence_availability_flag():
+    """工作台行必须显示由持久化 artifacts 派生的证据可用性，而不是占位文案。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const base = {{
+          session_id: 'session-1', run_id: 'run-1', title: '现金流核验',
+          company_codes: ['601288'], periods: ['2026-06-30'], status: 'completed',
+          updated_at: '2026-09-17T10:00:00Z', favorite: false
+        }};
+        console.log(JSON.stringify({{
+          available: r.renderWorkspaceItem({{...base, evidence_available: true}}),
+          unavailable: r.renderWorkspaceItem({{...base, evidence_available: false}})
+        }}));
+        """
+    )
+
+    assert '证据：可用' in result['available']
+    assert '证据：暂不可用' in result['unavailable']
+
+
 def test_reference_fact_has_no_save_to_memory_action():
     """reference/conflict/unavailable 事实绝不渲染保存为确认事实的动作。"""
     result = _run_node(
@@ -528,3 +549,61 @@ def test_delete_result_discloses_retained_memory_and_export_state_is_textual():
     )
     assert '2 条研究记忆仍被保留' in result['deleted']
     assert '部分完成' in result['export']
+
+
+def test_memory_list_groups_by_owner_and_keeps_deleted_session_entries_revocable():
+    """持久化记忆列表按归属会话分组；已删除会话的记忆单独分组且仍可撤销。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{html: r.renderMemoryList([
+          {{id: 'decision-1', kind: 'decision', source_run_id: 'run-1', owner_session_id: 'session-live',
+            payload: {{text: '关注现金流改善', evidence_ids: ['pdf-1']}}, created_at: '2026-09-17T10:00:00Z'}},
+          {{id: 'fact-1', kind: 'fact', source_run_id: 'run-2', owner_session_id: 'session-deleted',
+            payload: {{metric: '营业收入', value: 100, unit: '亿元'}}, created_at: '2026-09-17T11:00:00Z'}}
+        ], {{'session-live': '农业银行研究'}})}}
+        ));
+        """
+    )
+    html = result['html']
+    assert '农业银行研究' in html
+    assert '来自已删除会话' in html
+    assert html.count('data-research-action="revoke-memory"') == 2
+    assert 'data-research-memory-id="decision-1"' in html
+    assert 'data-research-memory-id="fact-1"' in html
+    assert '关注现金流改善' in html
+
+
+def test_memory_list_hides_entries_without_a_recorded_owner():
+    """旧 sidecar 条目没有记录归属，列表必须 fail-closed 不展示。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{html: r.renderMemoryList([
+          {{id: 'legacy-1', kind: 'decision', source_run_id: 'run-1', owner_session_id: null,
+            payload: {{text: '旧决策', evidence_ids: ['pdf-1']}}, created_at: '2026-09-17T10:00:00Z'}}
+        ], {{}})}}));
+        """
+    )
+
+    assert result['html'] == ''
+
+
+def test_run_reuse_actions_reuse_existing_run_identity_without_new_privileges():
+    """编辑重问/分支追问沿用既有 run/session 身份，不新增特权动作。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{
+          run: r.renderRunReuseActions({{id: 'run-1', status: 'completed'}}),
+          legacy: r.renderRunReuseActions({{legacy_evidence_unavailable: true}}),
+          missing: r.renderRunReuseActions(null)
+        }}));
+        """
+    )
+
+    assert 'data-chat-action="edit-reask"' in result['run']
+    assert 'data-chat-action="branch-followup"' in result['run']
+    assert '编辑重问' in result['run'] and '分支追问' in result['run']
+    assert result['legacy'] == ''
+    assert result['missing'] == ''
