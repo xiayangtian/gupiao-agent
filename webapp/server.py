@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import requests
 from pydantic import BaseModel, Field, model_validator
@@ -76,6 +76,10 @@ from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
+from .chat_evaluation import FAILURE_CODES
+from .research_export import ExportValidationError, ResearchExporter
+from .research_memory import ResearchMemoryStore, artifact_evidence_ids, run_evidence_ids
+from .research_workspace import ResearchWorkspaceQuery, ResearchWorkspaceStore
 from .research_agent import ResearchAgent
 from .research_executor import ResearchExecutor
 from .research_models import ResearchRun
@@ -122,6 +126,16 @@ chat_sessions: Dict[str, List[Dict[str, str]]] = {}
 _chat_lock = threading.Lock()
 # 智能问答历史会话（JSON 文件持久化，data/chat_sessions.json）
 chat_store = ChatStore()
+# M4 sidecars contain only derived workspace metadata and explicit memory entries;
+# immutable AnswerRun/ResearchRun records remain in ChatStore.  The workspace reads
+# active decision memories from the same sidecar to expose them to keyword search.
+research_memory = ResearchMemoryStore()
+research_workspace = ResearchWorkspaceStore(chat_store, memory_path=research_memory.path)
+# Explicit-memory writes and the session-deletion count share one coordination
+# lock.  Lock order is `_research_memory_lock` -> ChatStore lock; no code path may
+# hold the ChatStore lock (or any store lock) and then wait for this lock.
+_research_memory_lock = threading.RLock()
+QUALITY_SUMMARY_PATH = os.path.join(BASE_DIR, "data", "research_quality_summary.json")
 
 
 def _startup_task_manager() -> None:
@@ -574,6 +588,26 @@ class ResumeResearchRequest(BaseModel):
 class RagIngestOneRequest(BaseModel):
     report_id: str
     source: str
+
+
+class FavoriteRunRequest(BaseModel):
+    favorite: bool
+
+
+class SaveFactMemoryRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=128)
+    fact_id: str = Field(min_length=1, max_length=512)
+
+
+class SaveArtifactMemoryRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=128)
+    artifact_id: str = Field(min_length=1, max_length=1024)
+
+
+class SaveDecisionMemoryRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1, max_length=2000)
+    evidence_ids: List[str] = Field(min_length=1, max_length=50)
 
 
 # ── 工具函数 ───────────────────────────────────────────────
@@ -2639,6 +2673,256 @@ async def resolve_chat_supplement(
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+# ── M4：研究工作台 / 显式记忆 / 导出 / 离线质量摘要 ───────────────
+
+def _owned_answer_run(session_id: str, run_id: str) -> tuple[AnswerRun, ResearchRun | None] | None:
+    """Return an immutable run only when its persisted session owner matches.
+
+    M4 actions deliberately do not accept a bare run id: a run must be located
+    through its session-owned ChatStore record before it can be favorited, saved,
+    or exported.
+    """
+    for record in chat_store.iter_session_runs():
+        if record.session_id == session_id and record.run.id == run_id:
+            return record.run, record.research_run
+    return None
+
+
+def _owned_or_404(session_id: str, run_id: str) -> tuple[AnswerRun, ResearchRun | None]:
+    owned = _owned_answer_run(session_id, run_id)
+    if owned is None:
+        # Do not distinguish a foreign run from an unknown run.
+        raise HTTPException(404, "研究运行不存在")
+    return owned
+
+
+def _owned_run_inside_memory_lock(session_id: str, run_id: str) -> tuple[AnswerRun, ResearchRun | None]:
+    """Re-verify run ownership while holding ``_research_memory_lock``.
+
+    A save request can pass its lock-free pre-check and then wait for the
+    coordination lock while its session is deleted by a parallel request.  The
+    write must be rejected there instead of landing in a deleted session's memory.
+    """
+    return _owned_or_404(session_id, run_id)
+
+
+def _memory_store_for_owned_run(run: AnswerRun, owner_session_id: str) -> ResearchMemoryStore:
+    """Bind a short-lived store to one already owner-checked run and session.
+
+    ``ResearchMemoryStore.save_*`` intentionally resolves the source itself.
+    Giving that lookup only this request's run preserves its fail-closed contract
+    without granting the memory layer a cross-session run lookup, and the owner is
+    the session this request already re-verified, never a client-supplied value.
+    """
+    return ResearchMemoryStore(
+        research_memory.path,
+        run_lookup=lambda requested_run_id: run if requested_run_id == run.id else None,
+        owner_session_id=owner_session_id,
+    )
+
+
+@app.get("/api/research/workspace")
+def get_research_workspace(
+    company_code: Optional[str] = Query(default=None, pattern=r"^\d{6}$"),
+    company: Optional[str] = Query(default=None, pattern=r"^\d{6}$"),
+    industry: Optional[str] = Query(default=None, min_length=1, max_length=100),
+    period: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    intent: Optional[Literal["report_fact", "company_trend", "industry_benchmark", "realtime_market", "event_attribution", "research_task"]] = None,
+    status: Optional[Literal["completed", "partial", "stopped", "failed", "waiting_consent"]] = None,
+    text: Optional[str] = Query(default=None, max_length=100),
+    favorite_only: bool = Query(default=False),
+) -> Dict[str, Any]:
+    """List metadata-only workspace rows; never inspect message/PDF/tool bodies."""
+    if company_code and company and company_code != company:
+        raise HTTPException(422, "company 与 company_code 必须一致")
+    if period is not None:
+        try:
+            # The query pattern only checks shape; an impossible date must not be
+            # silently treated as an empty filter result.
+            dt.date.fromisoformat(period)
+        except ValueError as exc:
+            raise HTTPException(422, "period 必须是真实存在的日期") from exc
+    query = ResearchWorkspaceQuery(
+        company_code=company_code or company,
+        industry=industry,
+        period=period,
+        intent=intent,
+        status=status,
+        text=text,
+        favorite_only=favorite_only,
+    )
+    return {"items": [item.to_dict() for item in research_workspace.list_items(query)]}
+
+
+@app.patch("/api/research/runs/{run_id}/favorite")
+def set_research_run_favorite(
+    run_id: str,
+    body: FavoriteRunRequest,
+    session_id: str = Query(..., min_length=1, max_length=128),
+) -> Dict[str, Any]:
+    _owned_or_404(session_id, run_id)
+    try:
+        item = research_workspace.set_favorite(session_id, run_id, body.favorite)
+    except ValueError as exc:
+        raise HTTPException(404, "研究运行不存在") from exc
+    return {"item": item.to_dict()}
+
+
+@app.get("/api/research/runs/{run_id}/export")
+def export_research_run(
+    run_id: str,
+    session_id: str = Query(..., min_length=1, max_length=128),
+    format: Literal["markdown", "json"] = Query(default="markdown"),
+) -> Any:
+    run, research_run = _owned_or_404(session_id, run_id)
+    exporter = ResearchExporter()
+    try:
+        if format == "json":
+            return exporter.to_json(run, research_run)
+        return PlainTextResponse(exporter.to_markdown(run, research_run), media_type="text/markdown")
+    except ExportValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/research/memory")
+def list_research_memory(
+    owner_session_id: Optional[str] = Query(default=None, min_length=1, max_length=128),
+) -> Dict[str, Any]:
+    """List active explicit memories, optionally scoped to one owner session.
+
+    The store records the owner session that already passed the save request's
+    ownership check.  This app serves a single local user with no authentication, so
+    listing this machine's own active memories does not widen access; entries saved
+    before owners were recorded are excluded instead of being guessed into a scope.
+    """
+    entries = ResearchMemoryStore(research_memory.path).list_owned_active(owner_session_id)
+    return {"entries": [entry.to_dict() for entry in entries]}
+
+
+@app.post("/api/research/memory/facts")
+def save_research_fact_memory(
+    body: SaveFactMemoryRequest,
+    session_id: str = Query(..., min_length=1, max_length=128),
+) -> Dict[str, Any]:
+    # Lock-free pre-check: unknown or foreign runs never wait for the lock.
+    _owned_or_404(session_id, body.run_id)
+    with _research_memory_lock:
+        run, _research_run = _owned_run_inside_memory_lock(session_id, body.run_id)
+        facts = [fact for fact in run.facts if body.fact_id in fact.evidence_ids]
+        if len(facts) != 1:
+            raise HTTPException(422, "事实标识不存在或不唯一")
+        try:
+            entry = _memory_store_for_owned_run(run, session_id).save_fact(facts[0], body.run_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    return {"entry": entry.to_dict()}
+
+
+@app.post("/api/research/memory/artifacts")
+def save_research_artifact_memory(
+    body: SaveArtifactMemoryRequest,
+    session_id: str = Query(..., min_length=1, max_length=128),
+) -> Dict[str, Any]:
+    # Lock-free pre-check: unknown or foreign runs never wait for the lock.
+    _owned_or_404(session_id, body.run_id)
+    with _research_memory_lock:
+        run, _research_run = _owned_run_inside_memory_lock(session_id, body.run_id)
+        artifacts = [artifact for artifact in run.artifacts if body.artifact_id in artifact_evidence_ids(artifact)]
+        if len(artifacts) != 1:
+            raise HTTPException(422, "证据标识不存在或不唯一")
+        try:
+            entry = _memory_store_for_owned_run(run, session_id).save_artifact(artifacts[0], body.run_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    return {"entry": entry.to_dict()}
+
+
+@app.post("/api/research/memory/decisions")
+def save_research_decision_memory(
+    body: SaveDecisionMemoryRequest,
+    session_id: str = Query(..., min_length=1, max_length=128),
+) -> Dict[str, Any]:
+    # Lock-free pre-check: unknown or foreign runs never wait for the lock.
+    _owned_or_404(session_id, body.run_id)
+    with _research_memory_lock:
+        run, _research_run = _owned_run_inside_memory_lock(session_id, body.run_id)
+        evidence_ids = tuple(body.evidence_ids)
+        if len(set(evidence_ids)) != len(evidence_ids) or not set(evidence_ids).issubset(run_evidence_ids(run)):
+            raise HTTPException(422, "研究决策必须引用来源运行中的证据")
+        try:
+            entry = _memory_store_for_owned_run(run, session_id).save_decision(body.text, body.run_id, evidence_ids)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    return {"entry": entry.to_dict()}
+
+
+@app.delete("/api/research/memory/{entry_id}")
+def revoke_research_memory(entry_id: str) -> Dict[str, Any]:
+    with _research_memory_lock:
+        revoked = ResearchMemoryStore(research_memory.path).revoke(entry_id)
+    if not revoked:
+        raise HTTPException(404, "研究记忆不存在或已撤销")
+    return {"revoked": True, "id": entry_id}
+
+
+_QUALITY_METRIC_FIELDS = (
+    "citation_coverage", "scope_precision", "page_link_pass_rate", "tool_success_rate",
+    "stop_recovery_pass_rate", "p95_stage_duration",
+)
+
+
+def _safe_failure_codes(value: object) -> Dict[str, int] | None:
+    """Project persisted failure counts onto the fixed public whitelist.
+
+    An unknown code means the sidecar is not a summary this endpoint understands,
+    so the whole summary becomes unavailable instead of being partially exposed.
+    Only non-negative integer counts survive (booleans are rejected), and zero
+    counts are dropped so a stale code can never be revived.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    counts: Dict[str, int] = {}
+    for code, count in value.items():
+        if code not in FAILURE_CODES:
+            return None
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return None
+        if count:
+            counts[code] = count
+    return {code: counts[code] for code in sorted(counts)}
+
+
+def _load_precomputed_quality_summary() -> Dict[str, Any]:
+    """Read only safe aggregate fields; this endpoint never executes evaluation."""
+    try:
+        with open(QUALITY_SUMMARY_PATH, encoding="utf-8") as source:
+            raw = json.load(source)
+    except (OSError, json.JSONDecodeError):
+        return {"available": False}
+    if not isinstance(raw, Mapping):
+        return {"available": False}
+    case_count = raw.get("case_count")
+    if not isinstance(raw.get("passed"), bool) or isinstance(case_count, bool) or not isinstance(case_count, int):
+        return {"available": False}
+    if any(isinstance(raw.get(name), bool) or not isinstance(raw.get(name), (int, float)) for name in _QUALITY_METRIC_FIELDS):
+        return {"available": False}
+    failure_codes = _safe_failure_codes(raw.get("failure_codes"))
+    if failure_codes is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "passed": raw["passed"],
+        "case_count": case_count,
+        "failure_codes": failure_codes,
+        **{name: raw[name] for name in _QUALITY_METRIC_FIELDS},
+    }
+
+
+@app.get("/api/research/quality")
+def get_research_quality() -> Dict[str, Any]:
+    return _load_precomputed_quality_summary()
+
+
 @app.get("/api/chat/sessions")
 def list_chat_sessions() -> Dict[str, Any]:
     """会话列表（摘要，按更新时间降序）"""
@@ -2674,10 +2958,26 @@ def rename_chat_session(sid: str, body: RenameSessionRequest) -> Dict[str, Any]:
 
 @app.delete("/api/chat/sessions/{sid}")
 def delete_chat_session(sid: str) -> Dict[str, Any]:
-    """删除会话"""
+    """Delete a session while retaining independent explicit memory records.
+
+    The deletion commits first and the disclosed count is then read while holding
+    the coordination lock.  Any save that resolved its immutable run before the
+    deletion is therefore counted (it wrote inside the same lock), while a save
+    that reaches the lock afterwards re-verifies ownership and is rejected instead
+    of silently dropping out of the count.
+    """
+    owned_run_ids = {record.run.id for record in chat_store.iter_session_runs() if record.session_id == sid}
     if not chat_store.delete_session(sid):
         raise HTTPException(404, f"未知会话：{sid}")
-    return {"ok": True, "session_id": sid}
+    with _research_memory_lock:
+        retained_memory_count = sum(
+            entry.source_run_id in owned_run_ids for entry in ResearchMemoryStore(research_memory.path).list_active()
+        )
+    return {
+        "ok": True,
+        "session_id": sid,
+        "retained_memory_count": retained_memory_count,
+    }
 
 
 @app.get("/api/rag/status")

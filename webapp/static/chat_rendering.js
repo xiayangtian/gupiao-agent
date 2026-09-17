@@ -458,6 +458,149 @@
     return '<div class="research-recovery"><span>从步骤：' + escapeHtml(from) + '</span><button type="button" class="chat-run-action" data-chat-action="resume-research" data-research-run-id="' + escapeHtml(String(run.research_run_id)) + '">继续研究</button></div>';
   }
 
+  function renderWorkspaceItem(item) {
+    if (!item || typeof item !== 'object' || !item.run_id || !item.session_id) return '';
+    var companies = (Array.isArray(item.company_codes) ? item.company_codes : []).filter(Boolean);
+    var periods = (Array.isArray(item.periods) ? item.periods : []).filter(Boolean);
+    var scope = [companies.join('、'), item.industry, periods.join('、'), item.intent].filter(Boolean).join(' · ') || '未记录范围元数据';
+    var evidence = item.evidence_available === true ? '证据：可用'
+      : item.evidence_available === false ? '证据：暂不可用'
+      : '证据：打开回答查看';
+    var favorite = !!item.favorite;
+    var summary = String(item.searchable_summary || '').trim();
+    return '<article class="research-workspace-item" data-research-run-id="' + escapeHtml(String(item.run_id))
+      + '" data-research-session-id="' + escapeHtml(String(item.session_id)) + '">'
+      + '<div class="research-workspace-item-main"><h3>' + escapeHtml(String(item.title || '未命名研究')) + '</h3>'
+      + '<p class="research-workspace-scope"><strong>范围：</strong>' + escapeHtml(scope) + '</p>'
+      + (summary ? '<p class="research-workspace-summary">已保存决策：' + escapeHtml(summary) + '</p>' : '')
+      + '<p class="research-workspace-meta"><span>状态：' + escapeHtml(String(item.status || 'unknown')) + '</span>'
+      + '<span>更新时间：' + escapeHtml(String(item.updated_at || '未记录')) + '</span><span>' + escapeHtml(evidence) + '</span></p></div>'
+      + '<div class="research-workspace-actions"><button type="button" class="btn" data-research-action="open">打开回答</button>'
+      + '<button type="button" class="btn" data-research-action="favorite" aria-pressed="' + (favorite ? 'true' : 'false') + '">'
+      + (favorite ? '取消收藏' : '收藏') + '</button>'
+      + '<button type="button" class="btn" data-research-action="export" data-research-format="markdown">导出 Markdown</button>'
+      + '<button type="button" class="btn" data-research-action="export" data-research-format="json">导出 JSON</button></div></article>';
+  }
+
+  function renderFactActions(fact, run) {
+    if (!fact || !run || fact.verification !== 'verified' || fact.source_type !== 'pdf'
+      || (run.status !== 'completed' && run.status !== 'partial')) return '';
+    var evidenceIds = Array.isArray(fact.evidence_ids) ? fact.evidence_ids.filter(Boolean) : [];
+    var report = run.verification_report || {};
+    var supported = Array.isArray(report.supported_fact_ids) ? report.supported_fact_ids : [];
+    if (!evidenceIds.length || !run.id || (report.status !== 'passed' && report.status !== 'partial')
+      || !evidenceIds.every(function (id) { return supported.indexOf(id) >= 0; })) return '';
+    return '<button type="button" class="chat-run-action" data-research-action="save-memory"'
+      + ' data-research-memory-kind="fact" data-research-id="' + escapeHtml(String(evidenceIds[0])) + '"'
+      + ' data-research-run-id="' + escapeHtml(String(run.id)) + '">保存到研究记忆</button>';
+  }
+
+  function renderArtifactActions(run) {
+    if (!run || !run.id || !Array.isArray(run.artifacts)) return '';
+    var entries = run.artifacts.map(function (artifact) {
+      if (!artifact || typeof artifact !== 'object') return '';
+      var id = artifact.source === 'web' ? artifact.url
+        : (artifact.pdf_url || artifact.pdf_filename || (artifact.report_id && artifact.page ? artifact.report_id + '#p' + artifact.page : ''));
+      if (!id || (artifact.source === 'pdf' && artifact.availability !== 'available')) return '';
+      return '<button type="button" class="chat-run-action" data-research-action="save-memory"'
+        + ' data-research-memory-kind="artifact" data-research-id="' + escapeHtml(String(id)) + '"'
+        + ' data-research-run-id="' + escapeHtml(String(run.id)) + '">保存证据到研究记忆</button>';
+    }).filter(Boolean);
+    return entries.length ? '<div class="research-memory-actions">' + entries.join('') + '</div>' : '';
+  }
+
+  function renderDecisionAction(run, evidenceIds) {
+    if (!run || !run.id || !Array.isArray(evidenceIds) || !evidenceIds.length) return '';
+    return '<button type="button" class="chat-run-action" data-research-action="save-decision"'
+      + ' data-research-run-id="' + escapeHtml(String(run.id)) + '">保存研究决策</button>';
+  }
+
+  function renderMemoryEntry(entry) {
+    if (!entry || typeof entry !== 'object') return '';
+    var kind = { fact: '事实', artifact: '证据', decision: '决策' }[String(entry.kind || '')] || '研究记忆';
+    return '<div class="research-memory-entry" role="status"><span>已保存' + escapeHtml(kind)
+      + '到研究记忆</span><button type="button" class="chat-run-action" data-research-action="revoke-memory"'
+      + ' data-research-memory-id="' + escapeHtml(String(entry.id || '')) + '">撤销记忆</button></div>';
+  }
+
+  function memoryEntryText(entry) {
+    var payload = (entry && typeof entry.payload === 'object' && entry.payload) ? entry.payload : {};
+    if (entry.kind === 'decision') return String(payload.text || '');
+    if (entry.kind === 'fact') {
+      return [payload.metric, payload.value, payload.unit].filter(function (value) {
+        return value !== undefined && value !== null && value !== '';
+      }).join(' ');
+    }
+    return String(payload.title || payload.url || payload.pdf_filename || '');
+  }
+
+  function renderMemoryRow(entry) {
+    var kind = { fact: '事实', artifact: '证据', decision: '决策' }[String(entry.kind || '')] || '研究记忆';
+    var id = String(entry.id || '');
+    return '<div class="research-memory-row" data-research-memory-id="' + escapeHtml(id) + '">'
+      + '<span class="research-memory-kind">' + escapeHtml(kind) + '</span>'
+      + '<span class="research-memory-text">' + escapeHtml(memoryEntryText(entry).trim() || '未记录内容') + '</span>'
+      + '<span class="research-memory-time">' + escapeHtml(String(entry.created_at || '未记录时间')) + '</span>'
+      + '<button type="button" class="chat-run-action" data-research-action="revoke-memory"'
+      + ' data-research-memory-id="' + escapeHtml(id) + '">撤销记忆</button></div>';
+  }
+
+  /* 持久化记忆列表：按归属会话分组展示，并允许逐条撤销。
+
+  没有记录归属的旧条目在此 fail-closed 不渲染：归属无法推断，列表中不得猜测；
+  归属会话已不存在的条目单独成组，仍可按记录 id 撤销。
+  */
+  function renderMemoryList(entries, sessionTitles) {
+    var items = Array.isArray(entries) ? entries : [];
+    var titles = (sessionTitles && typeof sessionTitles === 'object') ? sessionTitles : {};
+    var order = [];
+    var groups = {};
+    items.forEach(function (entry) {
+      if (!entry || typeof entry !== 'object' || !entry.id) return;
+      var owner = String(entry.owner_session_id || '');
+      if (!owner) return;
+      if (!groups[owner]) {
+        groups[owner] = {
+          label: Object.prototype.hasOwnProperty.call(titles, owner) && titles[owner]
+            ? String(titles[owner]) : '来自已删除会话',
+          entries: [],
+        };
+        order.push(owner);
+      }
+      groups[owner].entries.push(entry);
+    });
+    return order.map(function (owner) {
+      var group = groups[owner];
+      return '<section class="research-memory-group" data-research-memory-owner="' + escapeHtml(owner) + '">'
+        + '<h4>' + escapeHtml(group.label) + '</h4>'
+        + '<div class="research-memory-group-entries">'
+        + group.entries.map(renderMemoryRow).join('')
+        + '</div></section>';
+    }).join('');
+  }
+
+  function renderExportState(status) {
+    var label = { completed: '导出完成', partial: '部分完成：导出保留范围、冲突和验证状态',
+      stopped: '已停止：导出保留未完成状态', failed: '导出失败' }[String(status || '')] || '正在准备导出';
+    return '<div class="research-export-state" role="status">' + escapeHtml(label) + '</div>';
+  }
+
+  function renderDeleteResult(result) {
+    var count = result && Number.isInteger(result.retained_memory_count) ? result.retained_memory_count : 0;
+    return '<div class="research-delete-result" role="status">会话已删除；' + count
+      + ' 条研究记忆仍被保留，原始 PDF 不会被删除。</div>';
+  }
+
+  /* 复用既有 run/session 身份的追加动作：只回填该轮原始问题，不复制证据、
+  不新增特权端点，也不改写或删除历史轮次。 */
+  function renderRunReuseActions(run) {
+    if (!run || typeof run !== 'object' || !run.id) return '';
+    return '<div class="chat-run-reuse">'
+      + '<button type="button" class="chat-run-action" data-chat-action="edit-reask">编辑重问</button>'
+      + '<button type="button" class="chat-run-action" data-chat-action="branch-followup"'
+      + ' data-chat-run-id="' + escapeHtml(String(run.id)) + '">分支追问</button></div>';
+  }
+
   function renderRunStatus(run) {
     if (!run || typeof run !== 'object') return '';
     if (run.legacy_evidence_unavailable) {
@@ -495,6 +638,15 @@
     normalizeAssistantMarkdown: normalizeAssistantMarkdown,
     webSourceReferences: webSourceReferences,
     renderScope: renderScope,
+    renderWorkspaceItem: renderWorkspaceItem,
+    renderFactActions: renderFactActions,
+    renderArtifactActions: renderArtifactActions,
+    renderDecisionAction: renderDecisionAction,
+    renderMemoryEntry: renderMemoryEntry,
+    renderMemoryList: renderMemoryList,
+    renderRunReuseActions: renderRunReuseActions,
+    renderExportState: renderExportState,
+    renderDeleteResult: renderDeleteResult,
     renderRunArtifacts: renderRunArtifacts,
     renderPolicy: renderPolicy,
     renderFactsAndConflicts: renderFactsAndConflicts,

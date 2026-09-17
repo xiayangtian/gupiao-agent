@@ -267,7 +267,37 @@
   <section id="page-chat" class="page hidden">
     <div class="chat-header">
       <h2>💬 智能问答</h2>
+      <button id="research-workspace-toggle" type="button" class="btn" aria-expanded="false" aria-controls="research-workspace">研究工作台</button>
     </div>
+    <section id="research-workspace" class="research-workspace hidden" aria-labelledby="research-workspace-title">
+      <div class="research-workspace-head">
+        <div><h3 id="research-workspace-title">研究工作台</h3><p>仅按已持久化的范围、意图、状态和更新时间筛选；不会替换当前会话。</p></div>
+        <button id="research-workspace-close" type="button" class="btn" aria-label="收起研究工作台">收起</button>
+      </div>
+      <details id="research-workspace-filters" class="research-workspace-filters" open>
+        <summary>筛选研究资产</summary>
+        <div class="research-filter-grid">
+          <label>公司代码<input id="research-filter-company" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="如 601288" /></label>
+          <label>行业<input id="research-filter-industry" maxlength="100" autocomplete="off" placeholder="数据源分类行业" /></label>
+          <label>报告期<input id="research-filter-period" type="date" /></label>
+          <label>研究意图<select id="research-filter-intent"><option value="">全部意图</option><option value="report_fact">本地财报查证</option><option value="company_trend">公司趋势</option><option value="industry_benchmark">行业对照</option><option value="realtime_market">实时行情</option><option value="event_attribution">事件归因</option><option value="research_task">研究任务</option></select></label>
+          <label>运行状态<select id="research-filter-status"><option value="">全部状态</option><option value="completed">已完成</option><option value="partial">部分完成</option><option value="stopped">已停止</option><option value="failed">失败</option><option value="waiting_consent">等待授权</option></select></label>
+          <label>关键词<input id="research-filter-text" maxlength="100" autocomplete="off" placeholder="标题或已保存决策" /></label>
+          <label class="research-filter-favorite"><input id="research-filter-favorite" type="checkbox" /> 仅看收藏</label>
+        </div>
+        <div class="research-filter-actions"><button id="research-filter-apply" type="button" class="btn primary">应用筛选</button><button id="research-filter-reset" type="button" class="btn">清除筛选</button></div>
+      </details>
+      <div id="research-workspace-status" class="research-workspace-status" role="status" aria-live="polite"></div>
+      <div id="research-workspace-list" class="research-workspace-list" aria-live="polite"></div>
+      <section class="research-memory-panel" aria-labelledby="research-memory-title">
+        <div class="research-memory-head">
+          <h4 id="research-memory-title">已保存研究记忆</h4>
+          <p>仅显示用户显式保存的事实/证据/决策，按归属会话分组；会话删除后记忆仍保留，仍可在此撤销。</p>
+        </div>
+        <div id="research-memory-status" class="research-workspace-status" role="status" aria-live="polite"></div>
+        <div id="research-memory-list" class="research-memory-list"></div>
+      </section>
+    </section>
     <div id="chat-focus-bar" class="chat-focus-bar hidden">
       <span id="chat-focus-label"></span>
       <button id="chat-focus-clear" class="btn dim-tool-btn" title="取消聚焦，恢复全库检索">取消聚焦</button>
@@ -301,6 +331,17 @@
     </div>
   </section>
 
+
+  <dialog id="research-decision-dialog" class="research-decision-dialog" aria-labelledby="research-decision-title">
+    <form method="dialog" id="research-decision-form">
+      <h2 id="research-decision-title">保存研究决策</h2>
+      <p>仅保存你明确确认的决策及其已有证据引用；不会保存模型推理过程。</p>
+      <label for="research-decision-text">决策内容</label>
+      <textarea id="research-decision-text" required maxlength="1000" rows="4"></textarea>
+      <input id="research-decision-run-id" type="hidden" />
+      <div class="research-decision-actions"><button id="research-decision-cancel" type="button" class="btn">取消</button><button type="submit" class="btn primary">确认保存</button></div>
+    </form>
+  </dialog>
 
   <script>
   // Chart.js 加载失败不阻塞后续脚本

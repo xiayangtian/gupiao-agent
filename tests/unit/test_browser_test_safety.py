@@ -1,6 +1,9 @@
 """浏览器测试的运行隔离约束。"""
 
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from webapp.browser_preflight import find_usable_agent_browser
@@ -10,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BROWSER_TEST = ROOT / "tests" / "browser" / "test_analysis_dialog_layout.py"
 STRUCTURE_BROWSER_TEST = ROOT / "tests" / "browser" / "test_financial_structure_visuals.py"
 CHAT_TRUST_BROWSER_TEST = ROOT / "tests" / "browser" / "test_chat_trust_flow.py"
+WORKSPACE_BROWSER_TEST = ROOT / "tests" / "browser" / "test_research_workspace_flow.py"
 STRUCTURE_LAUNCHER = ROOT / "tests" / "browser" / "visual_test_app.py"
 
 
@@ -96,6 +100,71 @@ def test_acceptance_app_disables_real_rag_ingest_and_injects_local_fakes():
     assert "chat_store = ChatStore" in launcher
     assert "fetch_reports" in launcher
     assert "uvicorn" in launcher
+
+
+def test_acceptance_launcher_keeps_task_database_out_of_the_repository():
+    """浏览器验收的应用不得打开仓库的 data/tasks.sqlite3。
+
+    启动器在独立进程里真实执行 ``build_app()``：在单元测试进程内导入它会用验收
+    fixture 覆盖模块级 server 组件。断言任务库落在启动器临时目录，且仓库任务库
+    文件未被创建或修改。
+    """
+    source = STRUCTURE_LAUNCHER.read_text(encoding="utf-8")
+    assert "TASK_DB_PATH" in source
+    assert 'os.environ["TASK_DB_PATH"]' in source
+
+    repository_db = ROOT / "data" / "tasks.sqlite3"
+    before = repository_db.stat().st_mtime_ns if repository_db.exists() else None
+    script = (
+        "import sys, os\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        f"sys.path.insert(0, {str(STRUCTURE_LAUNCHER.parent)!r})\n"
+        "import visual_test_app, webapp.server as server\n"
+        "visual_test_app.build_app()\n"
+        "server._startup_task_manager()\n"
+        "print(server.task_manager._db_path)\n"
+        "server._shutdown_task_manager()\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=ROOT, capture_output=True, text=True, timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    db_path = result.stdout.strip().splitlines()[-1]
+    assert "trusted-chat-browser-" in db_path, db_path
+    assert not os.path.abspath(db_path).startswith(str(ROOT / "data")), db_path
+    after = repository_db.stat().st_mtime_ns if repository_db.exists() else None
+    assert after == before, "浏览器验收应用改动了仓库任务库"
+
+
+def test_workspace_browser_flow_uses_isolated_deterministic_m4_fixtures():
+    """M4 workbench acceptance uses only temporary persisted contracts and localhost."""
+    source = WORKSPACE_BROWSER_TEST.read_text(encoding="utf-8")
+    launcher = STRUCTURE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "actual_app_url" in source
+    assert "browser_session" in source
+    assert "visual_test_app" in source
+    assert "fixture-completed-run" in source
+    assert "fixture-completed-run" in launcher
+    assert "_seed_workspace_fixtures" in launcher
+    assert "ResearchWorkspaceStore(" in launcher
+    assert "ResearchMemoryStore(" in launcher
+    assert "tempfile.mkdtemp" in launcher
+    assert "server.research_workspace = ResearchWorkspaceStore" in launcher
+    assert "server.research_memory = ResearchMemoryStore" in launcher
+    assert "IngestionService" not in launcher
+    assert "ReportDownloader" not in launcher
+    assert "CNINFODatasource" not in launcher
+    assert "requests.get" not in launcher
+    assert "requests.post" not in launcher
+    assert "urlopen" not in launcher
+    assert "httpx." not in launcher
+    assert "(1280, 900), (768, 1000), (390, 844)" in source
+    assert "scrollWidth" in source
+    assert "_console_errors" in source
+    assert "_page_errors" in source
+    assert "_failed_requests" in source
 
 
 def test_acceptance_teardown_only_fails_when_the_process_survives_kill():
