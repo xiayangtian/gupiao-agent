@@ -2540,13 +2540,15 @@ async function deleteChatSession(sid) {
     var st = chatStreams[sid];
     if (st && st.reader) { try { await st.reader.cancel(); } catch (_) {} }
     delete chatStreams[sid];
-    refreshResearchMemoryPanel();
     if (chatSessionId === sid) {
       chatSessionId = null;
       var box = $('#chat-history');
       if (box) box.innerHTML = '';
     }
     await loadChatSessions();
+    // 会话列表刷新后再重建记忆面板：分组标题依赖当前已知会话，早于
+    // loadChatSessions 渲染会让已删除会话的记忆仍显示旧会话名。
+    refreshResearchMemoryPanel();
     var deleteNotice = window.ChatRendering ? window.ChatRendering.renderDeleteResult(deleteResult) : '';
     var history = $('#chat-history');
     if (history && deleteNotice) {
