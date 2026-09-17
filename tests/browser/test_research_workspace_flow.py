@@ -343,6 +343,93 @@ def test_export_contains_scope_status_and_pdf_page_link(browser_session, actual_
     assert _failed_requests(browser_session, actual_app_url) == []
 
 
+@pytest.mark.parametrize("viewport", [(1280, 900), (390, 844)])
+def test_decision_refresh_and_quality_status_preserve_workspace_filters(browser_session, actual_app_url, viewport):
+    """保存/撤销决策立即刷新已打开工作台；质量摘要只展示安全状态。"""
+    _run_browser(browser_session, "set", "viewport", str(viewport[0]), str(viewport[1]))
+    _start_observing(browser_session)
+    rendered = _eval(browser_session, r"""
+(async () => {
+  const originalFetch = window.fetch.bind(window);
+  const safeQuality = {
+    available: true,
+    health: {passed: true, case_name: 'scope-leak-case'},
+    probe: {passed: true, failure_prose: 'scope-leak-case'}
+  };
+  window.fetch = async (...args) => {
+    if (String(args[0] || '').includes('/api/research/quality')) {
+      return new Response(JSON.stringify(safeQuality), {
+        status: 200, headers: {'Content-Type': 'application/json'}
+      });
+    }
+    return originalFetch(...args);
+  };
+  const deadline = () => Date.now() + 10000;
+  const toggle = document.querySelector('#research-workspace-toggle');
+  if (document.querySelector('#research-workspace').classList.contains('hidden')) toggle.click();
+  document.querySelector('#research-filter-company').value = '601288';
+  document.querySelector('#research-filter-status').value = 'completed';
+  document.querySelector('#research-filter-apply').click();
+  let until = deadline();
+  while ((!document.querySelector('#research-workspace-status').textContent.includes('已显示')
+      || !document.querySelector('#research-quality-status').textContent.includes('健康评测'))
+      && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const workspace = await (await originalFetch('/api/research/workspace')).json();
+  const completed = workspace.items.find(item => item.run_id === 'fixture-completed-run');
+  await openChatSession(completed.session_id);
+  until = deadline();
+  while (!document.querySelector('[data-research-action="save-decision"]') && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  document.querySelector('[data-research-action="save-decision"]').click();
+  document.querySelector('#research-decision-text').value = '即时刷新决策';
+  document.querySelector('#research-decision-form button[type="submit"]').click();
+  until = deadline();
+  while (!document.querySelector('[data-research-run-id="fixture-completed-run"]').textContent.includes('即时刷新决策')
+      && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const saved = document.querySelector('[data-research-run-id="fixture-completed-run"]').textContent;
+  const revoke = [...document.querySelectorAll('#research-memory-list .research-memory-row')]
+    .find(row => row.textContent.includes('即时刷新决策'))
+    .querySelector('[data-research-action="revoke-memory"]');
+  window.confirm = () => true;
+  revoke.click();
+  until = deadline();
+  while (document.querySelector('[data-research-run-id="fixture-completed-run"]').textContent.includes('即时刷新决策')
+      && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const row = document.querySelector('[data-research-run-id="fixture-completed-run"]');
+  window.fetch = originalFetch;
+  return JSON.stringify({
+    saved,
+    afterRevoke: row.textContent,
+    company: document.querySelector('#research-filter-company').value,
+    status: document.querySelector('#research-filter-status').value,
+    quality: document.querySelector('#research-quality-status').textContent,
+    scrollWidth: document.documentElement.scrollWidth,
+    innerWidth: window.innerWidth,
+  });
+})()
+""")
+
+    assert "已保存决策：" in rendered["saved"]
+    assert "即时刷新决策" in rendered["saved"]
+    assert "即时刷新决策" not in rendered["afterRevoke"]
+    assert rendered["company"] == "601288"
+    assert rendered["status"] == "completed"
+    assert "健康评测：通过" in rendered["quality"]
+    assert "负向探针：通过" in rendered["quality"]
+    assert "scope-leak-case" not in rendered["quality"]
+    assert rendered["scrollWidth"] <= rendered["innerWidth"]
+    assert _console_errors(browser_session) == []
+    assert _page_errors(browser_session) == []
+    assert _failed_requests(browser_session, actual_app_url) == []
+
+
 @pytest.mark.parametrize("viewport", [(1280, 900), (768, 1000), (390, 844)])
 def test_workspace_mobile_has_no_horizontal_overflow(browser_session, actual_app_url, viewport):
     """Desktop, tablet, and the required 390px mobile workbench have no overflow."""

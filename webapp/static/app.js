@@ -2274,6 +2274,32 @@ async function loadResearchWorkspace(filters) {
   }
 }
 
+function refreshResearchWorkspaceIfOpen() {
+  var panel = $('#research-workspace');
+  if (panel && !panel.classList.contains('hidden')) {
+    return loadResearchWorkspace(researchWorkspaceFilters());
+  }
+  return Promise.resolve();
+}
+
+async function loadResearchQuality() {
+  var status = $('#research-quality-status');
+  if (!status) return;
+  status.textContent = '正在读取本地质量摘要…';
+  try {
+    var response = await fetch('/api/research/quality');
+    if (!response.ok) throw new Error('quality unavailable');
+    var summary = await response.json();
+    status.innerHTML = window.ChatRendering
+      ? window.ChatRendering.renderResearchQuality(summary)
+      : '尚无本地质量摘要。';
+  } catch (_) {
+    status.innerHTML = window.ChatRendering
+      ? window.ChatRendering.renderResearchQuality({ available: false })
+      : '尚无本地质量摘要。';
+  }
+}
+
 async function toggleResearchFavorite(runId) {
   var item = researchWorkspaceItems.find(function (candidate) { return candidate.run_id === runId; });
   var sessionId = item && item.session_id || researchRunOwners[runId];
@@ -2392,6 +2418,7 @@ async function revokeResearchMemory(id) {
     if (!response.ok) throw new Error('revoke failed');
     var button = document.querySelector('[data-research-memory-id="' + CSS.escape(id) + '"]');
     if (button && button.parentNode) button.parentNode.textContent = '研究记忆已撤销。';
+    await refreshResearchWorkspaceIfOpen();
     refreshResearchMemoryPanel();
   } catch (_) { appendResearchMemoryNotice(null, '撤销研究记忆失败，请重试。'); }
 }
@@ -2404,7 +2431,7 @@ function bindResearchWorkspace() {
   toggle.dataset.bound = '1';
   function setOpen(open) {
     panel.classList.toggle('hidden', !open); toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (open) { loadResearchWorkspace(researchWorkspaceFilters()); loadResearchMemory(); }
+    if (open) { loadResearchWorkspace(researchWorkspaceFilters()); loadResearchQuality(); loadResearchMemory(); }
   }
   toggle.addEventListener('click', function () { setOpen(panel.classList.contains('hidden')); });
   close.addEventListener('click', function () { setOpen(false); toggle.focus(); });
@@ -2440,6 +2467,7 @@ function bindResearchWorkspace() {
       });
       if (!response.ok) throw new Error('decision save failed');
       decisionDialog.close(); appendResearchMemoryNotice((await response.json()).entry);
+      await refreshResearchWorkspaceIfOpen();
       refreshResearchMemoryPanel();
     } catch (_) { appendResearchMemoryNotice(null, '保存失败：研究决策必须引用来源运行中的证据。'); }
   });

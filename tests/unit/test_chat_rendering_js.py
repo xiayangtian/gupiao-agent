@@ -528,12 +528,50 @@ def test_reference_fact_has_no_save_to_memory_action():
         const r = require({json.dumps(str(CHAT_RENDERING_JS))});
         console.log(JSON.stringify({{
           reference: r.renderFactActions({{verification: 'reference', source_type: 'tool'}}, {{id: 'run-1', status: 'completed'}}),
-          verified: r.renderFactActions({{verification: 'verified', source_type: 'pdf', evidence_ids: ['pdf-1']}}, {{id: 'run-1', status: 'completed', verification_report: {{status: 'passed', supported_fact_ids: ['pdf-1']}}}})
+          verified: r.renderFactActions({{id: 'fact_1', verification: 'verified', source_type: 'pdf', evidence_ids: ['pdf-1']}}, {{id: 'run-1', status: 'completed', verification_report: {{status: 'passed', supported_fact_ids: ['pdf-1']}}}})
         }}));
         """
     )
     assert '保存到研究记忆' not in result['reference']
     assert '保存到研究记忆' in result['verified']
+    assert 'data-research-id="fact_1"' in result['verified']
+
+
+def test_fact_without_stable_id_has_no_memory_action():
+    """旧 Fact 没有稳定身份时只能展示，不能渲染保存动作。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{html: r.renderFactActions(
+          {{verification: 'verified', source_type: 'pdf', evidence_ids: ['pdf-1']}},
+          {{id: 'run-1', status: 'completed', verification_report: {{status: 'passed', supported_fact_ids: ['pdf-1']}}}}
+        )}}));
+        """
+    )
+
+    assert "保存到研究记忆" not in result["html"]
+
+
+def test_quality_renderer_shows_safe_health_and_probe_statuses():
+    """质量 UI 只显示健康/探针聚合状态，绝不回显任意失败原文。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{
+          available: r.renderResearchQuality({{
+            available: true,
+            health: {{passed: true, case_name: 'scope-leak-case'}},
+            probe: {{passed: true, failure_prose: 'scope-leak-case'}}
+          }}),
+          unavailable: r.renderResearchQuality({{available: false}})
+        }}));
+        """
+    )
+
+    assert "健康评测" in result["available"]
+    assert "负向探针" in result["available"]
+    assert "scope-leak-case" not in result["available"]
+    assert "尚无本地质量摘要" in result["unavailable"]
 
 
 def test_delete_result_discloses_retained_memory_and_export_state_is_textual():
