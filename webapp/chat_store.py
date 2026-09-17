@@ -10,8 +10,9 @@ import logging
 import os
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from webapp.chat_models import AnswerRun, ChatMessage
 from webapp.research_models import ResearchRun
@@ -24,6 +25,17 @@ DEFAULT_PATH = "data/chat_sessions.json"
 TITLE_MAX_CHARS = 24
 
 
+@dataclass(frozen=True)
+class ChatSessionRun:
+    """Read-only metadata needed by the derived research-workspace index."""
+
+    session_id: str
+    title: str
+    updated_at: str
+    run: AnswerRun
+    research_run: ResearchRun | None = None
+
+
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -32,6 +44,7 @@ class ChatStore:
     def __init__(self, path: Optional[str] = None) -> None:
         self.path = path or DEFAULT_PATH
         self._lock = threading.RLock()
+        self._session_delete_hooks: List[Callable[[str], None]] = []
         self._data = self._load()
 
     # ── 持久化 ──────────────────────────────────────────────
@@ -159,6 +172,45 @@ class ChatStore:
             })
         return messages
 
+    def iter_session_runs(self) -> List[ChatSessionRun]:
+        """Return immutable AnswerRun/ResearchRun metadata without message content.
+
+        The workspace is a derived view, so callers receive parsed immutable run
+        contracts rather than mutable session dictionaries or raw chat messages.
+        Invalid historic records are ignored just as unavailable evidence is.
+        """
+        with self._lock:
+            records: List[ChatSessionRun] = []
+            for session in self._data["sessions"]:
+                session_id = session.get("id")
+                if not isinstance(session_id, str):
+                    continue
+                title = session.get("title") if isinstance(session.get("title"), str) else "新会话"
+                updated_at = session.get("updated_at") if isinstance(session.get("updated_at"), str) else ""
+                for message in session.get("messages", []):
+                    if message.get("role") != "assistant" or not isinstance(message.get("run"), Mapping):
+                        continue
+                    try:
+                        run = AnswerRun.from_dict(message["run"])
+                    except ValueError:
+                        continue
+                    research_run = None
+                    if run.research_run_id:
+                        saved = self._data.get("research_runs", {}).get(run.research_run_id)
+                        if isinstance(saved, Mapping) and saved.get("session_id") == session_id:
+                            try:
+                                research_run = ResearchRun.from_dict(saved.get("run", {}))
+                            except ValueError:
+                                pass
+                    records.append(ChatSessionRun(
+                        session_id=session_id,
+                        title=title,
+                        updated_at=updated_at,
+                        run=run,
+                        research_run=research_run,
+                    ))
+            return records
+
     # ── 写入 ────────────────────────────────────────────────
 
     def create_session(self) -> Dict[str, Any]:
@@ -264,8 +316,15 @@ class ChatStore:
             except ValueError:
                 return None
 
+    def add_session_delete_hook(self, hook: Callable[[str], None]) -> None:
+        """Register a best-effort callback after a persisted session deletion."""
+        if not callable(hook):
+            raise ValueError("session delete hook must be callable")
+        with self._lock:
+            self._session_delete_hooks.append(hook)
+
     def delete_session(self, sid: str) -> bool:
-        """删除会话；不存在返回 False"""
+        """删除会话；不存在返回 False，并在持久化后通知关联的派生索引。"""
         with self._lock:
             before = len(self._data["sessions"])
             self._data["sessions"] = [
@@ -283,7 +342,13 @@ class ChatStore:
             if len(self._data["sessions"]) == before:
                 return False
             self._save()
-            return True
+            hooks = tuple(self._session_delete_hooks)
+        for hook in hooks:
+            try:
+                hook(sid)
+            except Exception:  # pragma: no cover - hooks must not undo deletion
+                logger.exception("session delete hook failed")
+        return True
 
     def _append_normalized_messages(
         self,
