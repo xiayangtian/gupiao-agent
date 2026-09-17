@@ -3564,3 +3564,118 @@ def test_m2_policy_fallback_hint_is_emitted_when_no_external_tool_applies(client
     fallback = _event(events, "policy_fallback")
     assert fallback["intent"] == "report_fact"
     assert fallback["message"] == _event(events, "done")["run"]["tool_policy"]["fallback_message"]
+
+
+class TestResearchWorkspaceMemoryExportQualityApi:
+    def _configure_research_api(self, monkeypatch, tmp_path):
+        from webapp.chat_models import (
+            AnswerRun, EvidenceArtifact, Fact, Scope, ToolArtifact, VerificationReport,
+        )
+        from webapp.chat_store import ChatStore
+        from webapp.research_memory import ResearchMemoryStore
+        from webapp.research_workspace import ResearchWorkspaceStore
+
+        store = ChatStore(str(tmp_path / "sessions.json"))
+        workspace = ResearchWorkspaceStore(store, str(tmp_path / "workspace.json"))
+        memory = ResearchMemoryStore(str(tmp_path / "memory.json"))
+        monkeypatch.setattr(server, "chat_store", store)
+        monkeypatch.setattr(server, "research_workspace", workspace)
+        monkeypatch.setattr(server, "research_memory", memory)
+        monkeypatch.setattr(server, "QUALITY_SUMMARY_PATH", str(tmp_path / "quality.json"))
+
+        pdf = EvidenceArtifact.pdf(
+            "601288:2026-06-30:semi_annual", "601288-2026.pdf", 40,
+            "营业收入见原文披露", pdf_url="/api/history-pdf/601288-2026.pdf?jump=0#page=40",
+        )
+        verified = Fact(
+            "营业收入", 100.0, "亿元", "2026-06-30", "semi_annual_cumulative",
+            "consolidated", "601288", "pdf", ("pdf-1",), "verified",
+        )
+        reference = Fact(
+            "最新价格", 3.2, "元/股", "as_of", "point_in_time",
+            "consolidated", "601288", "tool", ("reference-price",), "reference",
+            "2026-09-16T10:00:00+08:00",
+        )
+        scope = Scope.company_only("601288", "农业银行", ("601288:2026-06-30:semi_annual",))
+        run = AnswerRun(
+            id="r1", content="营业收入为 100 亿元。", status="partial", scope=scope,
+            facts=(verified, reference), artifacts=(pdf,),
+            tool_artifacts=(ToolArtifact("market", "quote", "2026-09-16T10:00:00+08:00", "success"),),
+            verification_report=VerificationReport("partial", supported_fact_ids=("pdf-1",)),
+        )
+        sid = store.create_session()["id"]
+        store.append_turn(sid, question="农业银行营收多少？", run=run)
+        foreign_sid = store.create_session()["id"]
+        return sid, foreign_sid
+
+    def test_workspace_api_filters_company_and_completed_status(self, client, env, monkeypatch, tmp_path):
+        sid, _ = self._configure_research_api(monkeypatch, tmp_path)
+        response = client.get("/api/research/workspace?company_code=601288&status=partial")
+        favorite = client.patch("/api/research/runs/r1/favorite", params={"session_id": sid}, json={"favorite": True})
+
+        assert response.status_code == 200
+        assert all(item["company_codes"] == ["601288"] for item in response.json()["items"])
+        assert response.json()["items"][0]["session_id"] == sid
+        assert favorite.json()["item"]["favorite"] is True
+        assert client.get("/api/research/workspace?text=" + "x" * 101).status_code == 422
+        assert client.get("/api/research/workspace?favorite_only=not-a-bool").status_code == 422
+
+    def test_memory_api_rejects_reference_fact_and_enforces_session_ownership(self, client, env, monkeypatch, tmp_path):
+        sid, foreign_sid = self._configure_research_api(monkeypatch, tmp_path)
+        rejected = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
+            "run_id": "r1", "fact_id": "reference-price",
+        })
+        foreign = client.post("/api/research/memory/facts", params={"session_id": foreign_sid}, json={
+            "run_id": "r1", "fact_id": "pdf-1",
+        })
+        saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
+            "run_id": "r1", "fact_id": "pdf-1",
+        })
+        artifact = client.post("/api/research/memory/artifacts", params={"session_id": sid}, json={
+            "run_id": "r1", "artifact_id": "601288:2026-06-30:semi_annual#p40",
+        })
+        decision = client.post("/api/research/memory/decisions", params={"session_id": sid}, json={
+            "run_id": "r1", "text": "关注营收变化", "evidence_ids": ["pdf-1"],
+        })
+        revoked = client.delete(f"/api/research/memory/{decision.json()['entry']['id']}")
+
+        assert rejected.status_code == 422
+        assert foreign.status_code == 404
+        assert saved.status_code == 200
+        assert saved.json()["entry"]["kind"] == "fact"
+        assert artifact.json()["entry"]["kind"] == "artifact"
+        assert revoked.json()["revoked"] is True
+
+    def test_export_keeps_partial_status_pdf_link_and_owner_boundary(self, client, env, monkeypatch, tmp_path):
+        sid, foreign_sid = self._configure_research_api(monkeypatch, tmp_path)
+        response = client.get("/api/research/runs/r1/export", params={"session_id": sid, "format": "markdown"})
+
+        assert response.status_code == 200
+        assert "partial" in response.text and "PDF 第 40 页" in response.text
+        assert client.get("/api/research/runs/r1/export", params={"session_id": foreign_sid}).status_code == 404
+        assert client.get("/api/research/runs/r1/export", params={"session_id": sid, "format": "csv"}).status_code == 422
+        assert client.get("/api/research/runs/r1/export", params={"session_id": sid, "format": "json"}).json()["answer_run"]["id"] == "r1"
+
+    def test_quality_loads_only_precomputed_safe_summary_and_session_delete_retains_memory(self, client, env, monkeypatch, tmp_path):
+        sid, _ = self._configure_research_api(monkeypatch, tmp_path)
+        saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
+            "run_id": "r1", "fact_id": "pdf-1",
+        })
+        assert saved.status_code == 200
+        with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
+            json.dump({
+                "passed": True, "case_count": 10, "citation_coverage": 1.0,
+                "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+                "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                "p95_stage_duration": 1.5, "failures": [], "raw_cases": ["must not leak"],
+            }, target)
+
+        quality = client.get("/api/research/quality")
+        deleted = client.delete(f"/api/chat/sessions/{sid}")
+
+        assert quality.status_code == 200
+        assert quality.json()["passed"] is True
+        assert "raw_cases" not in quality.json()
+        assert deleted.json()["retained_memory_count"] == 1
+        from webapp.research_memory import ResearchMemoryStore
+        assert len(ResearchMemoryStore(server.research_memory.path).list_entries()) == 1
