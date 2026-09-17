@@ -77,7 +77,7 @@ from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
 from .research_export import ExportValidationError, ResearchExporter
-from .research_memory import ResearchMemoryStore
+from .research_memory import ResearchMemoryStore, artifact_evidence_ids, run_evidence_ids
 from .research_workspace import ResearchWorkspaceQuery, ResearchWorkspaceStore
 from .research_agent import ResearchAgent
 from .research_executor import ResearchExecutor
@@ -2691,34 +2691,10 @@ def _owned_or_404(session_id: str, run_id: str) -> tuple[AnswerRun, ResearchRun 
     return owned
 
 
-def _artifact_identifiers(artifact: Any) -> set[str]:
-    """Return stable, persisted identifiers for an immutable evidence artifact."""
-    identifiers: set[str] = set()
-    if getattr(artifact, "source", None) == "pdf":
-        report_id = getattr(artifact, "report_id", "")
-        page = getattr(artifact, "page", None)
-        if report_id and isinstance(page, int):
-            identifiers.add(f"{report_id}#p{page}")
-        if getattr(artifact, "pdf_url", None):
-            identifiers.add(artifact.pdf_url)
-        if getattr(artifact, "pdf_filename", None):
-            identifiers.add(artifact.pdf_filename)
-    elif getattr(artifact, "source", None) == "web" and getattr(artifact, "url", None):
-        identifiers.add(artifact.url)
-    return identifiers
-
-
-def _run_evidence_ids(run: AnswerRun) -> set[str]:
-    identifiers = {identifier for fact in run.facts for identifier in fact.evidence_ids}
-    for artifact in run.artifacts:
-        identifiers.update(_artifact_identifiers(artifact))
-    return identifiers
-
-
 def _memory_store_for_owned_run(run: AnswerRun) -> ResearchMemoryStore:
     """Bind a short-lived store to one already owner-checked immutable run.
 
-    ``ResearchMemoryStore.save_fact`` intentionally resolves the source itself.
+    ``ResearchMemoryStore.save_*`` intentionally resolves the source itself.
     Giving that lookup only this request's run preserves its fail-closed contract
     without granting the memory layer a cross-session run lookup.
     """
@@ -2807,7 +2783,7 @@ def save_research_artifact_memory(
     session_id: str = Query(..., min_length=1, max_length=128),
 ) -> Dict[str, Any]:
     run, _research_run = _owned_or_404(session_id, body.run_id)
-    artifacts = [artifact for artifact in run.artifacts if body.artifact_id in _artifact_identifiers(artifact)]
+    artifacts = [artifact for artifact in run.artifacts if body.artifact_id in artifact_evidence_ids(artifact)]
     if len(artifacts) != 1:
         raise HTTPException(422, "证据标识不存在或不唯一")
     try:
@@ -2825,7 +2801,7 @@ def save_research_decision_memory(
 ) -> Dict[str, Any]:
     run, _research_run = _owned_or_404(session_id, body.run_id)
     evidence_ids = tuple(body.evidence_ids)
-    if len(set(evidence_ids)) != len(evidence_ids) or not set(evidence_ids).issubset(_run_evidence_ids(run)):
+    if len(set(evidence_ids)) != len(evidence_ids) or not set(evidence_ids).issubset(run_evidence_ids(run)):
         raise HTTPException(422, "研究决策必须引用来源运行中的证据")
     try:
         with _research_memory_lock:

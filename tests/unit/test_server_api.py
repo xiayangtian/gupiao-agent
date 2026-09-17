@@ -20,6 +20,10 @@ from financial_report_fetcher.rag.ingest import IngestResult
 from financial_report_fetcher.report_identity import build_report_filename, build_report_id
 
 
+# 已验证 PDF 事实的确定性证据标识：``report_id#p{page}``（与 artifact 身份一致）。
+PDF_EVIDENCE_ID = "601288:2026-06-30:semi_annual#p40"
+
+
 def _read_sse(response):
     """解析 SSE 响应体为 [(event_name, data), ...] 列表。"""
     events = []
@@ -3589,7 +3593,7 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         )
         verified = Fact(
             "营业收入", 100.0, "亿元", "2026-06-30", "semi_annual_cumulative",
-            "consolidated", "601288", "pdf", ("pdf-1",), "verified",
+            "consolidated", "601288", "pdf", (PDF_EVIDENCE_ID,), "verified",
         )
         reference = Fact(
             "最新价格", 3.2, "元/股", "as_of", "point_in_time",
@@ -3601,7 +3605,7 @@ class TestResearchWorkspaceMemoryExportQualityApi:
             id="r1", content="营业收入为 100 亿元。", status="partial", scope=scope,
             facts=(verified, reference), artifacts=(pdf,),
             tool_artifacts=(ToolArtifact("market", "quote", "2026-09-16T10:00:00+08:00", "success"),),
-            verification_report=VerificationReport("partial", supported_fact_ids=("pdf-1",)),
+            verification_report=VerificationReport("partial", supported_fact_ids=(PDF_EVIDENCE_ID,)),
         )
         sid = store.create_session()["id"]
         store.append_turn(sid, question="农业银行营收多少？", run=run)
@@ -3626,16 +3630,16 @@ class TestResearchWorkspaceMemoryExportQualityApi:
             "run_id": "r1", "fact_id": "reference-price",
         })
         foreign = client.post("/api/research/memory/facts", params={"session_id": foreign_sid}, json={
-            "run_id": "r1", "fact_id": "pdf-1",
+            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
         })
         saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
-            "run_id": "r1", "fact_id": "pdf-1",
+            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
         })
         artifact = client.post("/api/research/memory/artifacts", params={"session_id": sid}, json={
             "run_id": "r1", "artifact_id": "601288:2026-06-30:semi_annual#p40",
         })
         decision = client.post("/api/research/memory/decisions", params={"session_id": sid}, json={
-            "run_id": "r1", "text": "关注营收变化", "evidence_ids": ["pdf-1"],
+            "run_id": "r1", "text": "关注营收变化", "evidence_ids": [PDF_EVIDENCE_ID],
         })
         revoked = client.delete(f"/api/research/memory/{decision.json()['entry']['id']}")
 
@@ -3659,7 +3663,7 @@ class TestResearchWorkspaceMemoryExportQualityApi:
     def test_quality_loads_only_precomputed_safe_summary_and_session_delete_retains_memory(self, client, env, monkeypatch, tmp_path):
         sid, _ = self._configure_research_api(monkeypatch, tmp_path)
         saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
-            "run_id": "r1", "fact_id": "pdf-1",
+            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
         })
         assert saved.status_code == 200
         with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:

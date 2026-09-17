@@ -404,6 +404,14 @@ def _fixture_research_run(scope: Scope, run_id: str, status: str) -> ResearchRun
     )
 
 
+def _fixture_run_lookup(run_id: str):
+    """Resolve a fixture AnswerRun from the launcher's temporary ChatStore only."""
+    for record in server.chat_store.iter_session_runs():
+        if record.run.id == run_id:
+            return record.run
+    return None
+
+
 def _seed_workspace_fixtures(store: ChatStore) -> tuple[str, str, str]:
     """Persist completed/partial/stopped M4 fixtures and an explicit saved decision.
 
@@ -508,7 +516,10 @@ def build_app():
     server.research_workspace = ResearchWorkspaceStore(
         server.chat_store, os.path.join(tmp_dir, "research_workspace.json")
     )
-    server.research_memory = ResearchMemoryStore(os.path.join(tmp_dir, "research_memory.json"))
+    server.research_memory = ResearchMemoryStore(
+        os.path.join(tmp_dir, "research_memory.json"),
+        run_lookup=_fixture_run_lookup,
+    )
     _completed_session, _partial_session, _stopped_session = _seed_workspace_fixtures(server.chat_store)
     # This is fixture construction for an already explicit decision, not a product
     # auto-save path.  It verifies session deletion leaves independent memory alone.

@@ -25,10 +25,17 @@ RunLookup = Callable[[str], AnswerRun | None]
 
 @dataclass(frozen=True)
 class MemoryEntry:
+    """One immutable memory record whose payload is stored as serialized JSON.
+
+    The payload is kept as its canonical JSON text and exposed only through a
+    freshly decoded copy, so no caller can rewrite a persisted memory record by
+    mutating a value it received.
+    """
+
     id: str
     kind: MemoryKind
     source_run_id: str
-    payload: dict[str, Any]
+    payload_json: str
     created_at: str
     expires_at: str | None
     revoked_at: str | None
@@ -40,14 +47,25 @@ class MemoryEntry:
             raise ValueError("memory kind must be fact, artifact, or decision")
         if not isinstance(self.source_run_id, str) or not self.source_run_id:
             raise ValueError("source_run_id must be a non-empty string")
-        if not isinstance(self.payload, Mapping):
+        if not isinstance(self.payload_json, str):
+            raise ValueError("memory payload must be serialized JSON")
+        try:
+            decoded = json.loads(self.payload_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("memory payload must be serialized JSON") from exc
+        if not isinstance(decoded, Mapping):
             raise ValueError("memory payload must be an object")
         _parse_time(self.created_at, "created_at")
         if self.expires_at is not None:
             _parse_time(self.expires_at, "expires_at")
         if self.revoked_at is not None:
             _parse_time(self.revoked_at, "revoked_at")
-        object.__setattr__(self, "payload", _validated_payload(self.kind, self.payload))
+        object.__setattr__(self, "payload_json", _serialized_payload(self.kind, decoded))
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """Return a fresh, mutable copy of the immutable stored payload."""
+        return json.loads(self.payload_json)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,7 +92,7 @@ class MemoryEntry:
             id=_text(value.get("id"), "memory id"),
             kind=_text(value.get("kind"), "memory kind"),
             source_run_id=_text(value.get("source_run_id"), "source_run_id"),
-            payload=_mapping(value.get("payload"), "memory payload"),
+            payload_json=_serialize(_mapping(value.get("payload"), "memory payload")),
             created_at=_text(value.get("created_at"), "created_at"),
             expires_at=expires_at,
             revoked_at=revoked_at,
@@ -121,6 +139,49 @@ def _validated_payload(kind: MemoryKind, payload: Mapping[str, Any]) -> dict[str
         "text": _text(payload.get("text"), "decision text").strip(),
         "evidence_ids": list(_strings(payload.get("evidence_ids"), "decision evidence_ids")),
     }
+
+
+def _serialize(payload: Mapping[str, Any]) -> str:
+    return json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
+
+
+def _serialized_payload(kind: MemoryKind, payload: Mapping[str, Any]) -> str:
+    """Validate then freeze a payload as canonical JSON text."""
+    return _serialize(_validated_payload(kind, payload))
+
+
+def artifact_evidence_ids(artifact: EvidenceArtifact) -> tuple[str, ...]:
+    """Return the stable persisted identifiers of one immutable evidence artifact."""
+    if artifact.source == "pdf":
+        identifiers = [f"{artifact.report_id}#p{artifact.page}"] if artifact.report_id and isinstance(artifact.page, int) else []
+        identifiers.extend(value for value in (artifact.pdf_url, artifact.pdf_filename) if value)
+        return tuple(identifiers)
+    return (artifact.url,) if artifact.url else ()
+
+
+def pdf_evidence_index(run: AnswerRun) -> dict[str, EvidenceArtifact]:
+    """Map each deterministic PDF evidence id to its positive-page artifact.
+
+    The M1--M3 contracts have no separate Fact-to-Artifact key, so the mapping is
+    derived from the persisted artifact itself: the canonical
+    ``report_id#p{page}`` identity plus the artifact's own page URL and file name.
+    The original evidence ids are never rewritten.
+    """
+    index: dict[str, EvidenceArtifact] = {}
+    for artifact in run.artifacts:
+        if artifact.source != "pdf" or not isinstance(artifact.page, int) or artifact.page <= 0:
+            continue
+        for identifier in artifact_evidence_ids(artifact):
+            index.setdefault(identifier, artifact)
+    return index
+
+
+def run_evidence_ids(run: AnswerRun) -> frozenset[str]:
+    """Return every evidence identifier the immutable run already carries."""
+    identifiers = {identifier for fact in run.facts for identifier in fact.evidence_ids}
+    for artifact in run.artifacts:
+        identifiers.update(artifact_evidence_ids(artifact))
+    return frozenset(identifiers)
 
 
 def _now() -> str:
@@ -191,7 +252,7 @@ class ResearchMemoryStore:
             id=uuid4().hex,
             kind=kind,
             source_run_id=source_run_id,
-            payload=dict(payload),
+            payload_json=_serialize(payload),
             created_at=created_at,
             expires_at=_expires_after(expires_after_days, created_at) if expires_after_days else None,
             revoked_at=None,
@@ -227,13 +288,10 @@ class ResearchMemoryStore:
             run = self._source_run(run_id)
             if fact not in run.facts or not self._eligible_fact_source(run, fact):
                 raise ValueError("来源运行未完成或事实未通过已验证")
-            if not any(
-                artifact.source == "pdf"
-                and isinstance(artifact.page, int)
-                and artifact.page > 0
-                for artifact in run.artifacts
-            ):
-                raise ValueError("已验证事实必须具有正页码 PDF 证据")
+            mapped = pdf_evidence_index(run)
+            unmapped = [identifier for identifier in fact.evidence_ids if identifier not in mapped]
+            if unmapped:
+                raise ValueError("已验证事实的每条证据都必须映射到正页码 PDF 证据")
             # One report-period revision cycle is represented by one year; this
             # preserves a review point without silently becoming permanent memory.
             return self._append("fact", run_id, fact.to_dict(), expires_after_days=365)
@@ -243,16 +301,18 @@ class ResearchMemoryStore:
         if not isinstance(artifact, EvidenceArtifact):
             raise ValueError("artifact must be an EvidenceArtifact")
         with self._lock:
-            if artifact.source == "pdf":
-                run = self._source_run(run_id)
-                if artifact.availability != "available" or artifact not in run.artifacts:
-                    raise ValueError("PDF 证据必须是来源运行中现有的可用 artifact")
-                return self._append("artifact", run_id, artifact.to_dict(), expires_after_days=None)
-            # EvidenceArtifact validates http(s) URL and fetched_at at construction.
-            return self._append("artifact", run_id, artifact.to_dict(), expires_after_days=30)
+            run = self._source_run(run_id)
+            if artifact not in run.artifacts:
+                raise ValueError("证据必须是来源运行中现有的 artifact")
+            if artifact.source == "pdf" and artifact.availability != "available":
+                raise ValueError("PDF 证据必须是来源运行中现有的可用 artifact")
+            # Only external artifacts carry a freshness window; PDF evidence keeps
+            # the same review point as the immutable report it cites.
+            expires_after_days = None if artifact.source == "pdf" else 30
+            return self._append("artifact", run_id, artifact.to_dict(), expires_after_days=expires_after_days)
 
     def save_decision(self, text: str, run_id: str, evidence_ids: tuple[str, ...]) -> MemoryEntry:
-        """Save an explicit user decision that cites at least one evidence id."""
+        """Save an explicit user decision that cites this run's own evidence."""
         if not isinstance(text, str) or not text.strip():
             raise ValueError("研究决策不能为空")
         try:
@@ -260,6 +320,10 @@ class ResearchMemoryStore:
         except ValueError as exc:
             raise ValueError("研究决策必须引用至少一条证据") from exc
         with self._lock:
+            run = self._source_run(run_id)
+            unknown = [identifier for identifier in ids if identifier not in run_evidence_ids(run)]
+            if unknown:
+                raise ValueError("研究决策必须引用来源运行中的证据")
             return self._append(
                 "decision",
                 run_id,
@@ -279,7 +343,7 @@ class ResearchMemoryStore:
                     id=entry.id,
                     kind=entry.kind,
                     source_run_id=entry.source_run_id,
-                    payload=entry.payload,
+                    payload_json=entry.payload_json,
                     created_at=entry.created_at,
                     expires_at=entry.expires_at,
                     revoked_at=_now(),
@@ -288,9 +352,10 @@ class ResearchMemoryStore:
                 return True
         return False
 
-    def list_entries(self) -> list[MemoryEntry]:
+    def list_entries(self) -> tuple[MemoryEntry, ...]:
+        """Return audit records as an immutable sequence, newest write order preserved."""
         with self._lock:
-            return list(self._entries)
+            return tuple(self._entries)
 
     def list_active(self) -> list[MemoryEntry]:
         """Return non-revoked, non-expired entries; audit entries remain on disk."""
