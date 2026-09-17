@@ -116,6 +116,13 @@ def test_evaluator_rejects_any_non_fixture_collaborator():
         ChatEvaluator().run({"id": "report-number"}, FixtureAgent(fixture))
 
 
+def test_evaluator_reuses_shared_pdf_url_validation_for_unsafe_urls():
+    import webapp.chat_evaluation as chat_evaluation
+    from webapp.evidence_identity import validated_pdf_url
+
+    assert chat_evaluation.validated_pdf_url is validated_pdf_url
+
+
 def test_fixture_cases_detect_each_deliberate_contract_violation():
     fixture = EvaluationFixture.load(FIXTURE_PATH)
     results = {result.case_id: result for result in _fixture_outputs(fixture)}

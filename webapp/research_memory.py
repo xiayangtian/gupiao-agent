@@ -17,6 +17,7 @@ from typing import Any, Callable, Literal, Mapping
 from uuid import uuid4
 
 from webapp.chat_models import AnswerRun, EvidenceArtifact, Fact
+from webapp.evidence_identity import artifact_evidence_ids, fact_is_backed_by_pdf
 
 DEFAULT_PATH = "data/research_memory.json"
 MemoryKind = Literal["fact", "artifact", "decision"]
@@ -168,32 +169,6 @@ def _serialized_payload(kind: MemoryKind, payload: Mapping[str, Any]) -> str:
     return _serialize(_validated_payload(kind, payload))
 
 
-def artifact_evidence_ids(artifact: EvidenceArtifact) -> tuple[str, ...]:
-    """Return the stable persisted identifiers of one immutable evidence artifact."""
-    if artifact.source == "pdf":
-        identifiers = [f"{artifact.report_id}#p{artifact.page}"] if artifact.report_id and isinstance(artifact.page, int) else []
-        identifiers.extend(value for value in (artifact.pdf_url, artifact.pdf_filename) if value)
-        return tuple(identifiers)
-    return (artifact.url,) if artifact.url else ()
-
-
-def pdf_evidence_index(run: AnswerRun) -> dict[str, EvidenceArtifact]:
-    """Map each deterministic PDF evidence id to its positive-page artifact.
-
-    The M1--M3 contracts have no separate Fact-to-Artifact key, so the mapping is
-    derived from the persisted artifact itself: the canonical
-    ``report_id#p{page}`` identity plus the artifact's own page URL and file name.
-    The original evidence ids are never rewritten.
-    """
-    index: dict[str, EvidenceArtifact] = {}
-    for artifact in run.artifacts:
-        if artifact.source != "pdf" or not isinstance(artifact.page, int) or artifact.page <= 0:
-            continue
-        for identifier in artifact_evidence_ids(artifact):
-            index.setdefault(identifier, artifact)
-    return index
-
-
 def run_evidence_ids(run: AnswerRun) -> frozenset[str]:
     """Return every evidence identifier the immutable run already carries."""
     identifiers = {identifier for fact in run.facts for identifier in fact.evidence_ids}
@@ -322,13 +297,13 @@ class ResearchMemoryStore:
         """Save only a verified fact from a completed or verified-partial run."""
         if not isinstance(fact, Fact) or fact.verification != "verified" or fact.source_type != "pdf":
             raise ValueError("只有已验证的 PDF 事实可以保存到研究记忆")
+        if not fact.id:
+            raise ValueError("旧事实缺少稳定事实身份，不能保存到研究记忆")
         with self._lock:
             run = self._source_run(run_id)
             if fact not in run.facts or not self._eligible_fact_source(run, fact):
                 raise ValueError("来源运行未完成或事实未通过已验证")
-            mapped = pdf_evidence_index(run)
-            unmapped = [identifier for identifier in fact.evidence_ids if identifier not in mapped]
-            if unmapped:
+            if not fact_is_backed_by_pdf(fact, run):
                 raise ValueError("已验证事实的每条证据都必须映射到正页码 PDF 证据")
             # One report-period revision cycle is represented by one year; this
             # preserves a review point without silently becoming permanent memory.

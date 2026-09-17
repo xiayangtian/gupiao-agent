@@ -78,7 +78,8 @@ from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
 from .chat_evaluation import FAILURE_CODES
 from .research_export import ExportValidationError, ResearchExporter
-from .research_memory import ResearchMemoryStore, artifact_evidence_ids, run_evidence_ids
+from .evidence_identity import artifact_evidence_ids
+from .research_memory import ResearchMemoryStore, run_evidence_ids
 from .research_workspace import ResearchWorkspaceQuery, ResearchWorkspaceStore
 from .research_agent import ResearchAgent
 from .research_executor import ResearchExecutor
@@ -2808,7 +2809,7 @@ def save_research_fact_memory(
     _owned_or_404(session_id, body.run_id)
     with _research_memory_lock:
         run, _research_run = _owned_run_inside_memory_lock(session_id, body.run_id)
-        facts = [fact for fact in run.facts if body.fact_id in fact.evidence_ids]
+        facts = [fact for fact in run.facts if fact.id and body.fact_id == fact.id]
         if len(facts) != 1:
             raise HTTPException(422, "事实标识不存在或不唯一")
         try:

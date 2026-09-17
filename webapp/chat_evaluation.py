@@ -15,9 +15,9 @@ from math import ceil, isfinite
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlparse
 
 from webapp.chat_models import AnswerRun, EvidenceArtifact
+from webapp.evidence_identity import artifact_evidence_ids, validated_pdf_url
 from webapp.research_models import ResearchRun
 
 
@@ -339,11 +339,8 @@ def _ratio(numerator: int, denominator: int) -> float:
 
 def _artifact_fact_ids(run: AnswerRun) -> set[str]:
     evidence_ids = {identifier for fact in run.facts for identifier in fact.evidence_ids}
-    evidence_ids.update(
-        f"{artifact.report_id}#p{artifact.page}"
-        for artifact in run.artifacts
-        if artifact.source == "pdf" and artifact.report_id and artifact.page is not None
-    )
+    for artifact in run.artifacts:
+        evidence_ids.update(artifact_evidence_ids(artifact))
     evidence_ids.update(f"tool:{item.provider}:{item.tool_name}" for item in run.tool_artifacts)
     return evidence_ids
 
@@ -373,19 +370,6 @@ def _used_sources(run: AnswerRun) -> set[str]:
     return sources
 
 
-def _invalid_pdf_url(artifact: EvidenceArtifact) -> bool:
-    """Accept only the existing local page route with a matching page fragment."""
-    if artifact.source != "pdf" or not artifact.pdf_url:
-        return False
-    parsed = urlparse(artifact.pdf_url)
-    return not (
-        not parsed.scheme
-        and not parsed.netloc
-        and parsed.path.startswith("/api/history-pdf/")
-        and parsed.fragment == f"page={artifact.page}"
-    )
-
-
 def _duration_between(started_at: str, finished_at: str) -> float | None:
     if not started_at or not finished_at:
         return None
@@ -408,7 +392,10 @@ class ChatEvaluator:
         found_ids = _artifact_fact_ids(answer_run)
         forbidden = self._forbidden_report_ids(answer_run, research_run, case.forbidden_report_ids)
         missing = tuple(identifier for identifier in case.expected_fact_ids if identifier not in found_ids)
-        invalid_urls = sum(_invalid_pdf_url(item) for item in answer_run.artifacts)
+        invalid_urls = sum(
+            item.source == "pdf" and bool(item.pdf_url) and validated_pdf_url(item) is None
+            for item in answer_run.artifacts
+        )
         external_missing_source, external_missing_as_of = self._external_fact_violations(answer_run)
         scoped = self._scope_boundary(answer_run, case)
         report = answer_run.verification_report
@@ -445,7 +432,7 @@ class ChatEvaluator:
             scope_matches=scope_matches,
             pdf_page_links_checked=sum(item.source == "pdf" and bool(item.pdf_url) for item in answer_run.artifacts),
             pdf_page_links_passed=sum(
-                item.source == "pdf" and bool(item.pdf_url) and not _invalid_pdf_url(item)
+                item.source == "pdf" and bool(item.pdf_url) and validated_pdf_url(item) is not None
                 for item in answer_run.artifacts
             ),
             tool_calls=len(answer_run.tool_artifacts),

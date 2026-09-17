@@ -121,6 +121,13 @@ def test_export_rejects_run_without_scope_or_evidence():
         exporter.to_json(AnswerRun(content="无证据", status="completed", scope=_scope()), None)
 
 
+def test_export_reuses_shared_pdf_url_validation_for_unsafe_urls():
+    import webapp.research_export as research_export
+    from webapp.evidence_identity import validated_pdf_url
+
+    assert research_export.validated_pdf_url is validated_pdf_url
+
+
 def test_export_escapes_untrusted_markdown_and_only_links_validated_artifact_urls():
     from webapp.research_export import ResearchExporter
 

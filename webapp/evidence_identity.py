@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 if TYPE_CHECKING:
     from webapp.chat_models import AnswerRun, EvidenceArtifact, Fact
 
 
-_PDF_URL_PREFIX = "/api/history-pdf/"
+_PDF_URL_RE = re.compile(
+    r"^/api/history-pdf/([^/?#]+)\?jump=(0|[1-9]\d*)#page=([1-9]\d*)$"
+)
 
 
 def make_fact_id(
@@ -44,11 +49,25 @@ def make_fact_id(
 
 
 def validated_pdf_url(artifact: "EvidenceArtifact") -> str | None:
-    """Return a local history-PDF URL, never an external or executable URL."""
+    """Return only a safe, page-matched local history-PDF URL."""
     url = getattr(artifact, "pdf_url", None)
-    if getattr(artifact, "source", None) == "pdf" and isinstance(url, str) and url.startswith(_PDF_URL_PREFIX):
-        return url
-    return None
+    page = getattr(artifact, "page", None)
+    if getattr(artifact, "source", None) != "pdf" or not isinstance(url, str) or not isinstance(page, int):
+        return None
+    match = _PDF_URL_RE.fullmatch(url)
+    if match is None or int(match.group(3)) != page:
+        return None
+    filename = unquote(match.group(1))
+    if (
+        not filename
+        or filename != os.path.basename(filename)
+        or "/" in filename
+        or "\\" in filename
+        or not filename.lower().endswith(".pdf")
+        or any(ord(char) < 32 for char in filename)
+    ):
+        return None
+    return url
 
 
 def artifact_evidence_ids(artifact: "EvidenceArtifact") -> tuple[str, ...]:

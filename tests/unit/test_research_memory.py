@@ -31,9 +31,14 @@ def _web_artifact() -> EvidenceArtifact:
     )
 
 
-def _fact(*, verification: str = "verified", evidence_ids: tuple[str, ...] = (PDF_EVIDENCE_ID,)) -> Fact:
+def _fact(
+    *,
+    metric: str = "营业收入",
+    verification: str = "verified",
+    evidence_ids: tuple[str, ...] = (PDF_EVIDENCE_ID,),
+) -> Fact:
     return Fact(
-        "营业收入", 100, "亿元", "2026-06-30", "semi_annual_cumulative",
+        metric, 100, "亿元", "2026-06-30", "semi_annual_cumulative",
         "consolidated", "601288", "pdf", evidence_ids, verification,
     )
 
@@ -134,6 +139,53 @@ def test_verified_pdf_fact_can_be_saved_with_source_and_expiry(tmp_path):
     assert entry.payload["evidence_ids"] == [PDF_EVIDENCE_ID]
     assert entry.expires_at is not None
     assert datetime.fromisoformat(entry.expires_at) > datetime.fromisoformat(entry.created_at)
+
+
+def test_two_verified_facts_sharing_a_page_can_be_saved_independently(tmp_path):
+    revenue_fact = _fact(metric="营业收入")
+    cash_flow_fact = _fact(metric="经营活动现金流")
+    run = AnswerRun(
+        id="run-1",
+        content="已核验的结论",
+        status="completed",
+        facts=(revenue_fact, cash_flow_fact),
+        artifacts=(_pdf_artifact(),),
+        verification_report=VerificationReport(
+            "passed", supported_fact_ids=(PDF_EVIDENCE_ID,),
+        ),
+    )
+    store = _store(tmp_path, run)
+
+    first = store.save_fact(revenue_fact, "run-1")
+    second = store.save_fact(cash_flow_fact, "run-1")
+
+    assert {first.payload["id"], second.payload["id"]} == {revenue_fact.id, cash_flow_fact.id}
+
+
+def test_legacy_fact_without_id_is_visible_but_cannot_be_saved(tmp_path):
+    legacy_fact = Fact.from_dict({key: value for key, value in _fact().to_dict().items() if key != "id"})
+    store = _store(tmp_path, _run("run-1", fact=legacy_fact))
+
+    with pytest.raises(ValueError, match="事实身份"):
+        store.save_fact(legacy_fact, "run-1")
+
+
+def test_supplied_fact_id_round_trips_through_memory_payload(tmp_path):
+    supplied_id = "fact_0123456789abcdef0123"
+    fact = Fact.from_dict({**_fact().to_dict(), "id": supplied_id})
+    store = _store(tmp_path, _run("run-1", fact=fact))
+
+    assert store.save_fact(fact, "run-1").payload["id"] == supplied_id
+
+
+def test_unsafe_pdf_url_cannot_back_a_fact_memory_save(tmp_path):
+    unsafe_url = "https://untrusted.example/report.pdf#page=40"
+    fact = _fact(evidence_ids=(unsafe_url,))
+    artifact = EvidenceArtifact.pdf(REPORT_ID, PDF_FILENAME, 40, "营业收入为 100 亿元", pdf_url=unsafe_url)
+    store = _store(tmp_path, _run("run-1", fact=fact, artifact=artifact))
+
+    with pytest.raises(ValueError, match="PDF"):
+        store.save_fact(fact, "run-1")
 
 
 def test_reference_conflict_unavailable_and_stopped_fragment_cannot_be_saved_as_fact(tmp_path):
