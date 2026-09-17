@@ -348,9 +348,9 @@ def _artifact_fact_ids(run: AnswerRun) -> set[str]:
 def _external_evidence_ids(run: AnswerRun) -> set[str]:
     """Identifiers an external fact may cite: persisted tool/web artifact identities."""
     identifiers = {f"tool:{item.provider}:{item.tool_name}" for item in run.tool_artifacts}
-    identifiers.update(
-        artifact.url for artifact in run.artifacts if artifact.source == "web" and artifact.url
-    )
+    for artifact in run.artifacts:
+        if artifact.source == "web":
+            identifiers.update(artifact_evidence_ids(artifact))
     return identifiers
 
 

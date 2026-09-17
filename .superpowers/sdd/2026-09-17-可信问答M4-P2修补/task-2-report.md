@@ -31,3 +31,16 @@
 
 - Task 3--5 仍未实施；质量摘要生产、工作台刷新/UI 和全链路验收不在本 Task 范围内。
 - 未推送或合并；设计台账保持“实施中”。
+
+## Fix round 1（审查 P1）
+
+- `_external_evidence_ids()` 不再自行读取 web artifact URL；每个 web artifact 的身份均通过 `artifact_evidence_ids()` 获取，evaluator 仅保留自身的 `tool:{provider}:{tool_name}` 身份拼接。
+- 新增 monkeypatch 判别回归：共享身份函数仅返回哨兵 web 身份时，外部 web Fact 仍被识别为有来源；旧的本地 URL 拼接实现会使该断言失败。
+
+| 阶段 | 命令 | 输出 |
+| --- | --- | --- |
+| RED | `python3 -m pytest tests/unit/test_chat_evaluation.py -q -k 'external_web_identity_uses_shared_artifact_identity'` | 退出码 1；旧实现将该 Fact 判为 `external_facts_missing_source == 1`。 |
+| GREEN（Task 2 回归） | `python3 -m pytest tests/unit/test_research_memory.py tests/unit/test_research_export.py tests/unit/test_chat_evaluation.py tests/unit/test_server_api.py -q` | `211 passed, 3 warnings`。 |
+| 差异检查 | `git diff --check` | 通过，无输出。 |
+
+本修复仅覆盖审查 P1；Task 3--5 未实施，未推送或合并。

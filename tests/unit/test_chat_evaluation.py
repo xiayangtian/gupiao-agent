@@ -186,6 +186,41 @@ def test_external_fact_evidence_must_map_to_a_persisted_tool_or_web_artifact():
     assert FixtureAgent(fixture).run(entry)[0].facts[0].evidence_ids == ("tool:market:quote",)
 
 
+def test_external_web_identity_uses_shared_artifact_identity(monkeypatch):
+    """External web-fact validation must use the shared artifact identity rule."""
+    import webapp.chat_evaluation as chat_evaluation
+
+    payload = _payload()
+    market_fact = next(
+        raw["answer_run"]["facts"][0]
+        for raw in payload["cases"]
+        if raw["id"] == "realtime-market"
+    )
+    web_fact = copy.deepcopy(market_fact)
+    web_fact.update({
+        "metric": "网页归因",
+        "source_type": "web",
+        "evidence_ids": ["shared:web-identity"],
+    })
+    news_entry = next(raw for raw in payload["cases"] if raw["id"] == "news-attribution")
+    news_entry["answer_run"]["facts"].append(web_fact)
+    fixture = EvaluationFixture.from_dict(payload)
+    case = next(candidate for candidate in fixture.cases if candidate.id == "news-attribution")
+    calls = []
+
+    def shared_identity(artifact):
+        calls.append(artifact)
+        return ("shared:web-identity",)
+
+    monkeypatch.setattr(chat_evaluation, "artifact_evidence_ids", shared_identity)
+
+    result = ChatEvaluator().run(case, FixtureAgent(fixture))
+
+    assert result.external_facts_missing_source == 0
+    assert calls
+    assert all(artifact.source == "web" for artifact in calls)
+
+
 def test_quality_summary_payload_exposes_only_fixed_codes_and_metrics():
     fixture = EvaluationFixture.load(FIXTURE_PATH)
     summary = QualityGate.evaluate(_fixture_outputs(fixture))
