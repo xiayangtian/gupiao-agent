@@ -53,5 +53,9 @@ data/chat_sessions.json
 # 智能问答行业分类缓存
 data/company_industries.json
 
+# M4 研究工作台与显式记忆侧车数据
+data/research_workspace.json
+data/research_memory.json
+
 # 后台任务状态数据库
 data/tasks.sqlite3
