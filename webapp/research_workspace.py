@@ -16,6 +16,7 @@ from typing import Any, Iterable, Mapping
 
 from webapp.chat_models import AnswerRun
 from webapp.chat_store import ChatStore, ChatSessionRun
+from webapp.research_memory import DEFAULT_PATH as DEFAULT_MEMORY_PATH, ResearchMemoryStore
 
 DEFAULT_PATH = "data/research_workspace.json"
 
@@ -95,9 +96,10 @@ class ResearchWorkspaceQuery:
 class ResearchWorkspaceStore:
     """Lazily index immutable run metadata and persist favorites only."""
 
-    def __init__(self, chat_store: ChatStore, path: str | None = None) -> None:
+    def __init__(self, chat_store: ChatStore, path: str | None = None, *, memory_path: str | None = None) -> None:
         self.chat_store = chat_store
         self.path = path or DEFAULT_PATH
+        self.memory_path = memory_path or DEFAULT_MEMORY_PATH
         self._lock = threading.RLock()
         self._favorites = self._load_favorites()
         self.chat_store.add_session_delete_hook(self._remove_session_favorites)
@@ -153,18 +155,22 @@ class ResearchWorkspaceStore:
             if len(parts := report_id.split(":")) >= 2 and parts[1]
         )
 
-    @staticmethod
-    def _saved_decision_summaries(record: ChatSessionRun) -> tuple[str, ...]:
-        """Read only explicitly designated decision summaries from safe M3 metadata."""
-        summary = record.run.research_summary
-        if not isinstance(summary, Mapping):
-            return ()
-        values = summary.get("decision_summaries", ())
-        if isinstance(values, str):
-            values = (values,)
-        if not isinstance(values, (tuple, list)):
-            return ()
-        return tuple(value.strip() for value in values if isinstance(value, str) and value.strip())
+    def _active_decisions_by_run(self) -> dict[str, tuple[str, ...]]:
+        """Map each run to the active decisions the user explicitly saved for it.
+
+        Decisions are written by short-lived stores in the API layer, so the memory
+        sidecar is re-read on every listing: a snapshot cached at construction
+        would hide a decision saved later.  Only decision memories are searchable
+        workspace metadata; facts and artifacts stay out of the keyword index.
+        """
+        by_run: dict[str, list[str]] = {}
+        for entry in ResearchMemoryStore(self.memory_path).list_active():
+            if entry.kind != "decision":
+                continue
+            text = entry.payload.get("text")
+            if isinstance(text, str) and text.strip():
+                by_run.setdefault(entry.source_run_id, []).append(text.strip())
+        return {run_id: tuple(texts) for run_id, texts in by_run.items()}
 
     @staticmethod
     def _evidence_available(run: AnswerRun) -> bool:
@@ -180,7 +186,12 @@ class ResearchWorkspaceStore:
         )
 
     @classmethod
-    def _item_from_record(cls, record: ChatSessionRun, favorites: set[tuple[str, str]]) -> ResearchWorkspaceItem | None:
+    def _item_from_record(
+        cls,
+        record: ChatSessionRun,
+        favorites: set[tuple[str, str]],
+        decisions_by_run: Mapping[str, tuple[str, ...]],
+    ) -> ResearchWorkspaceItem | None:
         run = record.run
         if not run.id:
             # Historic records without a stable AnswerRun identity cannot safely
@@ -192,7 +203,7 @@ class ResearchWorkspaceStore:
         provider = scope.industry.provider if scope and scope.industry else ""
         periods = cls._periods(scope.report_ids) if scope else ()
         intent = run.intent_decision.intent if run.intent_decision else ""
-        decisions = cls._saved_decision_summaries(record)
+        decisions = decisions_by_run.get(run.id, ())
         # Normalize before comparing: lexicographic maxima over mixed naive/aware
         # ISO strings can select the older run.
         updated_at = _utc_timestamp(
@@ -219,8 +230,12 @@ class ResearchWorkspaceStore:
         )
 
     def _all_items(self) -> list[ResearchWorkspaceItem]:
+        decisions_by_run = self._active_decisions_by_run()
         records = self.chat_store.iter_session_runs()
-        items = [item for record in records if (item := self._item_from_record(record, self._favorites))]
+        items = [
+            item for record in records
+            if (item := self._item_from_record(record, self._favorites, decisions_by_run))
+        ]
         valid_keys = {(item.session_id, item.run_id) for item in items}
         if self._favorites - valid_keys:
             self._favorites.intersection_update(valid_keys)

@@ -443,7 +443,7 @@ def _seed_workspace_fixtures(store: ChatStore) -> tuple[str, str, str]:
         facts=(fact, external_reference), artifacts=(artifact,), intent_decision=IntentDecision(intent="report_fact"),
         verification_report=VerificationReport("passed", supported_fact_ids=fact.evidence_ids),
         research_run_id=completed_research.id,
-        research_summary={"status": "completed", "decision_summaries": ["关注现金流变化"]},
+        research_summary={"status": "completed"},
         created_at="2026-09-17T09:00:00+00:00", completed_at="2026-09-17T09:01:00+00:00",
         model="browser-acceptance-fake",
     )
@@ -464,7 +464,7 @@ def _seed_workspace_fixtures(store: ChatStore) -> tuple[str, str, str]:
         facts=(reference, conflict), artifacts=(artifact,), intent_decision=IntentDecision(intent="realtime_market", needs_local_pdf=False, needs_market_data=True),
         conflicts=(FactConflict("营业收入", (reference, conflict), "fixture 口径冲突"),),
         verification_report=VerificationReport("partial"), research_run_id=partial_research.id,
-        research_summary={"status": "partial", "decision_summaries": []},
+        research_summary={"status": "partial"},
         created_at="2026-09-17T09:02:00+00:00", completed_at="2026-09-17T09:03:00+00:00",
         model="browser-acceptance-fake",
     )
@@ -515,22 +515,24 @@ def build_app():
     server.REPORTS_DIR = reports_dir
     server.ANALYSIS_DIR = analysis_dir
     server.chat_store = ChatStore(os.path.join(tmp_dir, "chat_sessions.json"))
-    # server.py's module globals are instantiated at import time; replace these
-    # sidecars as well so browser acceptance cannot read repository/user state.
-    server.research_workspace = ResearchWorkspaceStore(
-        server.chat_store, os.path.join(tmp_dir, "research_workspace.json")
-    )
     completed_session, _partial_session, _stopped_session = _seed_workspace_fixtures(server.chat_store)
     # This is fixture construction for an already explicit decision, not a product
     # auto-save path.  It verifies session deletion leaves independent memory alone.
     # The owner is the fixture session that already owns the source run.
+    memory_path = os.path.join(tmp_dir, "research_memory.json")
     server.research_memory = ResearchMemoryStore(
-        os.path.join(tmp_dir, "research_memory.json"),
+        memory_path,
         run_lookup=_fixture_run_lookup,
         owner_session_id=completed_session,
     )
     server.research_memory.save_decision(
         "关注现金流变化", "fixture-completed-run", (f"{FIXTURE_REPORT_ID}#p40",)
+    )
+    # server.py's module globals are instantiated at import time; replace these
+    # sidecars as well so browser acceptance cannot read repository/user state, and
+    # point the workspace at the same memory sidecar the save above wrote.
+    server.research_workspace = ResearchWorkspaceStore(
+        server.chat_store, os.path.join(tmp_dir, "research_workspace.json"), memory_path=memory_path,
     )
     return server.app
 

@@ -3582,8 +3582,10 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         from webapp.research_workspace import ResearchWorkspaceStore
 
         store = ChatStore(str(tmp_path / "sessions.json"))
-        workspace = ResearchWorkspaceStore(store, str(tmp_path / "workspace.json"))
         memory = ResearchMemoryStore(str(tmp_path / "memory.json"))
+        workspace = ResearchWorkspaceStore(
+            store, str(tmp_path / "workspace.json"), memory_path=memory.path,
+        )
         monkeypatch.setattr(server, "chat_store", store)
         monkeypatch.setattr(server, "research_workspace", workspace)
         monkeypatch.setattr(server, "research_memory", memory)
@@ -3627,6 +3629,23 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert favorite.json()["item"]["favorite"] is True
         assert client.get("/api/research/workspace?text=" + "x" * 101).status_code == 422
         assert client.get("/api/research/workspace?favorite_only=not-a-bool").status_code == 422
+
+    def test_workspace_keyword_search_hits_a_decision_saved_through_the_real_api(self, client, env, monkeypatch, tmp_path):
+        """工作台关键词必须命中用户真实保存的决策条目，而不是夹具手写字段。"""
+        sid, _ = self._configure_research_api(monkeypatch, tmp_path)
+        saved = client.post("/api/research/memory/decisions", params={"session_id": sid}, json={
+            "run_id": "r1", "text": "关注营收质量恶化", "evidence_ids": [PDF_EVIDENCE_ID],
+        })
+
+        matched = client.get("/api/research/workspace", params={"text": "营收质量"})
+
+        assert saved.status_code == 200
+        assert [item["run_id"] for item in matched.json()["items"]] == ["r1"]
+        assert matched.json()["items"][0]["searchable_summary"] == "关注营收质量恶化"
+        # 撤销后不再是活跃决策，关键词不得再命中该 run。
+        revoked = client.delete(f"/api/research/memory/{saved.json()['entry']['id']}")
+        assert revoked.status_code == 200
+        assert client.get("/api/research/workspace", params={"text": "营收质量"}).json()["items"] == []
 
     def test_memory_api_rejects_reference_fact_and_enforces_session_ownership(self, client, env, monkeypatch, tmp_path):
         sid, foreign_sid = self._configure_research_api(monkeypatch, tmp_path)
@@ -3689,6 +3708,26 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert [entry["id"] for entry in retained.json()["entries"]] == [entry_id]
         assert revoked.json() == {"revoked": True, "id": entry_id}
         assert client.get("/api/research/memory").json() == {"entries": []}
+
+    def test_memory_api_reads_a_sidecar_with_naive_timestamps_without_failing(self, client, env, monkeypatch, tmp_path):
+        """异常 sidecar 的 naive 时间戳必须按 UTC 归一，读接口仍返回 200。"""
+        self._configure_research_api(monkeypatch, tmp_path)
+        with open(server.research_memory.path, "w", encoding="utf-8") as target:
+            json.dump({
+                "schema_version": 2,
+                "entries": [{
+                    "id": "naive-entry", "kind": "decision", "source_run_id": "r1",
+                    "owner_session_id": "session-a",
+                    "payload": {"text": "naive 时间戳决策", "evidence_ids": [PDF_EVIDENCE_ID]},
+                    "created_at": "2026-09-16T10:00:00", "expires_at": "2099-09-16T10:00:00",
+                    "revoked_at": None,
+                }],
+            }, target)
+
+        response = client.get("/api/research/memory")
+
+        assert response.status_code == 200
+        assert [entry["id"] for entry in response.json()["entries"]] == ["naive-entry"]
 
     def test_memory_list_hides_entries_without_a_recorded_owner_but_still_revokes_them(
         self, client, env, monkeypatch, tmp_path,

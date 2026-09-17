@@ -120,10 +120,20 @@ def _mapping(value: object, name: str) -> Mapping[str, Any]:
 
 
 def _parse_time(value: str, name: str) -> datetime:
+    """Parse one persisted timestamp as an aware UTC instant.
+
+    ``datetime.fromisoformat`` also accepts a naive timestamp, and comparing a
+    naive value against the aware ``now`` in ``list_active`` raises ``TypeError``.
+    An anomalous sidecar must not turn the read path into a 500, so a naive value
+    is read as UTC instead of being left naive.
+    """
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} must be an ISO 8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _strings(value: object, name: str) -> tuple[str, ...]:

@@ -12,7 +12,11 @@ from webapp.chat_models import (
     ToolArtifact,
 )
 from webapp.chat_store import ChatStore
+from webapp.research_memory import ResearchMemoryStore
 from webapp.research_workspace import ResearchWorkspaceQuery, ResearchWorkspaceStore
+
+
+PDF_EVIDENCE_ID = "601288:2026-06-30:semi_annual#p40"
 
 
 def _run(
@@ -25,7 +29,6 @@ def _run(
     industry: IndustryRef | None = None,
     period: str = "2026-06-30",
     intent: str = "report_fact",
-    decision_summaries: tuple[str, ...] = (),
     artifact_snippet: str = "原始 PDF 片段不应进入搜索索引",
     created_at: str = "2026-09-16T10:00:00",
     completed_at: str = "2026-09-16T10:00:00",
@@ -47,7 +50,6 @@ def _run(
         status=status,
         scope=scope,
         intent_decision=IntentDecision(intent=intent),
-        research_summary={"decision_summaries": list(decision_summaries)},
         artifacts=artifacts if artifacts is not None else (EvidenceArtifact.pdf(
             report_id=f"{code}:{period}:semi_annual",
             pdf_filename=f"{code}-{period}.pdf",
@@ -69,7 +71,14 @@ def _workspace_with_runs(tmp_path, runs_by_session: list[tuple[str, list[AnswerR
         session_ids[label] = session["id"]
         for run in runs:
             chats.append_turn(session["id"], question=f"{label} 问题", run=run)
-    return ResearchWorkspaceStore(chats, str(tmp_path / "research_workspace.json")), chats, session_ids
+    return (
+        ResearchWorkspaceStore(
+            chats, str(tmp_path / "research_workspace.json"),
+            memory_path=str(tmp_path / "research_memory.json"),
+        ),
+        chats,
+        session_ids,
+    )
 
 
 def test_workspace_filters_by_persisted_company_and_status_not_title(tmp_path):
@@ -87,14 +96,18 @@ def test_workspace_filters_by_persisted_company_and_status_not_title(tmp_path):
 
 
 def test_workspace_text_search_matches_title_and_saved_decision_but_not_raw_artifact(tmp_path):
-    decision_run = _run(
-        "decision-run", code="601288", name="农业银行", decision_summaries=("关注现金流改善",),
-    )
+    decision_run = _run("decision-run", code="601288", name="农业银行")
     artifact_run = _run("artifact-run", code="600900", name="长江电力")
-    store, _, _ = _workspace_with_runs(tmp_path, [
+    store, _, sessions = _workspace_with_runs(tmp_path, [
         ("农业银行研究", [decision_run]),
         ("长江电力研究", [artifact_run]),
     ])
+    # 真实保存路径写入决策，而不是给 AnswerRun 手写一个没有生产写入方的字段。
+    ResearchMemoryStore(
+        store.memory_path,
+        run_lookup=lambda run_id: decision_run if run_id == decision_run.id else None,
+        owner_session_id=sessions["农业银行研究"],
+    ).save_decision("关注现金流改善", decision_run.id, (PDF_EVIDENCE_ID,))
 
     items = store.list_items(ResearchWorkspaceQuery(text="现金流"))
 
@@ -206,7 +219,7 @@ def test_workspace_favorites_reload_from_sidecar_and_prune_orphan_runs(tmp_path)
     store.set_favorite(sessions["农业银行研究"], "first", True)
     sidecar_path = tmp_path / "research_workspace.json"
 
-    reloaded = ResearchWorkspaceStore(chats, str(sidecar_path))
+    reloaded = ResearchWorkspaceStore(chats, str(sidecar_path), memory_path=str(tmp_path / "research_memory.json"))
 
     assert [item.run_id for item in reloaded.list_items(ResearchWorkspaceQuery(favorite_only=True))] == ["first"]
 
@@ -214,7 +227,7 @@ def test_workspace_favorites_reload_from_sidecar_and_prune_orphan_runs(tmp_path)
     sidecar["favorites"].append({"session_id": sessions["农业银行研究"], "run_id": "removed-run"})
     sidecar_path.write_text(json.dumps(sidecar, ensure_ascii=False), encoding="utf-8")
 
-    orphaned = ResearchWorkspaceStore(chats, str(sidecar_path))
+    orphaned = ResearchWorkspaceStore(chats, str(sidecar_path), memory_path=str(tmp_path / "research_memory.json"))
     items = orphaned.list_items(ResearchWorkspaceQuery(favorite_only=True))
 
     assert [item.run_id for item in items] == ["first"]

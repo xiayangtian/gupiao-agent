@@ -127,9 +127,10 @@ _chat_lock = threading.Lock()
 # 智能问答历史会话（JSON 文件持久化，data/chat_sessions.json）
 chat_store = ChatStore()
 # M4 sidecars contain only derived workspace metadata and explicit memory entries;
-# immutable AnswerRun/ResearchRun records remain in ChatStore.
-research_workspace = ResearchWorkspaceStore(chat_store)
+# immutable AnswerRun/ResearchRun records remain in ChatStore.  The workspace reads
+# active decision memories from the same sidecar to expose them to keyword search.
 research_memory = ResearchMemoryStore()
+research_workspace = ResearchWorkspaceStore(chat_store, memory_path=research_memory.path)
 # Explicit-memory writes and the session-deletion count share one coordination
 # lock.  Lock order is `_research_memory_lock` -> ChatStore lock; no code path may
 # hold the ChatStore lock (or any store lock) and then wait for this lock.

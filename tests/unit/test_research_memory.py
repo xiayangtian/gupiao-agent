@@ -268,6 +268,40 @@ def test_saved_memory_rejects_external_mutation_of_defensive_copies(tmp_path):
     assert entry.id == reloaded.list_entries()[0].id
 
 
+def test_naive_sidecar_timestamps_are_read_as_utc_instead_of_raising(tmp_path):
+    """异常 sidecar 的 naive 时间戳不得让读路径崩溃。
+
+    ``list_active`` 以 aware 的 ``now`` 比较 ``expires_at``；naive 值会抛
+    ``TypeError`` 并让 ``GET /api/research/memory`` 变成 500。naive 统一按 UTC
+    解读，既 fail-closed 又不误判有效期。
+    """
+    path = tmp_path / "research_memory.json"
+    path.write_text(json.dumps({
+        "schema_version": 2,
+        "entries": [
+            {
+                "id": "naive-active", "kind": "decision", "source_run_id": "run-1",
+                "owner_session_id": "session-a",
+                "payload": {"text": "未来到期", "evidence_ids": [PDF_EVIDENCE_ID]},
+                "created_at": "2026-09-16T10:00:00", "expires_at": "2099-09-16T10:00:00",
+                "revoked_at": None,
+            },
+            {
+                "id": "naive-expired", "kind": "decision", "source_run_id": "run-1",
+                "owner_session_id": "session-a",
+                "payload": {"text": "已过期", "evidence_ids": [PDF_EVIDENCE_ID]},
+                "created_at": "2020-01-01T00:00:00", "expires_at": "2020-01-02T00:00:00",
+                "revoked_at": None,
+            },
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    store = ResearchMemoryStore(str(path))
+
+    assert [entry.id for entry in store.list_active()] == ["naive-active"]
+    assert [entry.id for entry in store.list_owned_active()] == ["naive-active"]
+
+
 def test_revoked_memory_survives_reload_but_is_excluded_by_default(tmp_path):
     path = tmp_path / "research_memory.json"
     store = _store(tmp_path, _run("run-1"))
