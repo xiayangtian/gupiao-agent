@@ -2274,12 +2274,14 @@ async function loadResearchWorkspace(filters) {
   }
 }
 
-function refreshResearchWorkspaceIfOpen() {
+function researchWorkspacePanelIsVisible() {
   var panel = $('#research-workspace');
   var chatPage = $('#page-chat');
-  if (panel && chatPage && !panel.classList.contains('hidden') && !chatPage.classList.contains('hidden')) {
-    return loadResearchWorkspace(researchWorkspaceFilters());
-  }
+  return !!(panel && chatPage && !panel.classList.contains('hidden') && !chatPage.classList.contains('hidden'));
+}
+
+function refreshResearchWorkspaceIfOpen() {
+  if (researchWorkspacePanelIsVisible()) return loadResearchWorkspace(researchWorkspaceFilters());
   return Promise.resolve();
 }
 
@@ -2408,8 +2410,8 @@ async function loadResearchMemory() {
 }
 
 function refreshResearchMemoryPanel() {
-  var panel = $('#research-workspace');
-  if (panel && !panel.classList.contains('hidden')) loadResearchMemory();
+  if (researchWorkspacePanelIsVisible()) return loadResearchMemory();
+  return Promise.resolve();
 }
 
 async function revokeResearchMemory(id) {

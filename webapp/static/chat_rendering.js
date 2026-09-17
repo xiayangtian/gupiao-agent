@@ -499,7 +499,9 @@
   // Only safe aggregate booleans are rendered.  The API deliberately omits case,
   // prompt, and failure details, and this renderer must never infer or expose them.
   function renderResearchQuality(summary) {
-    var refreshCommand = '<code>python3 scripts/run_chat_evaluation.py</code>';
+    var refreshCommand = '<code>' + escapeHtml(
+      'python3 scripts/run_chat_evaluation.py --fixture tests/fixtures/chat_eval_cases.json --output data/research_quality_summary.json'
+    ) + '</code>';
     if (!summary || summary.available !== true
       || !summary.health || typeof summary.health.passed !== 'boolean'
       || !summary.probe || typeof summary.probe.passed !== 'boolean') {

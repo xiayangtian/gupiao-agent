@@ -574,9 +574,13 @@ def test_quality_renderer_shows_safe_health_and_probe_statuses():
     assert "生成时间：&lt;img src=x onerror=alert(1)&gt;" in result["available"]
     assert "<img src=x onerror=alert(1)>" not in result["available"]
     assert "scope-leak-case" not in result["available"]
-    command = "python3 scripts/run_chat_evaluation.py"
-    assert command in result["available"]
-    assert command in result["unavailable"]
+    command = (
+        "python3 scripts/run_chat_evaluation.py"
+        " --fixture tests/fixtures/chat_eval_cases.json"
+        " --output data/research_quality_summary.json"
+    )
+    assert "<code>" + command + "</code>" in result["available"]
+    assert "<code>" + command + "</code>" in result["unavailable"]
     assert "尚无本地质量摘要" in result["unavailable"]
 
 
@@ -587,7 +591,7 @@ def test_refresh_workspace_requires_visible_chat_page_and_workspace_panel():
         const fs = require('fs');
         const vm = require('vm');
         const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
-        const start = src.indexOf('function refreshResearchWorkspaceIfOpen() {{');
+        const start = src.indexOf('function researchWorkspacePanelIsVisible() {{');
         const end = src.indexOf('async function loadResearchQuality()', start);
         if (start < 0 || end < 0) throw new Error('refreshResearchWorkspaceIfOpen 未找到');
         const fnSource = src.slice(start, end);
@@ -606,6 +610,58 @@ def test_refresh_workspace_requires_visible_chat_page_and_workspace_panel():
           vm.createContext(sandbox);
           vm.runInContext(fnSource, sandbox);
           await sandbox.refreshResearchWorkspaceIfOpen();
+          return calls;
+        }}
+
+        (async () => console.log(JSON.stringify({{
+          visible: await refreshCount(false, false),
+          workspaceHidden: await refreshCount(true, false),
+          chatHidden: await refreshCount(false, true),
+        }})))();
+        """
+    )
+
+    assert result == {"visible": 1, "workspaceHidden": 0, "chatHidden": 0}
+
+
+def test_refresh_memory_panel_requires_visible_chat_page_and_workspace_panel():
+    """保存或撤销完成后，隐藏聊天页的记忆面板不得 fetch 或改写。"""
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "function researchWorkspacePanelIsVisible()" in source
+    workspace_refresh = source[source.index("function refreshResearchWorkspaceIfOpen() {"):
+                               source.index("async function loadResearchQuality()")]
+    memory_refresh = source[source.index("function refreshResearchMemoryPanel() {"):
+                           source.index("async function revokeResearchMemory", source.index("function refreshResearchMemoryPanel() {"))]
+    assert "researchWorkspacePanelIsVisible()" in workspace_refresh
+    assert "researchWorkspacePanelIsVisible()" in memory_refresh
+
+    result = _run_node(
+        f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('function researchWorkspacePanelIsVisible() {{');
+        const workspaceEnd = src.indexOf('async function loadResearchQuality()', start);
+        const memoryStart = src.indexOf('function refreshResearchMemoryPanel() {{');
+        const end = src.indexOf('async function revokeResearchMemory', memoryStart);
+        if (start < 0 || workspaceEnd < 0 || memoryStart < 0 || end < 0) throw new Error('研究工作台可见性刷新函数未找到');
+        const fnSource = src.slice(start, workspaceEnd) + src.slice(memoryStart, end);
+
+        async function refreshCount(workspaceHidden, chatHidden) {{
+          let calls = 0;
+          const workspace = {{classList: {{contains: () => workspaceHidden}}}};
+          const chatPage = {{classList: {{contains: () => chatHidden}}}};
+          const sandbox = {{
+            $: (selector) => selector === '#research-workspace' ? workspace :
+              (selector === '#page-chat' ? chatPage : null),
+            researchWorkspaceFilters: () => ({{status: 'completed'}}),
+            loadResearchWorkspace: () => Promise.resolve(),
+            loadResearchMemory: () => {{ calls += 1; return Promise.resolve(); }},
+            Promise,
+          }};
+          vm.createContext(sandbox);
+          vm.runInContext(fnSource, sandbox);
+          await sandbox.refreshResearchMemoryPanel();
           return calls;
         }}
 

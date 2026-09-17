@@ -23,7 +23,7 @@ Task 1: minor deferred: add an explicit full supplied `fact_` ID round-trip test
 | Task 1 — 稳定 Fact ID 与统一证据身份 | 已完成 | `95487aa` | RED: focused collection failed as expected (`ModuleNotFoundError`); GREEN: `36 passed`; related regression: `44 passed`; `git diff --check` passed | 新 Fact 生成 `fact_` ID；旧序列化 Fact 保持空 ID。完整记录见 `task-1-report.md`。 |
 | Task 2 — 使用 Fact ID 保存研究记忆并迁移后端消费者 | 已完成 | `HEAD` | RED: `2 failed, 1 passed`（legacy Fact 未拒绝、Fact ID API 查找失败）；GREEN: focused `10 passed`; Task 2 regression `210 passed`; related contracts `246 passed`; `git diff --check` passed | memory 拒绝空 ID legacy Fact；API 精确匹配 Fact ID；memory/export/evaluator 复用 evidence_identity；覆盖 unsafe PDF URL、同页多 Fact 与完整 supplied `fact_` ID round-trip。完整记录见 `task-2-report.md`。 |
 | Task 3 — 健康/负向评测分组与显式质量摘要命令 | 已完成 | `HEAD` | 初始：RED 缺失 CLI；GREEN focused `5 passed`; 回归 `189 passed, 3 warnings`。Fix round 1：RED `6 failed`；GREEN focused `6 passed, 187 deselected, 3 warnings`；回归 `193 passed, 3 warnings`；显式质量命令与 `git diff --check` 通过 | fixture v2 强制 health/probe 与预期失败码；Fix round 1 将 scope/invalid-PDF/external-missing-as_of/stopped-rendered-complete 四个固定错误归入 probe，四个检测码各为 1；API fail-closed 严格读取带时区 ISO `generated_at` 并归一 UTC；字符串 schema version 被拒绝。完整记录见 `task-3-report.md`。 |
-| Task 4 — 工作台即时一致性与质量观测界面 | 已完成 | `HEAD` | 初始 RED/GREEN、JS rendering `28 passed`、browser workbench `12 passed`、静态检查通过；Fix round 1：RED `2 failed, 27 deselected`；GREEN focused `2 passed, 27 deselected`；JS `29 passed`；browser `12 passed`；`node --check` 与 `git diff --check` 通过 | 工作台打开时只读质量摘要；保存/撤销后复用当前筛选和 generation 保护刷新；旧 Fact 无保存动作。Fix round 1：质量摘要安全显示 `generated_at` 并始终给出本地刷新命令；工作台刷新同时要求 `#research-workspace` 与 `#page-chat` 可见。完整记录见 `task-4-report.md`。 |
+| Task 4 — 工作台即时一致性与质量观测界面 | 已完成 | `HEAD` | 初始 RED/GREEN、JS rendering `28 passed`、browser workbench `12 passed`、静态检查通过；Fix round 1：RED `2 failed, 27 deselected`；GREEN focused `2 passed, 27 deselected`；JS `29 passed`；browser `12 passed`；Fix round 2：RED `2 failed, 28 deselected`；GREEN focused `2 passed, 28 deselected`；JS `30 passed`；browser `12 passed`；精确本地命令、`node --check` 与 `git diff --check` 通过 | 工作台打开时只读质量摘要；保存/撤销后复用当前筛选和 generation 保护刷新；旧 Fact 无保存动作。Fix round 1：质量摘要安全显示 `generated_at` 并始终给出本地刷新命令；工作台刷新同时要求 `#research-workspace` 与 `#page-chat` 可见。Fix round 2：质量命令含 fixture/output 完整参数；记忆面板与列表共享 chat-page + panel 可见性谓词。完整记录见 `task-4-report.md`。 |
 
 ## Task 2 Fix round 1（审查 P1）
 
@@ -42,4 +42,11 @@ Task 1: minor deferred: add an explicit full supplied `fact_` ID round-trip test
 - 可用质量摘要安全转义显示 `generated_at`，且可用/不可用状态均显示精确本地刷新命令；health/probe 以外的失败原文不参与渲染。
 - `refreshResearchWorkspaceIfOpen()` 仅在 `#research-workspace` 与 `#page-chat` 均可见时加载，离开聊天页的异步保存/撤销不更新不可见面板。
 - 验证：RED `2 failed, 27 deselected`；GREEN focused `2 passed, 27 deselected`；`tests/unit/test_chat_rendering_js.py` `29 passed`；`tests/browser/test_research_workspace_flow.py` `12 passed`；Node syntax 和 `git diff --check` 通过。
+- 范围：未实施 Task 5，未推送或合并；全局任务台账工具不可用，本地 SDD 台账已更新。
+
+## Task 4 Fix round 2（审查 P1）— 已完成（未合并）
+
+- 质量 UI 在可用/不可用状态均经 `escapeHtml` 显示可直接执行的完整本地命令：`python3 scripts/run_chat_evaluation.py --fixture tests/fixtures/chat_eval_cases.json --output data/research_quality_summary.json`。
+- `refreshResearchWorkspaceIfOpen()` 与 `refreshResearchMemoryPanel()` 复用 `researchWorkspacePanelIsVisible()`；该谓词同时要求 `#page-chat` 和 `#research-workspace` 可见，因此保存决策或撤销完成后离开聊天页不会 fetch 或改写隐藏记忆面板。
+- 验证：RED `2 failed, 28 deselected`；GREEN focused `2 passed, 28 deselected`；JS 回归 `30 passed`；浏览器工作台回归 `12 passed`；精确本地命令成功写入摘要；Node syntax 与 `git diff --check` 通过。完整记录见 `task-4-report.md`。
 - 范围：未实施 Task 5，未推送或合并；全局任务台账工具不可用，本地 SDD 台账已更新。

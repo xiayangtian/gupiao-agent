@@ -39,3 +39,20 @@
 | 静态检查 | `node --check webapp/static/app.js && node --check webapp/static/chat_rendering.js && git diff --check` | 通过，无输出。 |
 
 本修复未实施 Task 5，未推送或合并。
+
+## Fix round 2（审查 P1）
+
+- 质量区域在可用和不可用状态均转义显示可直接执行的完整本地命令：`python3 scripts/run_chat_evaluation.py --fixture tests/fixtures/chat_eval_cases.json --output data/research_quality_summary.json`。
+- 抽取 `researchWorkspacePanelIsVisible()`，让 `refreshResearchWorkspaceIfOpen()` 与 `refreshResearchMemoryPanel()` 复用同一 `#page-chat` 和 `#research-workspace` 可见性谓词；成功保存决策或撤销后若已离开聊天页，不会读取或改写隐藏的研究记忆面板。
+- 新增判别回归：完整命令参数必须在两种质量状态下位于转义的 `<code>` 显示中；记忆刷新和工作台刷新必须共享谓词，且聊天页或面板隐藏时均不调用 `loadResearchMemory()`。
+
+| 阶段 | 命令 | 输出 |
+| --- | --- | --- |
+| RED | `python3 -m pytest tests/unit/test_chat_rendering_js.py -q -k 'quality_renderer_shows_safe_health_and_probe_statuses or refresh_memory_panel_requires_visible_chat_page_and_workspace_panel'` | `2 failed, 28 deselected`：旧命令缺少 fixture/output 参数，且尚无共享可见性谓词。 |
+| GREEN（聚焦） | 同上 | `2 passed, 28 deselected`。 |
+| JS 渲染回归 | `python3 -m pytest tests/unit/test_chat_rendering_js.py -q` | `30 passed`。 |
+| 浏览器工作台回归 | `python3 -m pytest tests/browser/test_research_workspace_flow.py -q` | `12 passed`。 |
+| 精确本地命令 | `python3 scripts/run_chat_evaluation.py --fixture tests/fixtures/chat_eval_cases.json --output data/research_quality_summary.json` | 成功；输出 `quality summary written: data/research_quality_summary.json`。 |
+| 静态检查 | `node --check webapp/static/app.js && node --check webapp/static/chat_rendering.js && git diff --check` | 通过，无输出。 |
+
+范围：未实施 Task 5，未推送或合并；全局任务台账工具不在当前工具集中，本地 SDD 台账已更新。
