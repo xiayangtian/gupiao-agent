@@ -1547,10 +1547,27 @@ class TestChatSessionsApi:
         assert "event: done" in body
         assert store.list_sessions()[0]["message_count"] == 2
 
-    def test_chat_stream_requires_rag(self, client, env, monkeypatch):
+    def test_chat_stream_without_rag_uses_degraded_tool_orchestration(self, client, env, monkeypatch):
+        """索引未初始化时，流式问答仍可进入受控工具编排而不是返回 503。"""
+        constructed = []
+
+        class FallbackRagQA:
+            def __init__(self, store, *args, **kwargs):
+                constructed.append((store, kwargs))
+
+            def answer_stream(self, question, **kwargs):
+                yield {"type": "done", "answer": "工具降级回答", "citations": [],
+                       "model": "m", "usage": {}, "tools_used": [],
+                       "retrieval_degraded": True}
+
         monkeypatch.setattr(server, "rag_qa", None)
-        r = client.post("/api/chat/stream", json={"question": "x"})
-        assert r.status_code == 503
+        monkeypatch.setattr(server, "RagQA", FallbackRagQA)
+        monkeypatch.setattr(server, "_build_chat_tool_executor", lambda cfg: lambda name, args: "{}")
+        response = client.post("/api/chat/stream", json={"question": "x"})
+
+        assert response.status_code == 200
+        assert "工具降级回答" in response.text
+        assert constructed[0][0] is None
 
 
 class TestTaskResultApi:

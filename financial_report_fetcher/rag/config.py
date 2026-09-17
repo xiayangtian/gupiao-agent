@@ -43,7 +43,7 @@ class RagConfig:
     enhanced_analysis: bool = True
     # 分析页默认勾选维度；空列表时用 analyzer 内置默认 5 个维度
     analysis_dimensions: List[str] = field(default_factory=list)
-    # 问答接入 MCP 工具：允许模型按需调用外部数据工具（需 enabled: true）
+    # 问答接入 MCP 工具：允许模型按需调用外部数据工具；无本地索引时仍可用
     mcp_tools: bool = True
     mcp_tool_timeout: int = 30          # 单次工具调用超时（秒）
     mcp_max_tool_rounds: int = 3        # 最大工具调用轮数

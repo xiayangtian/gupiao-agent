@@ -53,7 +53,7 @@ rag:
     - business_highlights
     - profit_quality
     - cashflow
-  mcp_tools: true                 # 问答时允许模型调用 MCP 工具获取更多信息（需 enabled: true）
+  mcp_tools: true                 # 问答时允许模型调用 MCP 工具获取更多信息（无本地索引时也可用）
   mcp_tool_timeout: 30            # 单次 MCP 工具调用超时（秒）
   mcp_max_tool_rounds: 3          # 最大工具调用轮数（防无限循环）
   mcp_max_tool_calls: 10          # 单次问答总工具调用上限；重新提问后重新计数

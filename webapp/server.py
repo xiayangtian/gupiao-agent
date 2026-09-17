@@ -482,8 +482,6 @@ def _init_rag() -> None:
         rag_store = rag_service = rag_qa = None
 
 
-_init_rag()  # 模块加载时尝试初始化（失败不阻塞启动）
-
 # 串行化「检查 + 下载」：防止 serve_pdf / chat 请求线程与后台分析线程
 # 并发下载同一份报告时互踩同一文件路径
 _download_lock = threading.Lock()
@@ -1523,6 +1521,10 @@ def _handle_supplement_request(payload: Dict[str, Any]) -> bool:
     return True
 
 
+# 补报处理器定义完成后才初始化 RAG；否则 enabled=true 时构造 RagQA 会引用未定义名称。
+_init_rag()
+
+
 def _remember_supplement_reports(
     request_id: str, candidates: List[SupplementCandidate], metas: List[ReportMeta],
 ) -> None:
@@ -2043,6 +2045,23 @@ def _research_step_handlers(
             "verify": verify_research, "answer": answer_research}
 
 
+def _chat_qa_or_degraded() -> RagQA:
+    """返回检索问答器；索引不可用时保留受控外部工具问答。"""
+    if rag_qa is not None:
+        return rag_qa
+    cfg = RagConfig.load()
+    return RagQA(
+        None,
+        ai_client,
+        top_k=cfg.top_k,
+        tool_executor=_build_chat_tool_executor(cfg) or _unavailable_tool_executor(),
+        supplement_request_handler=_handle_supplement_request,
+        company_code_resolver=_resolve_symbol_code,
+        max_tool_rounds=cfg.mcp_max_tool_rounds,
+        max_tool_calls=cfg.mcp_max_tool_calls,
+    )
+
+
 def _mark_research_stopped(sid: str, run_id: str) -> Optional[ResearchRun]:
     """Persist the honest stopped state for a research run whose client disconnected.
 
@@ -2091,8 +2110,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     _require_ai()
     if not body.question.strip():
         raise HTTPException(400, "问题不能为空")
-    if rag_qa is None:
-        raise HTTPException(503, "RAG 知识库未初始化：请配置 rag.enabled 并执行索引")
+    chat_qa = _chat_qa_or_degraded()
 
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
@@ -2154,10 +2172,10 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                               priority_report_id=priority_report_id, scope=scope, run_id=run_id)
                 # M1-compatible injected test adapters may not yet expose the M2
                 # argument; production RagQA always receives the policy.
-                parameters = inspect.signature(rag_qa.answer_stream).parameters.values()
+                parameters = inspect.signature(chat_qa.answer_stream).parameters.values()
                 if any(parameter.name == "tool_policy" or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
                     kwargs["tool_policy"] = policy
-                yield from rag_qa.answer_stream(**kwargs)
+                yield from chat_qa.answer_stream(**kwargs)
             finally:
                 _supplement_context.current = None
 

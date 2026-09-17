@@ -181,7 +181,7 @@ python3 -m financial_report_fetcher rag ingest --pdf "reports/长江电力_60090
 
 Web 端：`POST /api/chat/stream` 流式通用对话（SSE，携带 `session_id` 自动保存历史）、
 `GET/POST /api/chat/sessions` 会话列表 / 新建、`POST /api/chat` 非流式通用对话（兼容）；
-问答默认启用 MCP 工具（`rag.mcp_tools: true`，超时/轮数/白名单见 `config.example.yaml`）；
+问答默认启用 MCP 工具（`rag.mcp_tools: true`，超时/轮数/白名单见 `config.example.yaml`）；即使未启用或未初始化本地 RAG 索引，流式智能问答仍可使用受控 MCP 与网页搜索，但会明确标注本地财报未核验；
 MCP 带熔断保护（连续失败自动暂停使用、冷却后自动探测恢复）与状态检测
 （`GET /api/mcp/status`、`POST /api/mcp/diagnose`，RAG 页可视化）、
 `GET /api/rag/status` 状态、
