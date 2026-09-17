@@ -99,6 +99,11 @@ def test_fixture_requires_a_supported_schema_version_and_fixed_outputs():
         EvaluationFixture.from_dict(payload)
 
     payload = _payload()
+    payload["schema_version"] = "2"
+    with pytest.raises(ValueError, match="fixture schema_version must be an integer"):
+        EvaluationFixture.from_dict(payload)
+
+    payload = _payload()
     payload["cases"][0].pop("answer_run")
     with pytest.raises(ValueError, match="fixed output"):
         EvaluationFixture.from_dict(payload)
@@ -141,19 +146,34 @@ def test_health_summary_can_pass_while_probe_records_expected_detections():
     assert results["report-number"].status_matches is True
     assert results["report-number"].citation_coverage == 1.0
     assert results["scope-leak"].forbidden_report_ids_hit == (LEAK_REPORT_ID,)
-    assert results["pdf-without-page"].pdf_page_links_checked == 0
-    assert results["pdf-without-page"].pdf_page_links_passed == 0
+    assert results["pdf-without-page"].invalid_pdf_page_urls == 1
+    assert results["news-attribution"].external_facts_missing_as_of == 1
+    assert results["stop-recovery"].stopped_runs_rendered_complete == 1
     assert results["tool-failure"].tool_calls == 1
     assert results["tool-failure"].tool_successes == 0
-    assert results["stop-recovery"].stop_recovery_checks == 1
-    assert results["stop-recovery"].stop_recovery_passes == 1
     assert results["realtime-market"].disallowed_sources == ()
-    assert results["news-attribution"].disallowed_sources == ()
+
+    fixed_probes = {
+        case.id: case.expected_failure_codes
+        for case in fixture.cases
+        if case.id in {"scope-leak", "pdf-without-page", "news-attribution", "stop-recovery"}
+    }
+    assert fixed_probes == {
+        "scope-leak": ("scope_leak",),
+        "pdf-without-page": ("invalid_pdf_page_url",),
+        "news-attribution": ("external_fact_missing_as_of",),
+        "stop-recovery": ("stopped_run_rendered_complete",),
+    }
 
     payload = build_quality_summary(fixture, generated_at="2026-09-17T00:00:00+00:00")
     assert payload["health"]["passed"] is True
     assert payload["probe"]["passed"] is True
-    assert payload["probe"]["detected_failure_codes"] == {"scope_leak": 1}
+    assert payload["probe"]["detected_failure_codes"] == {
+        "external_fact_missing_as_of": 1,
+        "invalid_pdf_page_url": 1,
+        "scope_leak": 1,
+        "stopped_run_rendered_complete": 1,
+    }
     assert "scope-leak" not in json.dumps(payload, ensure_ascii=False)
 
 
@@ -168,7 +188,12 @@ def test_probe_fails_when_a_declared_failure_is_not_detected():
 
     assert summary["health"]["passed"] is True
     assert summary["probe"]["passed"] is False
-    assert summary["probe"]["detected_failure_codes"] == {"scope_leak": 1}
+    assert summary["probe"]["detected_failure_codes"] == {
+        "external_fact_missing_as_of": 1,
+        "invalid_pdf_page_url": 1,
+        "scope_leak": 1,
+        "stopped_run_rendered_complete": 1,
+    }
 
 
 def test_scope_boundary_mismatch_fails_the_gate():
@@ -228,7 +253,7 @@ def test_external_web_identity_uses_shared_artifact_identity(monkeypatch):
         "evidence_ids": ["shared:web-identity"],
     })
     news_entry = next(raw for raw in payload["cases"] if raw["id"] == "news-attribution")
-    news_entry["answer_run"]["facts"].append(web_fact)
+    news_entry["answer_run"]["facts"] = [web_fact]
     fixture = EvaluationFixture.from_dict(payload)
     case = next(candidate for candidate in fixture.cases if candidate.id == "news-attribution")
     calls = []

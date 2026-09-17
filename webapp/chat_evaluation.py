@@ -203,7 +203,7 @@ class EvaluationFixture:
             )
             cases.append(case)
             outputs[case.id] = (answer_run, research_run)
-        return cls(int(data.get("schema_version", 0)), tuple(cases), outputs)
+        return cls(data.get("schema_version", 0), tuple(cases), outputs)
 
     @classmethod
     def load(cls, path: str | Path) -> "EvaluationFixture":

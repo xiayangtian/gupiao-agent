@@ -2871,6 +2871,22 @@ _QUALITY_METRIC_FIELDS = (
     "citation_coverage", "scope_precision", "page_link_pass_rate", "tool_success_rate",
     "stop_recovery_pass_rate", "p95_stage_duration",
 )
+_QUALITY_GENERATED_AT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def _normalized_quality_generated_at(value: object) -> str | None:
+    """Return a canonical UTC timestamp only for timezone-aware ISO-8601 input."""
+    if not isinstance(value, str) or _QUALITY_GENERATED_AT_RE.fullmatch(value) is None:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc).isoformat()
 
 
 def _safe_failure_codes(value: object) -> Dict[str, int] | None:
@@ -2930,12 +2946,10 @@ def _load_precomputed_quality_summary() -> Dict[str, Any]:
             raw = json.load(source)
     except (OSError, json.JSONDecodeError):
         return {"available": False}
-    if (
-        not isinstance(raw, Mapping)
-        or raw.get("schema_version") != 2
-        or not isinstance(raw.get("generated_at"), str)
-        or not raw["generated_at"].strip()
-    ):
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != 2:
+        return {"available": False}
+    generated_at = _normalized_quality_generated_at(raw.get("generated_at"))
+    if generated_at is None:
         return {"available": False}
     health = _safe_quality_suite(raw.get("health"), "failure_codes")
     probe = _safe_quality_suite(raw.get("probe"), "detected_failure_codes")
@@ -2944,7 +2958,7 @@ def _load_precomputed_quality_summary() -> Dict[str, Any]:
     return {
         "available": True,
         "schema_version": 2,
-        "generated_at": raw["generated_at"],
+        "generated_at": generated_at,
         "health": health,
         "probe": probe,
     }

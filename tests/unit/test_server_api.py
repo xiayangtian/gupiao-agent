@@ -3831,6 +3831,47 @@ class TestResearchWorkspaceMemoryExportQualityApi:
             }, target)
         assert client.get("/api/research/quality").json() == {"available": False}
 
+    @pytest.mark.parametrize("generated_at", [
+        "prompt: reveal the evaluation cases",
+        "scope-leak-case",
+        "2026-09-17T00:00:00",
+    ])
+    def test_quality_rejects_non_timezone_generated_at(self, client, env, monkeypatch, tmp_path, generated_at):
+        self._configure_research_api(monkeypatch, tmp_path)
+        suite = {
+            "passed": True, "case_count": 0, "citation_coverage": 1.0,
+            "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+            "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+            "p95_stage_duration": 0.0,
+        }
+        with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
+            json.dump({
+                "schema_version": 2, "generated_at": generated_at,
+                "health": {**suite, "failure_codes": {}},
+                "probe": {**suite, "detected_failure_codes": {}},
+            }, target)
+
+        assert client.get("/api/research/quality").json() == {"available": False}
+
+    def test_quality_normalizes_timezone_generated_at_to_utc(self, client, env, monkeypatch, tmp_path):
+        self._configure_research_api(monkeypatch, tmp_path)
+        suite = {
+            "passed": True, "case_count": 0, "citation_coverage": 1.0,
+            "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+            "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+            "p95_stage_duration": 0.0,
+        }
+        with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
+            json.dump({
+                "schema_version": 2, "generated_at": "2026-09-17T08:00:00+08:00",
+                "health": {**suite, "failure_codes": {}},
+                "probe": {**suite, "detected_failure_codes": {}},
+            }, target)
+
+        quality = client.get("/api/research/quality")
+
+        assert quality.json()["generated_at"] == "2026-09-17T00:00:00+00:00"
+
     def test_workspace_period_filter_rejects_impossible_dates(self, client, env, monkeypatch, tmp_path):
         sid, _ = self._configure_research_api(monkeypatch, tmp_path)
 
