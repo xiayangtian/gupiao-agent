@@ -1,0 +1,102 @@
+[
+  {
+    "id": "report-number",
+    "question": "本报告营业收入是多少？",
+    "scope": "company_only",
+    "intent": "report_fact",
+    "allowed_sources": ["local_pdf"],
+    "expected_fact_ids": ["pdf-1"],
+    "forbidden_report_ids": ["600900:2026-06-30:semi_annual"],
+    "expected_status": "completed"
+  },
+  {
+    "id": "cross-period",
+    "question": "跨期比较营业收入变化？",
+    "scope": "company_only",
+    "intent": "company_trend",
+    "allowed_sources": ["local_pdf"],
+    "expected_fact_ids": ["pdf-current", "pdf-prior"],
+    "forbidden_report_ids": ["600900:2026-06-30:semi_annual"],
+    "expected_status": "completed"
+  },
+  {
+    "id": "local-industry",
+    "question": "与本地同业样本比较？",
+    "scope": "company_industry",
+    "intent": "industry_benchmark",
+    "allowed_sources": ["local_pdf"],
+    "expected_fact_ids": ["pdf-company", "pdf-peer"],
+    "forbidden_report_ids": [],
+    "expected_status": "completed"
+  },
+  {
+    "id": "realtime-market",
+    "question": "实时行情如何？",
+    "scope": "company_only",
+    "intent": "realtime_market",
+    "allowed_sources": ["market_data"],
+    "expected_fact_ids": ["tool:market:quote"],
+    "forbidden_report_ids": [],
+    "expected_status": "partial"
+  },
+  {
+    "id": "news-attribution",
+    "question": "新闻能否归因异动？",
+    "scope": "company_only",
+    "intent": "event_attribution",
+    "allowed_sources": ["web"],
+    "expected_fact_ids": [],
+    "forbidden_report_ids": [],
+    "expected_status": "partial"
+  },
+  {
+    "id": "scope-leak",
+    "question": "范围泄漏必须失败。",
+    "scope": "company_only",
+    "intent": "report_fact",
+    "allowed_sources": ["local_pdf"],
+    "expected_fact_ids": [],
+    "forbidden_report_ids": ["600900:2026-06-30:semi_annual"],
+    "expected_status": "partial"
+  },
+  {
+    "id": "pdf-without-page",
+    "question": "无页码 PDF 必须标记不可用。",
+    "scope": "company_only",
+    "intent": "report_fact",
+    "allowed_sources": ["local_pdf"],
+    "expected_fact_ids": [],
+    "forbidden_report_ids": [],
+    "expected_status": "partial"
+  },
+  {
+    "id": "tool-failure",
+    "question": "工具失败必须诚实降级。",
+    "scope": "company_only",
+    "intent": "realtime_market",
+    "allowed_sources": ["market_data"],
+    "expected_fact_ids": [],
+    "forbidden_report_ids": [],
+    "expected_status": "partial"
+  },
+  {
+    "id": "fact-conflict",
+    "question": "事实冲突不得合并为确定结论。",
+    "scope": "company_only",
+    "intent": "report_fact",
+    "allowed_sources": ["local_pdf"],
+    "expected_fact_ids": [],
+    "forbidden_report_ids": [],
+    "expected_status": "partial"
+  },
+  {
+    "id": "stop-recovery",
+    "question": "停止后恢复只运行未完成步骤。",
+    "scope": "company_only",
+    "intent": "research_task",
+    "allowed_sources": ["local_pdf"],
+    "expected_fact_ids": [],
+    "forbidden_report_ids": [],
+    "expected_status": "stopped"
+  }
+]
