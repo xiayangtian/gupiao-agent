@@ -3120,13 +3120,11 @@ def test_m2_blocked_run_replaces_only_the_unsupported_claims(client, env, monkey
     assert "未找到可核验的披露" in run["content"]
 
 
-def test_m2_research_task_answers_with_the_policy_fallback_message(client, env, monkeypatch):
-    """research_task 在 M2 无工具可用：按策略 fallback 如实说明，不调用模型。"""
-    class NoCallRag:
-        def answer_stream(self, question, **kwargs):
-            raise AssertionError("M2 的研究任务不应调用模型或工具")
-
-    monkeypatch.setattr(server, "rag_qa", NoCallRag())
+def test_research_task_uses_policy_gated_rag_evidence_and_public_step_events(client, env):
+    """M3 不得用空产物伪造完成：生产 RAG 产物进入可恢复研究步骤。"""
+    _configure_scoped_rag_answer(env, citations=[{
+        "source": "pdf", "report_id": "601288:2026-06-30:semi_annual", "page": 1, "snippet": "经营现金流披露"
+    }])
     events = _read_sse(client.post("/api/chat/stream", json={
         "question": "帮我制定农业银行的研究计划",
         "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
@@ -3135,11 +3133,419 @@ def test_m2_research_task_answers_with_the_policy_fallback_message(client, env, 
     assert _event(events, "policy_resolved")["intent"] == "research_task"
     fallback = _event(events, "policy_fallback")
     assert fallback["intent"] == "research_task"
-    assert "M3" in fallback["message"]
+    assert "M3" not in fallback["message"]
+    assert _event(events, "research_plan")["plan"]["acceptance"]
+    assert _event(events, "research_step_started")["status"] == "running"
+    assert _event(events, "research_step_completed")["evidence_count"] >= 1
     run = _event(events, "done")["run"]
-    assert run["status"] == "partial"
-    assert run["content"] == fallback["message"]
-    assert run["tool_policy"]["fallback_message"] == fallback["message"]
+    assert run["status"] == "completed"
+    assert run["research_run_id"]
+    assert run["artifacts"]
+    assert run["content"] == "经营现金流为"
+    stored = client.get(f"/api/chat/research/{run['research_run_id']}",
+                        params={"session_id": _event(events, "session")["session_id"]}).json()["run"]
+    assert [step["status"] for step in stored["step_runs"]] == ["completed"] * len(stored["step_runs"])
+    assert stored["step_runs"][0]["artifacts"]
+
+
+def test_resume_does_not_repeat_a_completed_retrieve_step(client, env, monkeypatch, tmp_path):
+    """恢复只重跑未完成步骤：已完成检索的外部调用不得再发生一次。"""
+    from webapp.chat_models import AnswerRun, ToolPolicy
+    from webapp.chat_store import ChatStore
+    from webapp.research_models import ResearchPlan, ResearchRun, ResearchStep, ResearchStepRun
+    from webapp.chat_models import Scope
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    calls = []
+
+    class CountingRag:
+        def answer_stream(self, question, **kwargs):
+            calls.append(question)
+            yield {"type": "done", "answer": "重新检索得到的结论", "citations": [], "model": "m", "usage": {},
+                   "tools_used": [], "web_sources": [], "retrieval_report_ids": [], "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", CountingRag())
+    scope = Scope.company_only("601288", "农业银行", ["601288:2026-06-30:semi_annual"])
+    plan = ResearchPlan("研究", scope, (
+        ResearchStep("retrieve", "retrieve", "检索已授权披露"),
+        ResearchStep("normalize", "normalize", "整理可核验事实", ("retrieve",)),
+        ResearchStep("compare", "compare", "比较关键指标", ("normalize",)),
+        ResearchStep("verify", "verify", "核对来源与结论", ("compare",)),
+        ResearchStep("answer", "answer", "形成研究结论", ("verify",)),
+    ), ("核对来源",))
+    evidence = {"source": "pdf", "report_id": "601288:2026-06-30:semi_annual", "pdf_filename": "a.pdf",
+                "page": 1, "snippet": "已核验披露"}
+    run = ResearchRun("saved-run", plan, "stopped", (
+        ResearchStepRun("retrieve", "completed", result_summary="经营现金流情况见已核验披露。", artifacts=(evidence,)),
+        ResearchStepRun("normalize", "stopped"),
+    ), resume_from_step_id="normalize")
+    sid = store.create_session()["id"]
+    store.save_research_run(sid, run)
+    store.append_turn(sid, question="比较农业银行盈利质量", run=AnswerRun(
+        content="研究已停止；已完成步骤已保存，可继续研究。", status="stopped", scope=scope,
+        tool_policy=ToolPolicy("research_task"), research_run_id="saved-run",
+        research_summary={"status": "stopped", "resume_from_step_id": "normalize"},
+    ))
+
+    response = client.post("/api/chat/research/saved-run/resume", json={"session_id": sid})
+
+    assert response.status_code == 200
+    events = _read_sse(response)
+    assert calls == []
+    assert _event(events, "done")["run"]["status"] == "completed"
+    assert _event(events, "done")["run"]["artifacts"]
+    assert _event(events, "done")["run"]["content"] == "经营现金流情况见已核验披露。"
+
+
+_RESEARCH_RESUME_CITATION = {
+    "source": "pdf", "report_id": "601288:2026-06-30:semi_annual", "page": 1, "snippet": "范围内披露来源",
+}
+
+
+class _Frames:
+    """直接驱动恢复生成器时复用 ``_read_sse`` 的最小响应壳。"""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _stopped_research_plan():
+    """恢复回归共用的五步计划：retrieve 未完成，其余步骤依赖 retrieve。"""
+    from webapp.chat_models import Scope
+    from webapp.research_models import ResearchPlan, ResearchStep
+
+    scope = Scope.company_only("601288", "农业银行", ["601288:2026-06-30:semi_annual"])
+    return ResearchPlan("比较农业银行盈利质量", scope, (
+        ResearchStep("retrieve", "retrieve", "检索已授权披露"),
+        ResearchStep("normalize", "normalize", "整理可核验事实", ("retrieve",)),
+        ResearchStep("compare", "compare", "比较关键指标", ("normalize",)),
+        ResearchStep("verify", "verify", "核对来源与结论", ("compare",)),
+        ResearchStep("answer", "answer", "形成研究结论", ("verify",)),
+    ), ("核对来源",))
+
+
+def _save_resumable_research(store, *, question, plan, run_id="resumable-run", run_status="stopped"):
+    """落盘一个可恢复研究运行及其起始轮次（原问题 + 冻结意图与策略）。"""
+    from webapp.chat_models import AnswerRun, IntentDecision, ToolPolicy
+    from webapp.research_models import ResearchRun, ResearchStepRun
+
+    policy = ToolPolicy(
+        "research_task",
+        fallback_message="研究将严格按当前范围与工具策略执行；无可用来源时会明确说明限制。",
+    )
+    intent = IntentDecision("research_task", "high", True)
+    run = ResearchRun(run_id, plan, run_status, (ResearchStepRun("retrieve", "stopped"),))
+    sid = store.create_session()["id"]
+    store.save_research_run(sid, run)
+    store.append_turn(sid, question=question, run=AnswerRun(
+        content="研究已停止；已完成步骤已保存，可继续研究。", status="stopped", scope=plan.scope,
+        intent_decision=intent, tool_policy=policy, research_run_id=run_id,
+        research_summary={"status": run.status, "resume_from_step_id": run.resume_from_step_id},
+    ))
+    return sid, policy, intent
+
+
+def test_repeated_resume_keeps_the_frozen_tool_policy(client, env, monkeypatch, tmp_path):
+    """连续两次恢复：第二次不得因缺少原始策略 409，且两次都沿用同一冻结策略。"""
+    from webapp.chat_store import ChatStore
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    calls = []
+
+    class FlakyRag:
+        def answer_stream(self, question, **kwargs):
+            calls.append({"question": question, "policy": kwargs.get("tool_policy")})
+            if len(calls) == 1:
+                yield {"type": "error", "error": "fixture 首次恢复仍未取得来源"}
+                return
+            yield {"type": "done", "answer": "第二次恢复取得范围内披露。", "citations": [_RESEARCH_RESUME_CITATION], "model": "m",
+                   "usage": {}, "tools_used": [], "web_sources": [], "retrieval_report_ids": [],
+                   "retrieval_degraded": False}
+
+    _configure_scoped_rag_answer(env, citations=[_RESEARCH_RESUME_CITATION])
+    monkeypatch.setattr(server, "rag_qa", FlakyRag())
+    plan = _stopped_research_plan()
+    sid, policy, _intent = _save_resumable_research(store, question="比较农业银行盈利质量", plan=plan)
+
+    first = client.post("/api/chat/research/resumable-run/resume", json={"session_id": sid})
+    assert first.status_code == 200
+    assert _event(_read_sse(first), "done")["run"]["status"] == "failed"
+    assert store.get_research_run(sid, "resumable-run").status == "failed"
+
+    second = client.post("/api/chat/research/resumable-run/resume", json={"session_id": sid})
+    assert second.status_code == 200, second.text
+    assert _event(_read_sse(second), "done")["run"]["status"] == "completed"
+    assert [call["question"] for call in calls] == ["比较农业银行盈利质量"] * 2
+    assert calls[0]["policy"] == policy and calls[1]["policy"] == policy
+
+
+def test_resume_replays_the_question_asked_before_the_run_not_the_latest_one(client, env, monkeypatch, tmp_path):
+    """停止研究后追问其他问题：恢复必须重放原研究问题，不得把追问当研究问题。"""
+    from webapp.chat_models import AnswerRun
+    from webapp.chat_store import ChatStore
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    calls = []
+
+    class RecordingRag:
+        def answer_stream(self, question, **kwargs):
+            calls.append(question)
+            yield {"type": "done", "answer": "已基于范围内披露恢复研究。", "citations": [_RESEARCH_RESUME_CITATION], "model": "m",
+                   "usage": {}, "tools_used": [], "web_sources": [], "retrieval_report_ids": [],
+                   "retrieval_degraded": False}
+
+    _configure_scoped_rag_answer(env, citations=[_RESEARCH_RESUME_CITATION])
+    monkeypatch.setattr(server, "rag_qa", RecordingRag())
+    plan = _stopped_research_plan()
+    sid, _policy, _intent = _save_resumable_research(store, question="比较农业银行盈利质量", plan=plan)
+    # 用户停止研究后又问了别的问题：会话最后一条用户消息不再是原研究问题。
+    store.append_turn(sid, question="农业银行今天股价是多少？", run=AnswerRun(
+        content="这是另一个问题的回答。", status="completed"))
+
+    response = client.post("/api/chat/research/resumable-run/resume", json={"session_id": sid})
+
+    assert response.status_code == 200
+    assert _event(_read_sse(response), "done")["run"]["status"] == "completed"
+    assert calls == ["比较农业银行盈利质量"]
+    last_user = [m for m in store.get_session(sid)["messages"] if m["role"] == "user"][-1]
+    assert last_user["content"] == "比较农业银行盈利质量"
+
+
+def test_resume_fails_closed_when_the_run_has_no_originating_question(client, env, monkeypatch, tmp_path):
+    """找不到该研究运行的提问轮次：恢复必须 fail-closed，不得猜用会话里的其他问题。"""
+    from webapp.chat_models import AnswerRun, ChatMessage, ToolPolicy
+    from webapp.chat_store import ChatStore
+    from webapp.research_models import ResearchRun, ResearchStepRun
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    calls = []
+
+    class RecordingRag:
+        def answer_stream(self, question, **kwargs):
+            calls.append(question)
+            yield {"type": "done", "answer": "不应被调用。", "citations": [], "model": "m",
+                   "usage": {}, "tools_used": [], "web_sources": [], "retrieval_report_ids": [],
+                   "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", RecordingRag())
+    plan = _stopped_research_plan()
+    sid = store.create_session()["id"]
+    store.save_research_run(sid, ResearchRun("orphan-run", plan, "stopped", (ResearchStepRun("retrieve", "stopped"),)))
+    # 只有持有 run id 的助手消息，没有任何提问轮次：无法确定该运行回答的是哪个问题。
+    store.append_messages(sid, [ChatMessage(role="assistant", content="研究已停止。", run=AnswerRun(
+        content="研究已停止。", status="stopped", scope=plan.scope, tool_policy=ToolPolicy("research_task"),
+        research_run_id="orphan-run", research_summary={"status": "stopped"},
+    ))])
+
+    response = client.post("/api/chat/research/orphan-run/resume", json={"session_id": sid})
+
+    assert response.status_code == 409
+    assert calls == []
+
+
+def test_resume_uses_the_same_controlled_handlers_as_the_first_run(client, env, monkeypatch, tmp_path):
+    """恢复复用首次运行的受控 handler：compare 的 conflicts 必须与首次运行一致地落盘。"""
+    from webapp.chat_store import ChatStore
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+
+    class ConflictingRag:
+        def answer_stream(self, question, **kwargs):
+            for name, value in (("get_quote", 100), ("web_search", 120)):
+                yield {"type": "tool_call", "name": name, "arguments": {"symbol": "601288"}}
+                yield {"type": "structured_tool_result", "name": name, "ok": True, "payload": {
+                    "metric": "revenue", "value": value, "unit": "亿元", "period": "2026-06-30",
+                    "period_kind": "semi_annual_cumulative", "entity_scope": "consolidated",
+                    "company_code": "601288", "evidence_ids": [f"tool:{name}:{value}"],
+                }}
+                yield {"type": "tool_result", "name": name, "ok": True, "summary": "{}"}
+            yield {"type": "done", "answer": "已按范围内披露完成关键指标比较。", "citations": [], "model": "m",
+                   "usage": {}, "tools_used": [], "web_sources": [], "retrieval_report_ids": [],
+                   "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", ConflictingRag())
+    plan = _stopped_research_plan()
+    sid, _policy, _intent = _save_resumable_research(store, question="比较农业银行盈利质量", plan=plan)
+
+    response = client.post("/api/chat/research/resumable-run/resume", json={"session_id": sid})
+
+    assert response.status_code == 200
+    done = _event(_read_sse(response), "done")["run"]
+    assert done["conflicts"], done["facts"]
+    compare_step = next(item for item in store.get_research_run(sid, "resumable-run").step_runs
+                        if item.step_id == "compare")
+    assert compare_step.conflicts
+
+
+class _ConflictingRevenueRag:
+    """同一公司同一指标的两次外部取值：首次运行必然检出冲突。"""
+
+    def answer_stream(self, question, **kwargs):
+        for name, value in (("get_quote", 100), ("web_search", 120)):
+            yield {"type": "tool_call", "name": name, "arguments": {"symbol": "601288"}}
+            yield {"type": "structured_tool_result", "name": name, "ok": True, "payload": {
+                "metric": "revenue", "value": value, "unit": "亿元", "period": "2026-06-30",
+                "period_kind": "semi_annual_cumulative", "entity_scope": "consolidated",
+                "company_code": "601288", "evidence_ids": [f"tool:{name}:{value}"],
+            }}
+            yield {"type": "tool_result", "name": name, "ok": True, "summary": "{}"}
+        yield {"type": "done", "answer": "营业收入为 100 亿元。", "citations": [], "model": "m",
+               "usage": {}, "tools_used": [], "web_sources": [], "retrieval_report_ids": [],
+               "retrieval_degraded": False}
+
+
+def test_resume_from_normalize_detects_conflicts_from_completed_retrieve(client, env, monkeypatch, tmp_path):
+    """恢复只重跑 normalize/compare 时，已落盘检索步骤的事实仍必须参与冲突检测。
+
+    首次运行在这里会检出 revenue 100/120 冲突并把验证结论降为 partial；恢复流若只从
+    当前累积状态取事实，conflicts 会为空、验证放行，运行被判 completed，漏掉冲突披露。
+    """
+    from webapp.chat_models import AnswerRun, IntentDecision, ToolPolicy
+    from webapp.chat_store import ChatStore
+    from webapp.research_models import ResearchRun, ResearchStepRun
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    _configure_scoped_rag_answer(env)
+    monkeypatch.setattr(server, "rag_qa", _ConflictingRevenueRag())
+
+    first_events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "帮我制定农业银行的研究计划，比较盈利质量",
+        "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
+    }))
+    sid = _event(first_events, "session")["session_id"]
+    first = _event(first_events, "done")["run"]
+    assert first["conflicts"] and first["verification_report"]["status"] == "partial"
+    assert first["status"] == "partial"
+
+    # 用首次运行真实落盘的计划与已完成 retrieve 步骤构造「检索已完成、normalize 未完成」的运行。
+    first_run = store.get_research_run(sid, first["research_run_id"])
+    retrieve = next(item for item in first_run.step_runs if item.step_id == "retrieve")
+    assert retrieve.status == "completed" and retrieve.facts
+    store.save_research_run(sid, ResearchRun("resume-from-normalize", first_run.plan, "stopped", (
+        retrieve, ResearchStepRun("normalize", "stopped"),
+    )))
+    store.append_turn(sid, question="帮我制定农业银行的研究计划，比较盈利质量", run=AnswerRun(
+        content="研究已停止；已完成步骤已保存，可继续研究。", status="stopped", scope=first_run.plan.scope,
+        intent_decision=IntentDecision.from_dict(first["intent_decision"]),
+        tool_policy=ToolPolicy.from_dict(first["tool_policy"]), research_run_id="resume-from-normalize",
+        research_summary={"status": "stopped", "resume_from_step_id": "normalize"},
+    ))
+
+    response = client.post("/api/chat/research/resume-from-normalize/resume", json={"session_id": sid})
+
+    assert response.status_code == 200
+    resumed = _event(_read_sse(response), "done")["run"]
+    assert resumed["conflicts"], resumed["facts"]
+    assert resumed["verification_report"]["status"] == first["verification_report"]["status"]
+    assert resumed["status"] == first["status"]
+    compare_step = next(item for item in store.get_research_run(sid, "resume-from-normalize").step_runs
+                        if item.step_id == "compare")
+    assert compare_step.conflicts
+
+
+def test_resume_stream_cancels_a_running_step_after_client_disconnect(env, monkeypatch, tmp_path):
+    """恢复流也必须像首次研究流一样观察断开，并协作取消正在执行的外部调用。"""
+    import asyncio
+
+    from webapp.chat_store import ChatStore
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    _configure_scoped_rag_answer(env, citations=[_RESEARCH_RESUME_CITATION])
+    started = threading.Event()
+    released = threading.Event()
+
+    class BlockingRag:
+        def answer_stream(self, question, **kwargs):
+            started.set()
+            # 客户端断开后服务端必须置停止事件；这里只在测试释放后返回。
+            released.wait(timeout=5.0)
+            yield {"type": "done", "answer": "断开后不应完成的结论。", "citations": [_RESEARCH_RESUME_CITATION],
+                   "model": "m", "usage": {}, "tools_used": [], "web_sources": [],
+                   "retrieval_report_ids": [], "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", BlockingRag())
+    plan = _stopped_research_plan()
+    sid, _policy, _intent = _save_resumable_research(store, question="比较农业银行盈利质量", plan=plan)
+
+    class DisconnectingRequest:
+        """模拟客户端断开：外部调用开始后才报告断开，并记录服务端确实轮询过连接状态。"""
+
+        def __init__(self, call_started: threading.Event) -> None:
+            self.call_started = call_started
+            self.observed = threading.Event()
+
+        async def is_disconnected(self) -> bool:
+            if not self.call_started.is_set():
+                return False
+            self.observed.set()
+            return True
+
+    request = DisconnectingRequest(started)
+
+    async def drive() -> list[str]:
+        response = await server.resume_research_run(
+            "resumable-run", server.ResumeResearchRequest(session_id=sid), request,
+        )
+        frames: list[str] = []
+        async for frame in response.body_iterator:
+            frames.append(frame)
+        return frames
+
+    async def scenario() -> list[str]:
+        task = asyncio.create_task(drive())
+        for _ in range(500):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert started.is_set(), "恢复流未进入外部调用"
+        for _ in range(500):
+            if request.observed.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert request.observed.is_set(), "恢复流未观察断开"
+        # 外部调用返回后才轮到执行器检查协作停止事件；此处必须已置位。
+        released.set()
+        return await asyncio.wait_for(task, timeout=10)
+
+    events = _read_sse(_Frames("".join(asyncio.run(scenario()))))
+
+    assert any(name == "research_blocked" for name, _data in events)
+    stored = store.get_research_run(sid, "resumable-run")
+    assert stored.status == "stopped"
+    assert next(item for item in stored.step_runs if item.step_id == "retrieve").status == "stopped"
+
+
+def test_stopped_research_run_is_resumable_after_client_disconnect(client, env, monkeypatch, tmp_path):
+    """断开/停止的研究运行必须立即持久化为可恢复状态，并保留已完成步骤。"""
+    from webapp.chat_store import ChatStore
+    from webapp.research_models import ResearchPlan, ResearchRun, ResearchStep, ResearchStepRun
+    from webapp.chat_models import Scope
+
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    scope = Scope.company_only("601288", "农业银行", ["601288:2026-06-30:semi_annual"])
+    plan = ResearchPlan("研究", scope, (
+        ResearchStep("retrieve", "retrieve", "检索已授权披露"),
+        ResearchStep("normalize", "normalize", "整理可核验事实", ("retrieve",)),
+    ), ("核对来源",))
+    running = ResearchRun("stopped-run", plan, "running", (
+        ResearchStepRun("retrieve", "running"),
+    ))
+    sid = store.create_session()["id"]
+    store.save_research_run(sid, running)
+
+    stopped = server._mark_research_stopped(sid, "stopped-run")
+
+    assert stopped is not None and stopped.status == "stopped"
+    assert stopped.resume_from_step_id == "retrieve"
+    assert store.get_research_run(sid, "stopped-run").status == "stopped"
 
 
 def test_m2_policy_fallback_hint_is_emitted_when_no_external_tool_applies(client, env, monkeypatch):

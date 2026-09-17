@@ -138,7 +138,7 @@ def test_trusted_chat_stages_are_tracked_independently():
     expected = {
         "智能问答可信 Agent M1：可信回答底座": "已实现",
         "智能问答可信 Agent M2：受控检索与事实核验": "已实现",
-        "智能问答可信 Agent M3：研究型 Agent": "待实现",
+        "智能问答可信 Agent M3：研究型 Agent": "实施中",
         "智能问答可信 Agent M4：研究工作台与质量运营": "待实现",
     }
     assert {title: records[title]["status"] for title in expected} == expected

@@ -33,6 +33,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from datetime import date
 
 import requests
@@ -249,9 +250,40 @@ class _FakeRagQA:
                 "retrieval_degraded": False, "model": "browser-acceptance-fake",
             }
             return
+        if "研究计划" in question and "停止验收" in question:
+            # Keep the real SSE request open long enough for browser UI to issue
+            # its normal stop action; no direct event injection is used.
+            time.sleep(2.0)
+            answer = "已基于范围内披露完成来源核对。"
+            yield {"type": "done", "answer": answer, "citations": [{
+                "source": "pdf", "report_id": FIXTURE_REPORT_ID, "page": 40, "snippet": "范围内披露来源",
+            }], "web_sources": [], "tools_used": [], "retrieval_report_ids": [FIXTURE_REPORT_ID],
+                   "retrieval_degraded": False, "model": "browser-acceptance-fake"}
+            return
+        if "研究计划" in question and "失败验收" in question:
+            attempts = getattr(self, "_research_failure_attempts", 0) + 1
+            self._research_failure_attempts = attempts
+            if attempts == 1:
+                yield {"type": "error", "error": "fixture 研究步骤失败"}
+                return
+            answer = "已基于范围内披露恢复研究。"
+            yield {"type": "done", "answer": answer, "citations": [{
+                "source": "pdf", "report_id": FIXTURE_REPORT_ID, "page": 40, "snippet": "范围内披露来源",
+            }], "web_sources": [], "tools_used": [], "retrieval_report_ids": [FIXTURE_REPORT_ID],
+                   "retrieval_degraded": False, "model": "browser-acceptance-fake"}
+            return
         if question.endswith("停止"):
             yield {"type": "delta", "text": "经营活动现金流量净额为 -621.69 亿元"}
             yield {"type": "delta", "text": "（最后一步尚未完成）"}
+            return
+        if "研究计划" in question:
+            answer = "已基于范围内披露完成来源核对。"
+            yield {"type": "delta", "text": answer}
+            yield {"type": "done", "answer": answer, "citations": [{
+                "source": "pdf", "report_id": FIXTURE_REPORT_ID, "section": "现金流量表",
+                "page": 40, "snippet": "范围内披露来源",
+            }], "web_sources": [], "tools_used": [], "retrieval_report_ids": [FIXTURE_REPORT_ID],
+                   "retrieval_degraded": False, "model": "browser-acceptance-fake"}
             return
         if "实时验收" in question:
             yield {"type": "tool_call", "name": "get_quote", "arguments": {"symbol": "601288"}}

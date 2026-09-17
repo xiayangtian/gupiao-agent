@@ -361,7 +361,7 @@
     var label = {
       report_fact: '本地财报查证', company_trend: '本地财报趋势对照',
       industry_benchmark: '本地可检索同业样本', realtime_market: '实时行情查证',
-      event_attribution: '公开事件参考', research_task: '本地查证（详细规划将在后续版本提供）'
+      event_attribution: '公开事件参考', research_task: '受限研究计划与来源核对'
     }[String(policy.intent || '')];
     return label ? '<details class="chat-policy"><summary>本次查证方式</summary><span>'
       + escapeHtml(label) + '</span></details>' : '';
@@ -396,6 +396,68 @@
     return '<div class="chat-verification chat-verification-' + escapeHtml(report.status) + '" role="status">' + escapeHtml(label) + '</div>';
   }
 
+  function researchStepLabel(step) {
+    return String((step && step.label) || '研究步骤');
+  }
+
+  var RESEARCH_STEP_STATUS_LABELS = {
+    pending: '待执行', running: '进行中', completed: '已完成',
+    stopped: '已停止', failed: '失败', skipped: '已跳过',
+  };
+
+  function renderResearchPlan(plan) {
+    if (!plan || typeof plan !== 'object') return '';
+    var steps = Array.isArray(plan.steps) ? plan.steps : [];
+    var acceptance = Array.isArray(plan.acceptance) ? plan.acceptance : [];
+    if (!steps.length) return '';
+    return '<details class="research-plan"><summary>研究计划（' + steps.length + ' 步）</summary>'
+      + '<ol>' + steps.map(function (step) { return '<li>' + escapeHtml(researchStepLabel(step)) + '</li>'; }).join('') + '</ol>'
+      + '<div class="research-acceptance"><strong>完成判据</strong>：' + escapeHtml(acceptance.join('；')) + '</div></details>';
+  }
+
+  function renderResearchSteps(run) {
+    if (!run || typeof run !== 'object' || !Array.isArray(run.step_runs)) return '';
+    var labels = {};
+    ((run.plan && Array.isArray(run.plan.steps)) ? run.plan.steps : []).forEach(function (step) {
+      labels[String(step.id || '')] = researchStepLabel(step);
+    });
+    return '<div class="research-steps" role="status" aria-live="polite">' + run.step_runs.map(function (step) {
+      var status = String(step.status || 'pending');
+      var label = labels[String(step.step_id || '')] || String(step.step_id || '研究步骤');
+      return '<div class="research-step research-step-' + escapeHtml(status) + '"><span aria-hidden="true">'
+        + (status === 'completed' ? '✓' : status === 'failed' ? '!' : status === 'running' ? '…' : '•') + '</span> '
+        + escapeHtml(label) + '：' + escapeHtml(RESEARCH_STEP_STATUS_LABELS[status] || status) + '</div>';
+    }).join('') + '</div>';
+  }
+
+  // 研究运行的恢复资格只看可恢复终态：已完成或核验中的持久化状态一律不提供入口。
+  var RESUMABLE_RESEARCH_STATUSES = { stopped: true, partial: true, failed: true };
+  var UNAVAILABLE_RESEARCH_STATUSES = { completed: true, awaiting_input: true, verifying: true };
+
+  /* 只对确实还可恢复的研究运行返回 true。
+
+  已完成（或核验/等待补充）的持久化状态意味着恢复端点必然拒绝，此时不得渲染
+  可点击的「继续研究」死按钮。前端刚停止、持久化状态还未回到页面时，运行仍是
+  stopped/failed 且没有不可恢复的持久化状态，入口必须保留。
+  */
+  function researchRunIsResumable(run, researchRun) {
+    var summaryStatus = (run.research_summary && typeof run.research_summary === 'object')
+      ? String(run.research_summary.status || '') : '';
+    var liveStatus = (researchRun && typeof researchRun === 'object')
+      ? String(researchRun.status || '') : '';
+    if (UNAVAILABLE_RESEARCH_STATUSES[summaryStatus] || UNAVAILABLE_RESEARCH_STATUSES[liveStatus]) return false;
+    return !!(RESUMABLE_RESEARCH_STATUSES[summaryStatus] || RESUMABLE_RESEARCH_STATUSES[liveStatus]
+      || RESUMABLE_RESEARCH_STATUSES[String(run.status || '')]);
+  }
+
+  function renderResearchRecovery(run, researchRun) {
+    if (!run || typeof run !== 'object' || !run.research_run_id) return '';
+    if (!researchRunIsResumable(run, researchRun)) return '';
+    var summary = run.research_summary || {};
+    var from = String(summary.resume_from_step_id || '未完成步骤');
+    return '<div class="research-recovery"><span>从步骤：' + escapeHtml(from) + '</span><button type="button" class="chat-run-action" data-chat-action="resume-research" data-research-run-id="' + escapeHtml(String(run.research_run_id)) + '">继续研究</button></div>';
+  }
+
   function renderRunStatus(run) {
     if (!run || typeof run !== 'object') return '';
     if (run.legacy_evidence_unavailable) {
@@ -415,11 +477,6 @@
     var html = '<div class="chat-run-status chat-run-status-' + escapeHtml(status)
       + '" role="status" aria-live="polite">'
       + '<span class="chat-run-status-label">' + label + '</span>';
-    if (status === 'stopped' || status === 'partial') {
-      // 恢复状态机到 M3 才实现：仅渲染禁用占位，避免承诺当前不存在的能力。
-      html += '<button type="button" class="chat-run-action chat-run-continue"'
-        + ' data-chat-action="continue" disabled title="恢复研究将在后续版本提供">继续研究</button>';
-    }
     if (status === 'stopped' || status === 'partial' || status === 'failed') {
       html += '<button type="button" class="chat-run-action chat-run-regenerate"'
         + ' data-chat-action="regenerate">重新生成</button>';
@@ -443,6 +500,9 @@
     renderFactsAndConflicts: renderFactsAndConflicts,
     renderVerification: renderVerification,
     renderRunStatus: renderRunStatus,
+    renderResearchPlan: renderResearchPlan,
+    renderResearchSteps: renderResearchSteps,
+    renderResearchRecovery: renderResearchRecovery,
     supplementSummaryView: supplementSummaryView,
   };
 }));

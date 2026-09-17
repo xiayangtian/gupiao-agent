@@ -802,6 +802,10 @@ class AnswerRun:
     tool_artifacts: tuple[ToolArtifact, ...] = ()
     retrieval_report_ids: tuple[str, ...] = ()
     id: str = ""
+    # M3 keeps the full, resumable ResearchRun in ChatStore.  AnswerRun only
+    # carries this stable reference and a user-safe summary for old clients.
+    research_run_id: str = ""
+    research_summary: Mapping[str, Any] | None = field(default=None, hash=False)
     created_at: str = ""
     completed_at: str = ""
     elapsed_seconds: float | None = None
@@ -831,8 +835,15 @@ class AnswerRun:
             raise ValueError("retrieval_report_ids must be a tuple")
         for report_id in self.retrieval_report_ids:
             _string(report_id, "retrieval_report_id")
-        for name in ("id", "created_at", "completed_at", "model"):
+        for name in ("id", "research_run_id", "created_at", "completed_at", "model"):
             _string(getattr(self, name), name, required=False)
+        if self.research_summary is not None:
+            if not isinstance(self.research_summary, Mapping):
+                raise ValueError("research_summary must be a JSON object or null")
+            forbidden = {"reasoning", "chain_of_thought", "prompt", "raw_arguments", "vector_distance"}
+            if forbidden.intersection(self.research_summary):
+                raise ValueError("research_summary must not include internal data")
+            object.__setattr__(self, "research_summary", dict(self.research_summary))
         if self.elapsed_seconds is not None and (
             isinstance(self.elapsed_seconds, bool)
             or not isinstance(self.elapsed_seconds, Real)
@@ -862,6 +873,8 @@ class AnswerRun:
             "tool_artifacts": [artifact.to_dict() for artifact in self.tool_artifacts],
             "retrieval_report_ids": list(self.retrieval_report_ids),
             "id": self.id,
+            "research_run_id": self.research_run_id,
+            "research_summary": dict(self.research_summary) if self.research_summary is not None else None,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
             "elapsed_seconds": self.elapsed_seconds,
@@ -899,6 +912,8 @@ class AnswerRun:
             tool_artifacts=tuple(ToolArtifact.from_dict(item) for item in _sequence(data.get("tool_artifacts", []), "tool_artifacts")),
             retrieval_report_ids=_strings(data.get("retrieval_report_ids", []), "retrieval_report_ids"),
             id=_string(data.get("id", ""), "id", required=False),
+            research_run_id=_string(data.get("research_run_id", ""), "research_run_id", required=False),
+            research_summary=_mapping(data["research_summary"], "research_summary") if data.get("research_summary") is not None else None,
             created_at=_string(data.get("created_at", ""), "created_at", required=False),
             completed_at=_string(data.get("completed_at", ""), "completed_at", required=False),
             elapsed_seconds=elapsed_seconds,

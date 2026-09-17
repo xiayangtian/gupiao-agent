@@ -2351,14 +2351,24 @@ async function openChatSession(sid) {
     var res = await fetch('/api/chat/sessions/' + sid);
     if (res.ok) {
       var data = await res.json();
-      (data.messages || []).forEach(function (m) {
-        if (!m || !m.role) return;
+      for (var messageIndex = 0; messageIndex < (data.messages || []).length; messageIndex++) {
+        var m = data.messages[messageIndex];
+        if (!m || !m.role) continue;
         if (m.role === 'user') {
           if (m.content) appendChatMsg('#chat-history', 'user', m.content);
         } else if (m.role === 'assistant') {
-          appendAssistantRun('#chat-history', m);
+          var researchRun = null;
+          var researchId = m.run && m.run.research_run_id;
+          if (researchId) {
+            try {
+              var researchResponse = await fetch('/api/chat/research/' + encodeURIComponent(researchId)
+                + '?session_id=' + encodeURIComponent(sid));
+              if (researchResponse.ok) researchRun = (await researchResponse.json()).run;
+            } catch (_) { /* answer remains readable if a historic research record is unavailable */ }
+          }
+          appendAssistantRun('#chat-history', { content: m.content, run: m.run, research_run: researchRun });
         }
-      });
+      }
     }
   } catch (_) { /* 加载失败保持空会话 */ }
   scrollChatToBottom();
@@ -2749,6 +2759,34 @@ async function submitQuestion(q, key) {
   var stageEl = null;
   var assistantEl = null;
   var scopeEl = null;       // scope_resolved 时首部展示的范围摘要（done 时合并进最终回答）
+  var researchStreamEl = null;
+
+  function clearResearchProgress() {
+    if (researchStreamEl && researchStreamEl.parentNode) researchStreamEl.parentNode.removeChild(researchStreamEl);
+    researchStreamEl = null;
+  }
+
+  function renderResearchProgress() {
+    if (!isCurrentChatStream(key) || !st.researchRun) return;
+    if (!researchStreamEl) {
+      researchStreamEl = document.createElement('section');
+      researchStreamEl.className = 'research-stream-progress';
+      researchStreamEl.setAttribute('aria-live', 'polite');
+      if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.insertBefore(researchStreamEl, thinkingEl.nextSibling);
+      else $('#chat-history').appendChild(researchStreamEl);
+    }
+    var rendering = window.ChatRendering;
+    researchStreamEl.innerHTML = rendering
+      ? rendering.renderResearchPlan(st.researchRun.plan) + rendering.renderResearchSteps(st.researchRun)
+      : '';
+    if (st.researchBlocked) {
+      var blocked = document.createElement('div');
+      blocked.className = 'research-step research-step-failed';
+      blocked.textContent = '受阻：' + st.researchBlocked;
+      researchStreamEl.appendChild(blocked);
+    }
+    scrollChatToBottom();
+  }
 
   try {
     var body = { question: q, session_id: chatSessionId, scope_mode: currentScopeMode() };
@@ -2928,6 +2966,29 @@ async function submitQuestion(q, key) {
             },
           });
         }
+      } else if (parsed.event === 'research_plan') {
+        st.researchPlan = parsed.data.plan || null;
+        st.researchRun = { plan: st.researchPlan, status: 'running', step_runs: [] };
+        renderResearchProgress();
+      } else if (parsed.event === 'research_running') {
+        st.researchRun = parsed.data.run || st.researchRun;
+        renderResearchProgress();
+      } else if (parsed.event === 'research_step_started' || parsed.event === 'research_step_completed' || parsed.event === 'research_step_failed') {
+        if (!st.researchRun) st.researchRun = { plan: st.researchPlan || {}, status: 'running', step_runs: [] };
+        var stepId = String(parsed.data.step_id || '');
+        var steps = st.researchRun.step_runs;
+        var index = steps.findIndex(function (step) { return step.step_id === stepId; });
+        var stepRun = { step_id: stepId, status: parsed.data.status || 'running' };
+        if (index >= 0) steps[index] = stepRun;
+        else steps.push(stepRun);
+        renderResearchProgress();
+      } else if (parsed.event === 'research_blocked') {
+        st.researchBlocked = parsed.data.reason || '研究受阻';
+        if (st.researchRun) st.researchRun.status = 'partial';
+        renderResearchProgress();
+      } else if (parsed.event === 'research_done') {
+        st.researchRun = parsed.data.run || st.researchRun;
+        renderResearchProgress();
       } else if (parsed.event === 'done') {
         done = true;
         st.finishedNormally = true;
@@ -2939,7 +3000,8 @@ async function submitQuestion(q, key) {
           if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
           thinkingEl = null;
           scopeEl = null;
-          appendAssistantRun('#chat-history', { content: st.answerText, run: parsed.data.run });
+          clearResearchProgress();
+          appendAssistantRun('#chat-history', { content: st.answerText, run: parsed.data.run, research_run: st.researchRun || parsed.data.research_run });
           appendChatElapsed('#chat-history', parsed.data.elapsed_seconds);
           // analysis 来源引用未进入 run.artifacts，只保留在旧 citations 字段一个版本；
           // PDF/网页/实时工具已由 renderRunArtifacts 统一渲染。
@@ -2984,9 +3046,11 @@ async function submitQuestion(q, key) {
         if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
         thinkingEl = null;
         scopeEl = null;
+        clearResearchProgress();
         appendAssistantRun('#chat-history', {
           content: st.answerText,
-          run: { status: st.stopped ? 'stopped' : 'failed', id: st.runId || '' },
+          run: { status: st.stopped ? 'stopped' : 'failed', id: st.runId || '', research_run_id: (st.researchRun && st.researchRun.id) || '' },
+          research_run: st.researchRun || null,
         });
         scrollChatToBottom();
       }
@@ -3002,9 +3066,11 @@ async function submitQuestion(q, key) {
         if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
         thinkingEl = null;
         scopeEl = null;
+        clearResearchProgress();
         appendAssistantRun('#chat-history', {
           content: st.answerText,
-          run: { status: 'stopped', id: st.runId || '' },
+          run: { status: 'stopped', id: st.runId || '', research_run_id: (st.researchRun && st.researchRun.id) || '' },
+          research_run: st.researchRun || null,
         });
         scrollChatToBottom();
       }
@@ -3016,9 +3082,11 @@ async function submitQuestion(q, key) {
         if (scopeEl && scopeEl.parentNode) scopeEl.parentNode.removeChild(scopeEl);
         thinkingEl = null;
         scopeEl = null;
+        clearResearchProgress();
         appendAssistantRun('#chat-history', {
           content: '⚠️ ' + err.message,
           run: st.failedRun || { status: 'failed', id: st.runId || '' },
+          research_run: st.researchRun || null,
         });
         scrollChatToBottom();
       }
@@ -3127,6 +3195,10 @@ function appendAssistantRun(sel, message) {
   var displayed = rendering ? rendering.normalizeAssistantMarkdown(content) : content;
   parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + '</div>');
   if (rendering) {
+    var researchPlanHtml = rendering.renderResearchPlan(message && message.research_run && message.research_run.plan);
+    if (researchPlanHtml) parts.push(researchPlanHtml);
+    var researchStepsHtml = rendering.renderResearchSteps(message && message.research_run);
+    if (researchStepsHtml) parts.push(researchStepsHtml);
     var policyHtml = rendering.renderPolicy(run && run.tool_policy);
     if (policyHtml) parts.push(policyHtml);
     var factsHtml = rendering.renderFactsAndConflicts(run);
@@ -3142,6 +3214,8 @@ function appendAssistantRun(sel, message) {
   wrapper.innerHTML = parts.join('');
   // 补充摘要紧跟证据之后、运行状态之前，重载历史与实时完成走同一条路径。
   appendSupplementSummary(wrapper, run);
+  var recoveryHtml = rendering ? rendering.renderResearchRecovery(run, message && message.research_run) : '';
+  if (recoveryHtml) wrapper.insertAdjacentHTML('beforeend', recoveryHtml);
   if (statusHtml) wrapper.insertAdjacentHTML('beforeend', statusHtml);
   box.appendChild(wrapper);
   box.scrollTop = box.scrollHeight;
@@ -3163,7 +3237,7 @@ function appendAnalysisCitations(sel, citations) {
   box.scrollTop = box.scrollHeight;
 }
 
-// 「重新生成」从紧邻的用户消息重新提问；「继续研究」占位禁用，恢复状态机留到 M3。
+// 「重新生成」从紧邻的用户消息重新提问；研究运行的「继续研究」由 renderResearchRecovery 提供。
 function setChatRunCopyFeedback(button, text) {
   if (!button) return;
   var original = button.dataset.originalLabel || button.textContent;
@@ -3207,12 +3281,51 @@ function bindChatRunActions() {
       copyChatRunId(copy);
       return;
     }
+    var resume = e.target && e.target.closest ? e.target.closest('[data-chat-action="resume-research"]') : null;
+    if (resume) {
+      resumeResearch(resume.dataset.researchRunId, resume);
+      return;
+    }
     var regen = e.target && e.target.closest ? e.target.closest('.chat-run-regenerate') : null;
     if (!regen) return;
     var runBlock = regen.closest ? regen.closest('.chat-run') : null;
     var userText = chatRunQuestion(runBlock);
     if (userText) submitQuestion(userText, chatStreamKey());
   });
+}
+
+async function resumeResearch(runId, button) {
+  if (!runId || !chatSessionId || !button) return;
+  var originalLabel = button.textContent;
+  var finished = false;
+  button.disabled = true;
+  button.textContent = '正在继续研究…';
+  try {
+    var response = await fetch('/api/chat/research/' + encodeURIComponent(runId) + '/resume', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatSessionId }),
+    });
+    await consumeSupplementStream(response, {
+      research_plan: function () { button.textContent = '正在继续研究…'; },
+      research_running: function () { button.textContent = '正在继续研究…'; },
+      research_step_started: function (data) { button.textContent = '正在执行：' + (data.label || '研究步骤'); },
+      research_step_completed: function (data) { button.textContent = '已完成：' + (data.label || '研究步骤'); },
+      research_step_failed: function (data) { button.textContent = '步骤失败：' + (data.label || '研究步骤'); },
+      research_blocked: function (data) { button.textContent = data.reason || '研究受阻'; },
+      done: function (data) { finished = true; appendAssistantRun('#chat-history', { content: data.answer, run: data.run }); }
+    });
+    if (finished) {
+      // 本次恢复的结果已由新追加的回答（及其自身的恢复入口）表达；旧按钮可能已经
+      // 指向一个不可恢复的运行，保留它就会变成点击必然失败的死按钮。
+      if (button.parentNode) button.parentNode.removeChild(button);
+    } else {
+      button.textContent = originalLabel;
+      button.disabled = false;
+    }
+  } catch (_) {
+    button.textContent = '继续研究失败';
+    button.disabled = false;
+  }
 }
 
 function chatRunQuestion(runBlock) {

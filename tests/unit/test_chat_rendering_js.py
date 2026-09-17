@@ -306,8 +306,8 @@ def test_web_artifact_requires_http_url_and_escapes_title():
     assert "ftp://" not in result["bad"]
 
 
-def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
-    """停止/部分/失败给出清晰文本与「重新生成」；恢复占位禁用，不承诺 M3 能力。"""
+def test_run_status_renders_regenerate_for_incomplete_runs_without_a_fake_continue_placeholder():
+    """停止/部分/失败给出清晰文本与「重新生成」；恢复入口只由真实研究运行提供。"""
     result = _run_node(
         f"""
         const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
@@ -324,8 +324,8 @@ def test_run_status_renders_regenerate_for_stopped_and_disabled_continue():
     assert "诊断 ID：<code>run-stopped</code>" in result["stopped"]
     assert 'data-chat-action="copy-run-id"' in result["stopped"]
     assert "重新生成" in result["stopped"]
-    assert 'data-chat-action="continue"' in result["stopped"]
-    assert "disabled" in result["stopped"]
+    assert 'data-chat-action="continue"' not in result["stopped"]
+    assert "继续研究" not in result["stopped"]
     assert "部分完成" in result["partial"]
     assert "诊断 ID：<code>run-partial</code>" in result["partial"]
     assert "重新生成" in result["partial"]
@@ -429,3 +429,51 @@ def test_m2_rendering_marks_reference_conflict_and_business_policy():
     assert '外部参考' in result['facts'] and '已确认' not in result['facts']
     assert '存在口径/时间差异' in result['facts'] and 'PDF 原文' in result['facts'] and '实时数据' in result['facts']
     assert 'role="status"' in result['verification']
+
+
+def test_research_rendering_shows_business_steps_acceptance_and_recovery_only_when_resumable():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const plan = {{steps:[{{id:'v', label:'核对来源'}}], acceptance:['证据充分']}};
+        const stopped = {{status:'stopped', research_run_id:'r1', research_summary:{{resume_from_step_id:'比较'}}}};
+        console.log(JSON.stringify({{plan:r.renderResearchPlan(plan), recovery:r.renderResearchRecovery(stopped), completed:r.renderResearchRecovery({{status:'completed', research_run_id:'r1'}})}}));
+        """
+    )
+    assert '核对来源' in result['plan'] and '完成判据' in result['plan']
+    assert '继续研究' in result['recovery'] and '从步骤：比较' in result['recovery']
+    assert result['completed'] == ''
+
+
+def test_research_recovery_hides_dead_button_for_finished_or_unavailable_runs():
+    """完成/不可恢复的研究运行不得再渲染点击后必然失败的「继续研究」按钮。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const stopped = {{status:'stopped', research_run_id:'r1', research_summary:{{status:'stopped', resume_from_step_id:'比较'}}}};
+        const finished = {{status:'stopped', research_run_id:'r1', research_summary:{{status:'completed'}}}};
+        const withCompletedRun = r.renderResearchRecovery({{status:'failed', research_run_id:'r1'}}, {{status:'completed'}});
+        const liveStopped = r.renderResearchRecovery({{status:'stopped', research_run_id:'r1'}}, {{status:'running'}});
+        console.log(JSON.stringify({{stopped:r.renderResearchRecovery(stopped), finished:r.renderResearchRecovery(finished), withCompletedRun, liveStopped}}));
+        """
+    )
+    assert '继续研究' in result['stopped'] and '从步骤：比较' in result['stopped']
+    assert result['finished'] == ''
+    assert result['withCompletedRun'] == ''
+    # 用户刚停止、持久化状态还没回到前端的运行仍要保留入口，不能把停止后的恢复入口也删掉。
+    assert '继续研究' in result['liveStopped']
+
+
+def test_research_steps_render_public_running_failed_and_blocked_states():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const plan = {{steps:[{{id:'retrieve', label:'检索已授权披露'}}]}};
+        const running = r.renderResearchSteps({{plan:plan, step_runs:[{{step_id:'retrieve', status:'running'}}]}});
+        const failed = r.renderResearchSteps({{plan:plan, step_runs:[{{step_id:'retrieve', status:'failed'}}]}});
+        console.log(JSON.stringify({{running, failed}}));
+        """
+    )
+    assert '检索已授权披露' in result['running']
+    assert '进行中' in result['running']
+    assert '失败' in result['failed']
