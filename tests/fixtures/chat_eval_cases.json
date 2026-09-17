@@ -1,102 +1,1122 @@
-[
-  {
-    "id": "report-number",
-    "question": "本报告营业收入是多少？",
-    "scope": "company_only",
-    "intent": "report_fact",
-    "allowed_sources": ["local_pdf"],
-    "expected_fact_ids": ["pdf-1"],
-    "forbidden_report_ids": ["600900:2026-06-30:semi_annual"],
-    "expected_status": "completed"
-  },
-  {
-    "id": "cross-period",
-    "question": "跨期比较营业收入变化？",
-    "scope": "company_only",
-    "intent": "company_trend",
-    "allowed_sources": ["local_pdf"],
-    "expected_fact_ids": ["pdf-current", "pdf-prior"],
-    "forbidden_report_ids": ["600900:2026-06-30:semi_annual"],
-    "expected_status": "completed"
-  },
-  {
-    "id": "local-industry",
-    "question": "与本地同业样本比较？",
-    "scope": "company_industry",
-    "intent": "industry_benchmark",
-    "allowed_sources": ["local_pdf"],
-    "expected_fact_ids": ["pdf-company", "pdf-peer"],
-    "forbidden_report_ids": [],
-    "expected_status": "completed"
-  },
-  {
-    "id": "realtime-market",
-    "question": "实时行情如何？",
-    "scope": "company_only",
-    "intent": "realtime_market",
-    "allowed_sources": ["market_data"],
-    "expected_fact_ids": ["tool:market:quote"],
-    "forbidden_report_ids": [],
-    "expected_status": "partial"
-  },
-  {
-    "id": "news-attribution",
-    "question": "新闻能否归因异动？",
-    "scope": "company_only",
-    "intent": "event_attribution",
-    "allowed_sources": ["web"],
-    "expected_fact_ids": [],
-    "forbidden_report_ids": [],
-    "expected_status": "partial"
-  },
-  {
-    "id": "scope-leak",
-    "question": "范围泄漏必须失败。",
-    "scope": "company_only",
-    "intent": "report_fact",
-    "allowed_sources": ["local_pdf"],
-    "expected_fact_ids": [],
-    "forbidden_report_ids": ["600900:2026-06-30:semi_annual"],
-    "expected_status": "partial"
-  },
-  {
-    "id": "pdf-without-page",
-    "question": "无页码 PDF 必须标记不可用。",
-    "scope": "company_only",
-    "intent": "report_fact",
-    "allowed_sources": ["local_pdf"],
-    "expected_fact_ids": [],
-    "forbidden_report_ids": [],
-    "expected_status": "partial"
-  },
-  {
-    "id": "tool-failure",
-    "question": "工具失败必须诚实降级。",
-    "scope": "company_only",
-    "intent": "realtime_market",
-    "allowed_sources": ["market_data"],
-    "expected_fact_ids": [],
-    "forbidden_report_ids": [],
-    "expected_status": "partial"
-  },
-  {
-    "id": "fact-conflict",
-    "question": "事实冲突不得合并为确定结论。",
-    "scope": "company_only",
-    "intent": "report_fact",
-    "allowed_sources": ["local_pdf"],
-    "expected_fact_ids": [],
-    "forbidden_report_ids": [],
-    "expected_status": "partial"
-  },
-  {
-    "id": "stop-recovery",
-    "question": "停止后恢复只运行未完成步骤。",
-    "scope": "company_only",
-    "intent": "research_task",
-    "allowed_sources": ["local_pdf"],
-    "expected_fact_ids": [],
-    "forbidden_report_ids": [],
-    "expected_status": "stopped"
-  }
-]
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "report-number",
+      "question": "本报告营业收入是多少？",
+      "scope": "company_only",
+      "intent": "report_fact",
+      "allowed_sources": [
+        "local_pdf"
+      ],
+      "expected_fact_ids": [
+        "601288:2026-06-30:semi_annual#p40"
+      ],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [
+        "600900:2026-06-30:semi_annual"
+      ],
+      "expected_status": "completed",
+      "answer_run": {
+        "content": "fixture-report-number 固定回答",
+        "status": "completed",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [
+          {
+            "metric": "营业收入",
+            "value": 100.0,
+            "unit": "亿元",
+            "period": "2026-06-30",
+            "period_kind": "semi_annual_cumulative",
+            "entity_scope": "consolidated",
+            "company_code": "601288",
+            "source_type": "pdf",
+            "evidence_ids": [
+              "601288:2026-06-30:semi_annual#p40"
+            ],
+            "verification": "verified",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          }
+        ],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "passed",
+          "issues": [],
+          "supported_fact_ids": [
+            "601288:2026-06-30:semi_annual#p40"
+          ]
+        },
+        "artifacts": [
+          {
+            "source": "pdf",
+            "report_id": "601288:2026-06-30:semi_annual",
+            "pdf_filename": "601288-2026.pdf",
+            "page": 40,
+            "snippet": "营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/601288-2026.pdf?jump=0#page=40",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          }
+        ],
+        "tool_artifacts": [],
+        "retrieval_report_ids": [],
+        "id": "fixture-report-number",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "cross-period",
+      "question": "跨期比较营业收入变化？",
+      "scope": "company_only",
+      "intent": "company_trend",
+      "allowed_sources": [
+        "local_pdf"
+      ],
+      "expected_fact_ids": [
+        "601288:2026-06-30:semi_annual#p40",
+        "601288:2025-12-31:annual#p120"
+      ],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual",
+        "601288:2025-12-31:annual"
+      ],
+      "forbidden_report_ids": [
+        "600900:2026-06-30:semi_annual"
+      ],
+      "expected_status": "completed",
+      "answer_run": {
+        "content": "fixture-cross-period 固定回答",
+        "status": "completed",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual",
+            "601288:2025-12-31:annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [
+          {
+            "metric": "营业收入",
+            "value": 100.0,
+            "unit": "亿元",
+            "period": "2026-06-30",
+            "period_kind": "semi_annual_cumulative",
+            "entity_scope": "consolidated",
+            "company_code": "601288",
+            "source_type": "pdf",
+            "evidence_ids": [
+              "601288:2026-06-30:semi_annual#p40"
+            ],
+            "verification": "verified",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          },
+          {
+            "metric": "营业收入",
+            "value": 90.0,
+            "unit": "亿元",
+            "period": "2025-12-31",
+            "period_kind": "semi_annual_cumulative",
+            "entity_scope": "consolidated",
+            "company_code": "601288",
+            "source_type": "pdf",
+            "evidence_ids": [
+              "601288:2025-12-31:annual#p120"
+            ],
+            "verification": "verified",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          }
+        ],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "passed",
+          "issues": [],
+          "supported_fact_ids": [
+            "601288:2026-06-30:semi_annual#p40",
+            "601288:2025-12-31:annual#p120"
+          ]
+        },
+        "artifacts": [
+          {
+            "source": "pdf",
+            "report_id": "601288:2026-06-30:semi_annual",
+            "pdf_filename": "601288-2026.pdf",
+            "page": 40,
+            "snippet": "营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/601288-2026.pdf?jump=0#page=40",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          },
+          {
+            "source": "pdf",
+            "report_id": "601288:2025-12-31:annual",
+            "pdf_filename": "601288-2025.pdf",
+            "page": 120,
+            "snippet": "上期营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/601288-2025.pdf?jump=0#page=120",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          }
+        ],
+        "tool_artifacts": [],
+        "retrieval_report_ids": [],
+        "id": "fixture-cross-period",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "local-industry",
+      "question": "与本地同业样本比较？",
+      "scope": "company_industry",
+      "intent": "industry_benchmark",
+      "allowed_sources": [
+        "local_pdf"
+      ],
+      "expected_fact_ids": [
+        "601288:2026-06-30:semi_annual#p40",
+        "600036:2026-06-30:semi_annual#p55"
+      ],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual",
+        "600036:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [
+        "600900:2026-06-30:semi_annual"
+      ],
+      "expected_status": "completed",
+      "answer_run": {
+        "content": "fixture-local-industry 固定回答",
+        "status": "completed",
+        "scope": {
+          "mode": "company_industry",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual",
+            "600036:2026-06-30:semi_annual"
+          ],
+          "industry": {
+            "name": "银行业",
+            "provider": "fixture",
+            "resolved_at": "",
+            "sample_kind": ""
+          },
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [
+          {
+            "metric": "营业收入",
+            "value": 100.0,
+            "unit": "亿元",
+            "period": "2026-06-30",
+            "period_kind": "semi_annual_cumulative",
+            "entity_scope": "consolidated",
+            "company_code": "601288",
+            "source_type": "pdf",
+            "evidence_ids": [
+              "601288:2026-06-30:semi_annual#p40"
+            ],
+            "verification": "verified",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          },
+          {
+            "metric": "营业收入",
+            "value": 88.0,
+            "unit": "亿元",
+            "period": "2026-06-30",
+            "period_kind": "semi_annual_cumulative",
+            "entity_scope": "consolidated",
+            "company_code": "600036",
+            "source_type": "pdf",
+            "evidence_ids": [
+              "600036:2026-06-30:semi_annual#p55"
+            ],
+            "verification": "verified",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          }
+        ],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "passed",
+          "issues": [],
+          "supported_fact_ids": [
+            "601288:2026-06-30:semi_annual#p40",
+            "600036:2026-06-30:semi_annual#p55"
+          ]
+        },
+        "artifacts": [
+          {
+            "source": "pdf",
+            "report_id": "601288:2026-06-30:semi_annual",
+            "pdf_filename": "601288-2026.pdf",
+            "page": 40,
+            "snippet": "营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/601288-2026.pdf?jump=0#page=40",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          },
+          {
+            "source": "pdf",
+            "report_id": "600036:2026-06-30:semi_annual",
+            "pdf_filename": "600036-2026.pdf",
+            "page": 55,
+            "snippet": "同业营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/600036-2026.pdf?jump=0#page=55",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          }
+        ],
+        "tool_artifacts": [],
+        "retrieval_report_ids": [],
+        "id": "fixture-local-industry",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "realtime-market",
+      "question": "实时行情如何？",
+      "scope": "company_only",
+      "intent": "realtime_market",
+      "allowed_sources": [
+        "market_data"
+      ],
+      "expected_fact_ids": [
+        "tool:market:quote"
+      ],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [],
+      "expected_status": "partial",
+      "answer_run": {
+        "content": "fixture-realtime-market 固定回答",
+        "status": "partial",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [
+          {
+            "metric": "最新价格",
+            "value": 3.2,
+            "unit": "元/股",
+            "period": "as_of",
+            "period_kind": "point_in_time",
+            "entity_scope": "consolidated",
+            "company_code": "601288",
+            "source_type": "tool",
+            "evidence_ids": [
+              "tool:market:quote"
+            ],
+            "verification": "reference",
+            "as_of": "2026-09-16T10:00:00+08:00",
+            "original_value": null,
+            "original_unit": ""
+          }
+        ],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "partial",
+          "issues": [],
+          "supported_fact_ids": []
+        },
+        "artifacts": [],
+        "tool_artifacts": [
+          {
+            "provider": "market",
+            "tool_name": "quote",
+            "as_of": "2026-09-16T10:00:00+08:00",
+            "status": "success",
+            "arguments_summary": "",
+            "result_summary": ""
+          }
+        ],
+        "retrieval_report_ids": [],
+        "id": "fixture-realtime-market",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "news-attribution",
+      "question": "新闻能否归因异动？",
+      "scope": "company_only",
+      "intent": "event_attribution",
+      "allowed_sources": [
+        "web"
+      ],
+      "expected_fact_ids": [],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [],
+      "expected_status": "partial",
+      "answer_run": {
+        "content": "fixture-news-attribution 固定回答",
+        "status": "partial",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "partial",
+          "issues": [],
+          "supported_fact_ids": []
+        },
+        "artifacts": [
+          {
+            "source": "web",
+            "report_id": "",
+            "pdf_filename": "",
+            "page": null,
+            "snippet": "fixture 摘要",
+            "pdf_url": null,
+            "availability": "available",
+            "url": "https://example.com/news",
+            "title": "fixture 新闻",
+            "published_at": "2026-09-16T09:00:00+08:00",
+            "fetched_at": "2026-09-16T10:00:00+08:00"
+          }
+        ],
+        "tool_artifacts": [],
+        "retrieval_report_ids": [],
+        "id": "fixture-news-attribution",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "scope-leak",
+      "question": "范围泄漏必须失败。",
+      "scope": "company_only",
+      "intent": "report_fact",
+      "allowed_sources": [
+        "local_pdf"
+      ],
+      "expected_fact_ids": [
+        "601288:2026-06-30:semi_annual#p40"
+      ],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [
+        "600900:2026-06-30:semi_annual"
+      ],
+      "expected_status": "partial",
+      "answer_run": {
+        "content": "fixture-scope-leak 固定回答",
+        "status": "partial",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [
+          {
+            "metric": "营业收入",
+            "value": 100.0,
+            "unit": "亿元",
+            "period": "2026-06-30",
+            "period_kind": "semi_annual_cumulative",
+            "entity_scope": "consolidated",
+            "company_code": "601288",
+            "source_type": "pdf",
+            "evidence_ids": [
+              "601288:2026-06-30:semi_annual#p40"
+            ],
+            "verification": "verified",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          }
+        ],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "partial",
+          "issues": [],
+          "supported_fact_ids": []
+        },
+        "artifacts": [
+          {
+            "source": "pdf",
+            "report_id": "601288:2026-06-30:semi_annual",
+            "pdf_filename": "601288-2026.pdf",
+            "page": 40,
+            "snippet": "营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/601288-2026.pdf?jump=0#page=40",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          },
+          {
+            "source": "pdf",
+            "report_id": "600900:2026-06-30:semi_annual",
+            "pdf_filename": "600900-2026.pdf",
+            "page": 30,
+            "snippet": "范围外营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/600900-2026.pdf?jump=0#page=30",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          }
+        ],
+        "tool_artifacts": [],
+        "retrieval_report_ids": [
+          "600900:2026-06-30:semi_annual"
+        ],
+        "id": "fixture-scope-leak",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "pdf-without-page",
+      "question": "无页码 PDF 必须标记不可用。",
+      "scope": "company_only",
+      "intent": "report_fact",
+      "allowed_sources": [
+        "local_pdf"
+      ],
+      "expected_fact_ids": [],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [],
+      "expected_status": "partial",
+      "answer_run": {
+        "content": "fixture-pdf-without-page 固定回答",
+        "status": "partial",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "partial",
+          "issues": [],
+          "supported_fact_ids": []
+        },
+        "artifacts": [
+          {
+            "source": "pdf",
+            "report_id": "601288:2026-06-30:semi_annual",
+            "pdf_filename": "601288-2026.pdf",
+            "page": 40,
+            "snippet": "本地 PDF 文件缺失",
+            "pdf_url": null,
+            "availability": "missing_file",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          }
+        ],
+        "tool_artifacts": [],
+        "retrieval_report_ids": [],
+        "id": "fixture-pdf-without-page",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "tool-failure",
+      "question": "工具失败必须诚实降级。",
+      "scope": "company_only",
+      "intent": "realtime_market",
+      "allowed_sources": [
+        "market_data"
+      ],
+      "expected_fact_ids": [],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [],
+      "expected_status": "partial",
+      "answer_run": {
+        "content": "fixture-tool-failure 固定回答",
+        "status": "partial",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "partial",
+          "issues": [],
+          "supported_fact_ids": []
+        },
+        "artifacts": [],
+        "tool_artifacts": [
+          {
+            "provider": "market",
+            "tool_name": "quote",
+            "as_of": "",
+            "status": "failed",
+            "arguments_summary": "",
+            "result_summary": ""
+          }
+        ],
+        "retrieval_report_ids": [],
+        "id": "fixture-tool-failure",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "fact-conflict",
+      "question": "事实冲突不得合并为确定结论。",
+      "scope": "company_only",
+      "intent": "report_fact",
+      "allowed_sources": [
+        "local_pdf"
+      ],
+      "expected_fact_ids": [
+        "601288:2026-06-30:semi_annual#p40"
+      ],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [],
+      "expected_status": "partial",
+      "answer_run": {
+        "content": "fixture-fact-conflict 固定回答",
+        "status": "partial",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [
+          {
+            "metric": "营业收入",
+            "value": 100.0,
+            "unit": "亿元",
+            "period": "2026-06-30",
+            "period_kind": "semi_annual_cumulative",
+            "entity_scope": "consolidated",
+            "company_code": "601288",
+            "source_type": "pdf",
+            "evidence_ids": [
+              "601288:2026-06-30:semi_annual#p40"
+            ],
+            "verification": "verified",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          },
+          {
+            "metric": "营业收入",
+            "value": 120.0,
+            "unit": "亿元",
+            "period": "2026-06-30",
+            "period_kind": "semi_annual_cumulative",
+            "entity_scope": "consolidated",
+            "company_code": "601288",
+            "source_type": "pdf",
+            "evidence_ids": [
+              "601288:2026-06-30:semi_annual#p41"
+            ],
+            "verification": "conflict",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          }
+        ],
+        "conflicts": [
+          {
+            "metric": "营业收入",
+            "facts": [
+              {
+                "metric": "营业收入",
+                "value": 100.0,
+                "unit": "亿元",
+                "period": "2026-06-30",
+                "period_kind": "semi_annual_cumulative",
+                "entity_scope": "consolidated",
+                "company_code": "601288",
+                "source_type": "pdf",
+                "evidence_ids": [
+                  "601288:2026-06-30:semi_annual#p40"
+                ],
+                "verification": "verified",
+                "as_of": "",
+                "original_value": null,
+                "original_unit": ""
+              },
+              {
+                "metric": "营业收入",
+                "value": 120.0,
+                "unit": "亿元",
+                "period": "2026-06-30",
+                "period_kind": "semi_annual_cumulative",
+                "entity_scope": "consolidated",
+                "company_code": "601288",
+                "source_type": "pdf",
+                "evidence_ids": [
+                  "601288:2026-06-30:semi_annual#p41"
+                ],
+                "verification": "conflict",
+                "as_of": "",
+                "original_value": null,
+                "original_unit": ""
+              }
+            ],
+            "reason": "同指标同期间数值不一致"
+          }
+        ],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": {
+          "status": "partial",
+          "issues": [],
+          "supported_fact_ids": []
+        },
+        "artifacts": [
+          {
+            "source": "pdf",
+            "report_id": "601288:2026-06-30:semi_annual",
+            "pdf_filename": "601288-2026.pdf",
+            "page": 40,
+            "snippet": "营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/601288-2026.pdf?jump=0#page=40",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          },
+          {
+            "source": "pdf",
+            "report_id": "601288:2026-06-30:semi_annual",
+            "pdf_filename": "601288-2026.pdf",
+            "page": 41,
+            "snippet": "另一口径披露",
+            "pdf_url": "/api/history-pdf/601288-2026.pdf?jump=0#page=41",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          }
+        ],
+        "tool_artifacts": [],
+        "retrieval_report_ids": [],
+        "id": "fixture-fact-conflict",
+        "research_run_id": "",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": null
+    },
+    {
+      "id": "stop-recovery",
+      "question": "停止后恢复只运行未完成步骤。",
+      "scope": "company_only",
+      "intent": "research_task",
+      "allowed_sources": [
+        "local_pdf"
+      ],
+      "expected_fact_ids": [],
+      "expected_company_codes": [
+        "601288"
+      ],
+      "expected_report_ids": [
+        "601288:2026-06-30:semi_annual"
+      ],
+      "forbidden_report_ids": [],
+      "expected_status": "stopped",
+      "answer_run": {
+        "content": "fixture-stop-recovery 固定回答",
+        "status": "stopped",
+        "scope": {
+          "mode": "company_only",
+          "companies": [
+            {
+              "code": "601288",
+              "name": "农业银行"
+            }
+          ],
+          "report_ids": [
+            "601288:2026-06-30:semi_annual"
+          ],
+          "industry": null,
+          "source_policy": {
+            "local_pdf": true,
+            "historical_analysis": true,
+            "market_data": false,
+            "web": false
+          },
+          "fallback_reason": ""
+        },
+        "facts": [],
+        "conflicts": [],
+        "intent_decision": null,
+        "tool_policy": null,
+        "verification_report": null,
+        "artifacts": [
+          {
+            "source": "pdf",
+            "report_id": "601288:2026-06-30:semi_annual",
+            "pdf_filename": "601288-2026.pdf",
+            "page": 40,
+            "snippet": "营业收入见原文披露",
+            "pdf_url": "/api/history-pdf/601288-2026.pdf?jump=0#page=40",
+            "availability": "available",
+            "url": "",
+            "title": "",
+            "published_at": "",
+            "fetched_at": ""
+          }
+        ],
+        "tool_artifacts": [],
+        "retrieval_report_ids": [],
+        "id": "fixture-stop-recovery",
+        "research_run_id": "fixture-stop-research",
+        "research_summary": null,
+        "created_at": "2026-09-16T09:00:00+08:00",
+        "completed_at": "2026-09-16T09:05:00+08:00",
+        "elapsed_seconds": 1.5,
+        "model": "fixture-fake",
+        "legacy_evidence_unavailable": false,
+        "supplement": null
+      },
+      "research_run": {
+        "id": "fixture-stop-research",
+        "plan": {
+          "objective": "核验停止恢复",
+          "scope": {
+            "mode": "company_only",
+            "companies": [
+              {
+                "code": "601288",
+                "name": "农业银行"
+              }
+            ],
+            "report_ids": [
+              "601288:2026-06-30:semi_annual"
+            ],
+            "industry": null,
+            "source_policy": {
+              "local_pdf": true,
+              "historical_analysis": true,
+              "market_data": false,
+              "web": false
+            },
+            "fallback_reason": ""
+          },
+          "steps": [
+            {
+              "id": "retrieve",
+              "kind": "retrieve",
+              "label": "检索范围内 PDF",
+              "depends_on": [],
+              "acceptance": [],
+              "report_ids": [],
+              "tools": []
+            }
+          ],
+          "acceptance": [
+            "保留已完成步骤"
+          ]
+        },
+        "status": "stopped",
+        "step_runs": [
+          {
+            "step_id": "retrieve",
+            "status": "stopped",
+            "input_summary": "",
+            "result_summary": "已完成前半部分检索",
+            "artifacts": [],
+            "facts": [],
+            "conflicts": [],
+            "verification": null,
+            "error": "",
+            "started_at": "2026-09-16T09:00:00+08:00",
+            "finished_at": "2026-09-16T09:01:00+08:00"
+          }
+        ],
+        "started_at": "2026-09-16T09:00:00+08:00",
+        "finished_at": "2026-09-16T09:01:30+08:00",
+        "resume_from_step_id": "retrieve"
+      }
+    }
+  ]
+}

@@ -1,142 +1,226 @@
-"""Deterministic M4 quality evaluation uses only fixed local AnswerRun fixtures."""
+"""Deterministic M4 quality evaluation replays only fixed, versioned fixtures."""
 
+import copy
 import json
 from pathlib import Path
 
 import pytest
 
-from webapp.chat_models import (
-    AnswerRun,
-    EvidenceArtifact,
-    Fact,
-    Scope,
-    ToolArtifact,
-    VerificationReport,
+from webapp.chat_evaluation import (
+    FAILURE_CODES,
+    ChatEvaluator,
+    EvaluationCase,
+    EvaluationFixture,
+    EvaluationResult,
+    FixtureAgent,
+    QualityGate,
+    quality_summary_payload,
 )
-from webapp.research_models import ResearchPlan, ResearchRun, ResearchStep, ResearchStepRun
 
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "chat_eval_cases.json"
+REQUIRED_CASE_IDS = {
+    "report-number", "cross-period", "local-industry", "realtime-market",
+    "news-attribution", "scope-leak", "pdf-without-page", "tool-failure",
+    "fact-conflict", "stop-recovery",
+}
+SEMI_REPORT_ID = "601288:2026-06-30:semi_annual"
+PEER_REPORT_ID = "600036:2026-06-30:semi_annual"
+LEAK_REPORT_ID = "600900:2026-06-30:semi_annual"
 
 
-def _scope() -> Scope:
-    return Scope.company_only("601288", "农业银行", ("601288:2026-06-30:semi_annual",))
+def _payload() -> dict:
+    return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
-def _fact(*, external: bool = False) -> Fact:
-    return Fact(
-        "price" if external else "revenue", 3.2 if external else 100.0,
-        "元/股" if external else "亿元", "as_of" if external else "2026-06-30",
-        "point_in_time" if external else "semi_annual_cumulative", "consolidated",
-        "601288", "tool" if external else "pdf",
-        ("tool:market:quote",) if external else ("pdf-1",),
-        "reference" if external else "verified",
-        "2026-09-16T10:00:00+08:00" if external else "",
-    )
+def _fixture_with(case_id: str, **case_overrides) -> EvaluationFixture:
+    payload = _payload()
+    for entry in payload["cases"]:
+        if entry["id"] == case_id:
+            entry.update(case_overrides)
+            break
+    else:  # pragma: no cover - fixture always contains the requested case
+        raise AssertionError(f"fixture has no case {case_id}")
+    return EvaluationFixture.from_dict(payload)
 
 
-def _run(*, status: str = "completed", verification: str = "passed", artifacts=(), facts=(), tools=(), retrieval=()) -> AnswerRun:
-    return AnswerRun(
-        id="fixed-answer", content="固定回答", status=status, scope=_scope(),
-        facts=tuple(facts), artifacts=tuple(artifacts), tool_artifacts=tuple(tools),
-        retrieval_report_ids=tuple(retrieval),
-        verification_report=VerificationReport(verification, supported_fact_ids=("pdf-1",)),
-        elapsed_seconds=1.5,
-    )
-
-
-class _FixedFakeAgent:
-    """Fixture-only collaborator: its return values contain no model or network calls."""
-
-    def __init__(self, outputs):
-        self.outputs = outputs
-
-    def run(self, case):
-        return self.outputs[case.id]
+def _fixture_outputs(fixture: EvaluationFixture) -> list[EvaluationResult]:
+    evaluator = ChatEvaluator()
+    agent = FixtureAgent(fixture)
+    return [evaluator.run(case, agent) for case in fixture.cases]
 
 
 def test_case_schema_requires_scope_and_expected_outcome():
-    from webapp.chat_evaluation import EvaluationCase
-
     with pytest.raises(ValueError, match="expected_status"):
         EvaluationCase.from_dict({"id": "bad", "question": "x"})
 
 
-def test_controlled_fixture_covers_all_required_scenarios():
-    from webapp.chat_evaluation import EvaluationCase
+def test_fixture_is_versioned_and_carries_one_fixed_serialized_output_per_case():
+    raw = _payload()
+    fixture = EvaluationFixture.load(FIXTURE_PATH)
 
-    cases = [EvaluationCase.from_dict(raw) for raw in json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))]
+    assert raw["schema_version"] == fixture.schema_version == 1
+    assert {case.id for case in fixture.cases} >= REQUIRED_CASE_IDS
+    assert set(fixture.outputs) == {case.id for case in fixture.cases}
+    for case in fixture.cases:
+        answer_run, research_run = fixture.outputs[case.id]
+        assert answer_run.id
+        assert answer_run.scope is not None
+        assert FixtureAgent(fixture).run(case) is fixture.outputs[case.id]
+        if case.id == "stop-recovery":
+            assert research_run is not None and research_run.status == "stopped"
+        else:
+            assert research_run is None
+    serialized = json.dumps(raw, ensure_ascii=False)
+    for internal in ("prompt", "reasoning", "chain_of_thought", "api_key"):
+        assert internal not in serialized
 
-    assert {case.id for case in cases} >= {
-        "report-number", "cross-period", "local-industry", "realtime-market",
-        "news-attribution", "scope-leak", "pdf-without-page", "tool-failure",
-        "fact-conflict", "stop-recovery",
+
+def test_fixture_requires_a_supported_schema_version_and_fixed_outputs():
+    payload = _payload()
+    payload.pop("schema_version")
+    with pytest.raises(ValueError, match="schema_version"):
+        EvaluationFixture.from_dict(payload)
+
+    payload = _payload()
+    payload["schema_version"] = 99
+    with pytest.raises(ValueError, match="unsupported fixture schema_version"):
+        EvaluationFixture.from_dict(payload)
+
+    payload = _payload()
+    payload["cases"][0].pop("answer_run")
+    with pytest.raises(ValueError, match="fixed output"):
+        EvaluationFixture.from_dict(payload)
+
+    payload = _payload()
+    payload["cases"][0]["unexpected"] = True
+    with pytest.raises(ValueError, match="unsupported keys"):
+        EvaluationFixture.from_dict(payload)
+
+
+def test_evaluator_rejects_any_non_fixture_collaborator():
+    """A production evaluation must never accept an arbitrary (possibly online) fake."""
+    fixture = EvaluationFixture.load(FIXTURE_PATH)
+    case = fixture.cases[0]
+    answer_run = fixture.outputs[case.id][0]
+
+    with pytest.raises(ValueError, match="fixture-backed"):
+        ChatEvaluator().run(case, lambda _case: answer_run)
+    with pytest.raises(ValueError, match="fixture-backed"):
+        ChatEvaluator().run(case, type("FakeAgent", (), {"run": lambda self, _case: answer_run})())
+    with pytest.raises(ValueError, match="EvaluationFixture"):
+        FixtureAgent({"report-number": (answer_run, None)})
+    with pytest.raises(ValueError, match="fixture-backed"):
+        ChatEvaluator().run(case, {"report-number": (answer_run, None)})
+    with pytest.raises(ValueError, match="EvaluationCase"):
+        ChatEvaluator().run({"id": "report-number"}, FixtureAgent(fixture))
+
+
+def test_fixture_cases_detect_each_deliberate_contract_violation():
+    fixture = EvaluationFixture.load(FIXTURE_PATH)
+    results = {result.case_id: result for result in _fixture_outputs(fixture)}
+
+    assert results["report-number"].status_matches is True
+    assert results["report-number"].citation_coverage == 1.0
+    assert results["scope-leak"].forbidden_report_ids_hit == (LEAK_REPORT_ID,)
+    assert results["pdf-without-page"].pdf_page_links_checked == 0
+    assert results["pdf-without-page"].pdf_page_links_passed == 0
+    assert results["tool-failure"].tool_calls == 1
+    assert results["tool-failure"].tool_successes == 0
+    assert results["stop-recovery"].stop_recovery_checks == 1
+    assert results["stop-recovery"].stop_recovery_passes == 1
+    assert results["realtime-market"].disallowed_sources == ()
+    assert results["news-attribution"].disallowed_sources == ()
+
+    summary = QualityGate.evaluate(list(results.values()))
+    assert summary.passed is False
+    assert summary.failure_codes == {"scope_leak": 1}
+    assert summary.citation_coverage == 1.0
+    assert summary.page_link_pass_rate == 1.0
+
+
+def test_scope_boundary_mismatch_fails_the_gate():
+    """An answer whose actual Scope boundary differs from the case must fail closed."""
+    fixture = _fixture_with("report-number", expected_company_codes=[])
+    case = next(candidate for candidate in fixture.cases if candidate.id == "report-number")
+
+    result = ChatEvaluator().run(case, FixtureAgent(fixture))
+    summary = QualityGate.evaluate([result])
+
+    assert result.scope_company_mismatches == ("601288",)
+    assert result.scope_mode_matches is True
+    assert summary.passed is False
+    assert summary.failure_codes["scope_boundary_mismatch"] == 1
+
+    report_fixture = _fixture_with("report-number", expected_report_ids=[PEER_REPORT_ID])
+    report_case = next(candidate for candidate in report_fixture.cases if candidate.id == "report-number")
+    report_result = ChatEvaluator().run(report_case, FixtureAgent(report_fixture))
+
+    assert report_result.scope_report_mismatches == tuple(sorted({PEER_REPORT_ID, SEMI_REPORT_ID}))
+    assert QualityGate.evaluate([report_result]).failure_codes["scope_boundary_mismatch"] == 1
+
+
+def test_external_fact_evidence_must_map_to_a_persisted_tool_or_web_artifact():
+    fixture = _fixture_with("realtime-market")
+    entry = next(case for case in fixture.cases if case.id == "realtime-market")
+    payload = copy.deepcopy(_payload())
+    for raw in payload["cases"]:
+        if raw["id"] == "realtime-market":
+            raw["answer_run"]["facts"][0]["evidence_ids"] = ["tool:not-persisted:quote"]
+    unbacked = EvaluationFixture.from_dict(payload)
+
+    result = ChatEvaluator().run(entry, FixtureAgent(unbacked))
+    summary = QualityGate.evaluate([result])
+
+    assert result.external_facts_missing_source == 1
+    assert result.external_facts_missing_as_of == 0
+    assert summary.passed is False
+    assert summary.failure_codes["external_fact_missing_source"] == 1
+    assert FixtureAgent(fixture).run(entry)[0].facts[0].evidence_ids == ("tool:market:quote",)
+
+
+def test_quality_summary_payload_exposes_only_fixed_codes_and_metrics():
+    fixture = EvaluationFixture.load(FIXTURE_PATH)
+    summary = QualityGate.evaluate(_fixture_outputs(fixture))
+
+    payload = quality_summary_payload(summary)
+
+    assert set(payload) == {
+        "passed", "case_count", "citation_coverage", "scope_precision", "page_link_pass_rate",
+        "tool_success_rate", "stop_recovery_pass_rate", "p95_stage_duration", "failure_codes",
     }
-
-
-def test_evaluator_runs_fixed_answer_and_research_fixtures_without_real_collaborators():
-    from webapp.chat_evaluation import ChatEvaluator, EvaluationCase, QualityGate
-
-    case = EvaluationCase.from_dict({
-        "id": "report-number", "question": "营收是多少？", "scope": "company_only",
-        "intent": "report_fact", "allowed_sources": ["local_pdf"],
-        "expected_fact_ids": ["pdf-1"], "forbidden_report_ids": [],
-        "expected_status": "completed",
-    })
-    artifact = EvidenceArtifact.pdf(
-        "601288:2026-06-30:semi_annual", "report.pdf", 40, "营收 100 亿元",
-        pdf_url="/api/history-pdf/report.pdf#page=40",
-    )
-    plan = ResearchPlan("核验", _scope(), (ResearchStep("verify", "verify", "核验"),), ("有证据",))
-    research = ResearchRun("fixed-research", plan, "completed", (ResearchStepRun("verify", "completed"),))
-    result = ChatEvaluator().run(case, _FixedFakeAgent({
-        case.id: (_run(artifacts=(artifact,), facts=(_fact(),)), research),
-    }))
-
-    assert result.case_id == case.id
-    assert result.citation_coverage == 1.0
-    assert result.scope_precision == 1.0
-    assert result.page_link_pass_rate == 1.0
-    assert result.status_matches is True
-    assert QualityGate.evaluate([result]).passed is True
-
-
-def test_scope_leak_fails_quality_gate():
-    from webapp.chat_evaluation import EvaluationResult, QualityGate
-
-    result = EvaluationResult(case_id="company-only", forbidden_report_ids_hit=("600900:2026-06-30:semi_annual",))
-    assert QualityGate.evaluate([result]).passed is False
-
-
-def test_external_fact_without_as_of_fails_quality_gate():
-    from webapp.chat_evaluation import EvaluationResult, QualityGate
-
-    result = EvaluationResult(case_id="market", external_facts_missing_as_of=1)
-    assert QualityGate.evaluate([result]).passed is False
+    assert payload["failure_codes"]["scope_leak"] == 1
+    assert set(payload["failure_codes"]) <= FAILURE_CODES
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "scope leak" not in serialized
+    for case_id in REQUIRED_CASE_IDS:
+        assert case_id not in serialized
 
 
 @pytest.mark.parametrize(
-    ("result", "failure"),
+    ("result", "code"),
     [
-        (lambda: __import__("webapp.chat_evaluation", fromlist=["EvaluationResult"]).EvaluationResult(
-            case_id="numeric", unsupported_numeric_claims=1), "unsupported numeric"),
-        (lambda: __import__("webapp.chat_evaluation", fromlist=["EvaluationResult"]).EvaluationResult(
-            case_id="pdf", invalid_pdf_page_urls=1), "invalid PDF"),
-        (lambda: __import__("webapp.chat_evaluation", fromlist=["EvaluationResult"]).EvaluationResult(
-            case_id="verifier", completed_runs_with_failed_verifier=1), "failed verifier"),
-        (lambda: __import__("webapp.chat_evaluation", fromlist=["EvaluationResult"]).EvaluationResult(
-            case_id="stopped", stopped_runs_rendered_complete=1), "rendered complete"),
+        (EvaluationResult(case_id="numeric", unsupported_numeric_claims=1), "unsupported_numeric_claim"),
+        (EvaluationResult(case_id="pdf", invalid_pdf_page_urls=1), "invalid_pdf_page_url"),
+        (EvaluationResult(case_id="verifier", completed_runs_with_failed_verifier=1), "completed_run_with_failed_verifier"),
+        (EvaluationResult(case_id="stopped", stopped_runs_rendered_complete=1), "stopped_run_rendered_complete"),
+        (EvaluationResult(case_id="status", status_matches=False), "run_status_mismatch"),
+        (EvaluationResult(case_id="source", disallowed_sources=("web",)), "source_outside_policy"),
+        (EvaluationResult(case_id="citation", missing_expected_fact_ids=("pdf-1",)), "expected_citation_missing"),
+        (EvaluationResult(case_id="asof", external_facts_missing_as_of=1), "external_fact_missing_as_of"),
+        (EvaluationResult(case_id="leak", forbidden_report_ids_hit=("600900:2026-06-30:semi_annual",)), "scope_leak"),
     ],
 )
-def test_gate_rejects_every_required_failure(result, failure):
-    from webapp.chat_evaluation import QualityGate
+def test_gate_rejects_every_required_failure(result, code):
+    summary = QualityGate.evaluate([result])
 
-    assert failure in " ".join(QualityGate.evaluate([result()]).failures)
+    assert summary.passed is False
+    assert summary.failure_codes[code] == 1
+    assert code in FAILURE_CODES
+    assert summary.failures
 
 
 def test_quality_summary_reports_weighted_metrics_and_p95_stage_duration():
-    from webapp.chat_evaluation import EvaluationResult, QualityGate
-
     summary = QualityGate.evaluate([
         EvaluationResult(
             case_id="one", citations_expected=2, citations_found=1,
