@@ -2219,6 +2219,21 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             logger.info("chat_run_started run_id=%s", run_id)
             yield _sse("session", {"session_id": sid})
             yield _sse("scope_resolved", {"scope": scope.to_dict()})
+            if planning.plan is not None:
+                yield _sse("execution_plan", {
+                    "status": planning.status,
+                    "objective": planning.plan.objective,
+                    "source_mode": planning.plan.source_mode,
+                    "steps": [{"id": step.id, "kind": step.kind, "required": step.required}
+                              for step in planning.plan.steps],
+                    "acceptance": list(planning.plan.acceptance),
+                })
+            else:
+                yield _sse("plan_fallback", {
+                    "status": planning.status,
+                    "issues": [{"code": issue.code, "message": issue.message}
+                               for issue in planning.issues],
+                })
             yield _sse("policy_resolved", {"intent": policy.intent, "allowed_tools": list(policy.allowed_tools),
                                              "max_calls": policy.max_calls, "max_rounds": policy.max_rounds})
             # 策略降级说明进入生产事件流：无外部工具或研究任务时用户能知道本次能力的边界。
