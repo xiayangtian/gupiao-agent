@@ -75,6 +75,7 @@ from .chat_facts import FactNormalizer, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
 from .execution_planner import ExecutionPlanner, PlanningCapabilities
+from .execution_executor import ExecutionExecutor
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
@@ -2193,11 +2194,35 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             return run
 
         def _produce() -> Any:
+            # 已验证计划的外部来源由服务端先确定性执行，模型只接收执行产物。
+            plan_history = list(history)
+            if planning.plan is not None and any(step.kind in {"market_quote", "web_search"} for step in planning.plan.steps):
+                cfg = RagConfig.load()
+                execute_tool = _build_chat_tool_executor(cfg) or _unavailable_tool_executor()
+                quote_tool = next((name for name in policy.allowed_tools if name.startswith("get_realtime") or name.startswith("get_quote")), "")
+                company_code = scope.companies[0].code if scope.companies else ""
+                def quote(_question, _scope):
+                    if not quote_tool or not company_code:
+                        raise RuntimeError("实时行情缺少可解析公司或可用工具")
+                    return execute_tool(quote_tool, {"symbol": company_code})
+                def search(question, _scope):
+                    return execute_tool("web_search", {"query": question})
+                result = ExecutionExecutor(
+                    market_quote=quote if quote_tool else None,
+                    web_search=search if "web_search" in policy.allowed_tools else None,
+                ).execute(planning.plan, body.question, scope)
+                for step in result.steps:
+                    if step.kind != "answer":
+                        yield {"type": "execution_step", "id": step.id, "kind": step.kind,
+                               "status": step.status, "error": step.error}
+                context = "\\n".join(str(step.value) for step in result.steps if step.value is not None)
+                if context:
+                    plan_history.append({"role": "system", "content": "已由服务端按受限计划获取的来源结果：\\n" + context})
             # 补报上下文必须落在生产线程（模型调用所在线程）：RagQA 的补报处理器
             # 由该线程回调，只能提交需求，不能决定候选或触发下载。
             _supplement_context.current = {"session_id": sid, "payload": None}
             try:
-                kwargs = dict(question=body.question, history=history, filters=body.filters, tools=tools,
+                kwargs = dict(question=body.question, history=plan_history, filters=body.filters, tools=tools,
                               priority_report_id=priority_report_id, scope=scope, run_id=run_id)
                 # M1-compatible injected test adapters may not yet expose the M2
                 # argument; production RagQA always receives the policy.
@@ -2312,6 +2337,12 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 # 客户端已断开（点击「停止」）：终止生成，保留已产出部分
                 if await request.is_disconnected():
                     break
+                if evt.get("type") == "execution_step":
+                    yield _sse("execution_step_completed", {
+                        "id": evt["id"], "kind": evt["kind"],
+                        "status": evt["status"], "error": evt["error"],
+                    })
+                    continue
                 for frame in _relay_rag_event(evt, state, normalizer):
                     yield frame
 
