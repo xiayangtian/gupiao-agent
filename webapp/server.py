@@ -2152,7 +2152,16 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             system=("为智能问答选择来源步骤，只返回 JSON。可用步骤为 "
                     + ",".join(snapshot["available_steps"]) + "；不得输出工具名、参数、公司代码或推理。"),
         )
-        return json.loads(response["content"])
+        content = str(response.get("content") or "").strip()
+        # 兼容不严格遵循 response_format 的提供方：仅提取第一个 JSON 对象，
+        # 后续仍由 ExecutionPlan 的严格 schema 校验，绝不接受自由文本权限。
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        if not content.startswith("{"):
+            start, end = content.find("{"), content.rfind("}")
+            if start >= 0 and end > start:
+                content = content[start:end + 1]
+        return json.loads(content)
     planning = ExecutionPlanner(_plan_json).plan(
         body.question, scope, PlanningCapabilities(available_kinds, 2),
     )
