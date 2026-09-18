@@ -74,6 +74,7 @@ from .chat_evidence import EvidenceNormalizer
 from .chat_facts import FactNormalizer, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
+from .execution_planner import ExecutionPlanner, PlanningCapabilities
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
@@ -2124,12 +2125,38 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     # run_id 提前生成，使范围解析失败也能与本次问答关联检索。
     scope = await asyncio.to_thread(_resolve_scope, body, run_id)
 
-    # Scope 冻结后才分类；策略是工具定义的唯一权限来源。
-    decision = IntentRouter().classify(body.question, scope)
+    # Scope 冻结后先用模型生成受限执行计划；计划失败才回退旧规则。
     tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
-    availability = ToolAvailability.available(*[
-        str(item.get("function", {}).get("name") or "") for item in (tools or [])
-    ])
+    tool_names = [str(item.get("function", {}).get("name") or "") for item in (tools or [])]
+    availability = ToolAvailability.available(*tool_names)
+    available_kinds = set()
+    if rag_qa is not None:
+        available_kinds.add("retrieve")
+    if any(name.startswith("get_realtime") or name.startswith("get_quote") for name in tool_names):
+        available_kinds.add("market_quote")
+    if "web_search" in tool_names:
+        available_kinds.add("web_search")
+    def _plan_json(question, snapshot):
+        response = ai_client.chat(
+            messages=[{"role": "user", "content": question}], temperature=0,
+            max_tokens=400, response_format={"type": "json_object"},
+            system=("为智能问答选择来源步骤，只返回 JSON。可用步骤为 "
+                    + ",".join(snapshot["available_steps"]) + "；不得输出工具名、参数、公司代码或推理。"),
+        )
+        return json.loads(response["content"])
+    planning = ExecutionPlanner(_plan_json).plan(
+        body.question, scope, PlanningCapabilities(available_kinds, 2),
+    )
+    if planning.plan is not None:
+        kinds = {step.kind for step in planning.plan.steps}
+        if "market_quote" in kinds:
+            decision = IntentDecision("realtime_market", "high", "retrieve" in kinds, True, "web_search" in kinds)
+        elif "web_search" in kinds:
+            decision = IntentDecision("event_attribution", "high", "retrieve" in kinds, False, True)
+        else:
+            decision = IntentDecision("report_fact", "high", "retrieve" in kinds)
+    else:
+        decision = IntentRouter().classify(body.question, scope)
     policy = ToolPolicyResolver().resolve(decision, scope, availability)
     # 聚焦报告：解析为 report_id 后提升其检索权重（历史记录跳转场景）
     priority_report_id = None
