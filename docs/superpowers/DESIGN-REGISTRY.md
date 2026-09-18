@@ -17,7 +17,6 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
-| 可信问答 M4 P2：工作台体验与质量运营修补 | 实施中 | — | [主记录](#trusted-chat-m4-p2) |
 
 ## 全部设计
 
@@ -42,7 +41,7 @@
 | <a id="trusted-chat-m2"></a>智能问答可信 Agent M2：受控检索与事实核验 | 同 M1 总体设计 | [M2](plans/2026-09-10-智能问答可信Agent-M2.md) | 已实现 | — | 合并 3c64060；`python3 -m pytest -q`：1008 passed，1 skipped，3 warnings；`git diff --check` 通过 | 2026-09-16 |
 | <a id="trusted-chat-m3"></a>智能问答可信 Agent M3：研究型 Agent | 同 M1 总体设计 | [M3](plans/2026-09-10-智能问答可信Agent-M3.md) | 已实现 | — | 合并 dca62e4；`python3 -m pytest -q`：1049 passed，1 skipped，3 warnings；研究流浏览器回归：4 passed；`git diff --check` 与 CSS 检查通过 | 2026-09-16 |
 | <a id="trusted-chat-m4"></a>智能问答可信 Agent M4：研究工作台与质量运营 | 同 M1 总体设计 | [M4](plans/2026-09-10-智能问答可信Agent-M4.md) | 已实现 | — | 合并 7d89a7e；`python3 -m pytest -q`：1127 passed，2 skipped，3 warnings；工作台浏览器回归 10 passed；`git diff --check` 与 CSS 检查通过 | 2026-09-17 |
-| <a id="trusted-chat-m4-p2"></a>可信问答 M4 P2：工作台体验与质量运营修补 | [设计](specs/2026-09-17-可信问答M4-P2修补-design.md) | [计划](plans/2026-09-17-可信问答M4-P2修补.md) | 实施中 | — | 在 `feat/trusted-chat-m4-p2` 实施中；范围为工作台即时一致性、离线质量观测、Fact ID 与证据身份收敛 | 2026-09-17 |
+| <a id="trusted-chat-m4-p2"></a>可信问答 M4 P2：工作台体验与质量运营修补 | [设计](specs/2026-09-17-可信问答M4-P2修补-design.md) | [计划](plans/2026-09-17-可信问答M4-P2修补.md) | 已实现 | — | 合并 e0dcde6；`python3 -m pytest -q`：1155 passed，2 skipped，3 warnings，1 个既有浏览器环境 ERROR 单独复跑通过；工作台浏览器 12 passed；质量命令、`git diff --check` 与 CSS 检查通过 | 2026-09-17 |
 | <a id="financial-structure-visuals"></a>财务结构可视化 | [设计](specs/2026-09-10-财务结构可视化-design.md) | [计划](plans/2026-09-10-财务结构可视化.md) | 已实现 | — | 合并 1107509；`python3 -m pytest tests/unit/test_visualizations.py -q`：14 passed in 0.12s | 2026-09-14 |
 | <a id="design-registry"></a>方案设计台账 | [设计](specs/2026-09-14-方案设计台账-design.md) | [计划](plans/2026-09-14-方案设计台账.md) | 已实现 | — | 合并 f27056c；`python3 -m pytest tests/unit/test_design_registry.py -q` → 4 passed in 0.11s | 2026-09-14 |
 | <a id="chat-pdf-supplement"></a>智能问答财报补充下载 | [设计](specs/2026-09-14-智能问答财报补充下载-design.md) | [计划](plans/2026-09-14-问答补报.md) | 已实现 | — | 合并 1132bc6；`python3 -m pytest tests/unit -q`：903 passed，3 warnings；`python3 -m pytest tests/browser -q`：26 passed；用户授权后才下载、仅以 `source="pdf"` 索引成功报告恢复回答 | 2026-09-15 |
