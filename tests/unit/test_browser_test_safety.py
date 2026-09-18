@@ -184,6 +184,16 @@ def test_workspace_browser_flow_uses_isolated_deterministic_m4_fixtures():
     assert "_failed_requests" in source
 
 
+def test_workspace_export_browser_test_intercepts_native_downloads():
+    """浏览器验收可验证导出动作，但不得将 fixture 导出文件写入用户下载目录。"""
+    source = WORKSPACE_BROWSER_TEST.read_text(encoding="utf-8")
+
+    assert "def _intercept_native_download" in source
+    assert "HTMLAnchorElement.prototype.click" in source
+    assert "restoreNativeDownload" in source
+    assert "nativeDownloads" in source
+
+
 def test_acceptance_teardown_only_fails_when_the_process_survives_kill():
     """慢关闭不是失败；只有 SIGKILL 之后进程仍存活才允许判为失败。"""
     source = STRUCTURE_BROWSER_TEST.read_text(encoding="utf-8")
