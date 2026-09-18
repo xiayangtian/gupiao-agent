@@ -835,6 +835,11 @@ class AnswerRun:
     # 补充授权摘要：仅候选人可读字段与结果摘要，不含 URL、路径或模型原始参数。
     # 映射字段不参与哈希，AnswerRun 仍可用于集合与字典键。
     supplement: Mapping[str, Any] | None = field(default=None, hash=False)
+    # 用户可复核的执行摘要；禁止模型推理、提示词、原始参数和原始 JSON。
+    execution_plan: Mapping[str, Any] | None = field(default=None, hash=False)
+    execution_steps: tuple[Mapping[str, Any], ...] = field(default_factory=tuple, hash=False)
+    source_summary: Mapping[str, str] = field(default_factory=dict, hash=False)
+    plan_status: str = ""
 
     def __post_init__(self) -> None:
         _string(self.content, "content", required=False)
@@ -879,6 +884,19 @@ class AnswerRun:
             if not isinstance(self.supplement, Mapping):
                 raise ValueError("supplement must be a JSON object or null")
             object.__setattr__(self, "supplement", _normalize_supplement(self.supplement))
+        forbidden = {"reasoning", "chain_of_thought", "prompt", "raw_arguments", "raw_json"}
+        if self.execution_plan is not None:
+            if not isinstance(self.execution_plan, Mapping) or forbidden.intersection(self.execution_plan):
+                raise ValueError("execution_plan must be a safe JSON object")
+            object.__setattr__(self, "execution_plan", dict(self.execution_plan))
+        if not isinstance(self.execution_steps, tuple) or not all(isinstance(item, Mapping) and not forbidden.intersection(item) for item in self.execution_steps):
+            raise ValueError("execution_steps must be safe JSON objects")
+        object.__setattr__(self, "execution_steps", tuple(dict(item) for item in self.execution_steps))
+        if not isinstance(self.source_summary, Mapping) or not all(isinstance(key, str) and isinstance(value, str) for key, value in self.source_summary.items()):
+            raise ValueError("source_summary must be a string mapping")
+        object.__setattr__(self, "source_summary", dict(self.source_summary))
+        if not isinstance(self.plan_status, str):
+            raise ValueError("plan_status must be a string")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -902,6 +920,10 @@ class AnswerRun:
             "model": self.model,
             "legacy_evidence_unavailable": self.legacy_evidence_unavailable,
             "supplement": _supplement_to_json(self.supplement) if self.supplement is not None else None,
+            "execution_plan": dict(self.execution_plan) if self.execution_plan is not None else None,
+            "execution_steps": [dict(item) for item in self.execution_steps],
+            "source_summary": dict(self.source_summary),
+            "plan_status": self.plan_status,
         }
 
     @classmethod
@@ -941,6 +963,10 @@ class AnswerRun:
             model=_string(data.get("model", ""), "model", required=False),
             legacy_evidence_unavailable=legacy,
             supplement=data.get("supplement"),
+            execution_plan=_mapping(data["execution_plan"], "execution_plan") if data.get("execution_plan") is not None else None,
+            execution_steps=tuple(_mapping(item, "execution_steps") for item in data.get("execution_steps", [])),
+            source_summary=_mapping(data.get("source_summary", {}), "source_summary"),
+            plan_status=_string(data.get("plan_status", ""), "plan_status", required=False),
         )
 
 

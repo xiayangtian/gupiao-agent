@@ -3470,6 +3470,8 @@ function appendAssistantRun(sel, message) {
   if (rendering) {
     var scopeHtml = rendering.renderScope(run && run.scope);
     if (scopeHtml) parts.push(scopeHtml);
+    var executionHtml = rendering.renderExecutionSummary(run);
+    if (executionHtml) parts.push(executionHtml);
   }
   var displayed = rendering ? rendering.normalizeAssistantMarkdown(content) : content;
   parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + '</div>');

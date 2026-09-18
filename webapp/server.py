@@ -1764,6 +1764,10 @@ class _RagRunState:
     error_text: str = ""
     empty: bool = False
     supplement_request: Optional[Dict[str, Any]] = None
+    execution_plan: Optional[Dict[str, Any]] = None
+    execution_steps: List[Dict[str, Any]] = field(default_factory=list)
+    source_summary: Dict[str, str] = field(default_factory=dict)
+    plan_status: str = ""
 
 
 def _relay_rag_event(
@@ -1892,6 +1896,10 @@ def _make_answer_run(
         artifacts=tuple(state.evidence_artifacts),
         tool_artifacts=tuple(state.tool_artifacts),
         retrieval_report_ids=tuple(state.retrieval_report_ids),
+        execution_plan=state.execution_plan,
+        execution_steps=tuple(state.execution_steps),
+        source_summary=state.source_summary,
+        plan_status=state.plan_status,
         id=run_id,
         research_run_id=research_run_id,
         research_summary=research_summary,
@@ -2175,6 +2183,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         # 生产者线程执行，经 asyncio.Queue 转发到事件循环 —— 这样多个会话的
         # 流式请求真正并行，一个会话的模型调用不会阻塞其他会话的响应。
         state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
+        state.plan_status = planning.status
+        if planning.plan is not None:
+            state.execution_plan = {"objective": planning.plan.objective, "source_mode": planning.plan.source_mode,
+                                    "steps": [{"id": step.id, "kind": step.kind, "required": step.required} for step in planning.plan.steps],
+                                    "acceptance": list(planning.plan.acceptance)}
         normalizer = EvidenceNormalizer()
         pump = _SseEventPump(asyncio.get_running_loop(), "流式问答", run_id=run_id)
         saved = False
@@ -2211,6 +2224,9 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     market_quote=quote if quote_tool else None,
                     web_search=search if "web_search" in policy.allowed_tools else None,
                 ).execute(planning.plan, body.question, scope)
+                state.source_summary = result.source_summary
+                state.execution_steps = [{"id": step.id, "kind": step.kind, "status": step.status,
+                                          "error": step.error} for step in result.steps]
                 for step in result.steps:
                     if step.kind != "answer":
                         yield {"type": "execution_step", "id": step.id, "kind": step.kind,

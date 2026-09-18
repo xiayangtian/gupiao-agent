@@ -660,10 +660,24 @@
     return html + '</div>';
   }
 
+  function renderExecutionSummary(run) {
+    run = run || {};
+    var plan = run.execution_plan || {};
+    var steps = Array.isArray(plan.steps) ? plan.steps : [];
+    if (!steps.length) return '';
+    var labels = {retrieve: '本地财报', market_quote: '实时行情', web_search: '网页信息', answer: '分析'};
+    var text = steps.map(function (step) { return labels[step.kind] || '来源步骤'; }).join(' → ');
+    var source = run.source_summary || {};
+    var local = source.local_pdf === '未使用' ? '未使用本地财报' : '';
+    return '<div class="chat-execution-summary" aria-label="执行来源">已按计划：'
+      + escapeHtml(text) + (local ? ' · ' + escapeHtml(local) : '') + '</div>';
+  }
+
   return {
     normalizeAssistantMarkdown: normalizeAssistantMarkdown,
     webSourceReferences: webSourceReferences,
     renderScope: renderScope,
+    renderExecutionSummary: renderExecutionSummary,
     renderWorkspaceItem: renderWorkspaceItem,
     renderFactActions: renderFactActions,
     renderResearchQuality: renderResearchQuality,
