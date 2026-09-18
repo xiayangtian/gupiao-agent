@@ -2555,7 +2555,7 @@ class TestChatSupplementApi:
         assert needed["candidates"][0]["label"] == "2025 半年报"
         assert supplement_env["downloader"].calls == []
         assert supplement_env["ingestion"].calls == []
-        assert [name for name, _ in events] == ["session", "scope_resolved", "policy_resolved", "policy_fallback",
+        assert [name for name, _ in events] == ["session", "scope_resolved", "plan_fallback", "policy_resolved", "policy_fallback",
                                                 "run_started", "supplement_needed"]
 
     def test_supplement_handler_is_reachable_from_the_streaming_producer_thread(
