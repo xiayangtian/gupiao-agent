@@ -129,6 +129,35 @@ def _data(session: str, command: str, *args: str) -> dict:
     return _run_browser(session, command, *args).get("data") or {}
 
 
+def _intercept_native_download(session: str) -> None:
+    """Prevent fixture exports from reaching the browser's real download directory."""
+    _eval(session, """
+(() => {
+  const originalClick = HTMLAnchorElement.prototype.click;
+  window.nativeDownloads = [];
+  HTMLAnchorElement.prototype.click = function () {
+    window.nativeDownloads.push({ href: this.href, download: this.download });
+  };
+  window.restoreNativeDownload = function () {
+    HTMLAnchorElement.prototype.click = originalClick;
+    delete window.restoreNativeDownload;
+  };
+  return JSON.stringify(true);
+})()
+""")
+
+
+def _restore_native_download(session: str) -> list[dict]:
+    return _eval(session, """
+(() => {
+  const downloads = window.nativeDownloads || [];
+  if (window.restoreNativeDownload) window.restoreNativeDownload();
+  delete window.nativeDownloads;
+  return JSON.stringify(downloads);
+})()
+""")
+
+
 def _start_observing(session: str) -> None:
     _run_browser(session, "console", "--clear")
     _run_browser(session, "errors", "--clear")
@@ -320,6 +349,7 @@ def test_export_contains_scope_status_and_pdf_page_link(browser_session, actual_
     _start_observing(browser_session)
     rendered = _eval(browser_session, _workspace_script())
     assert any(item["runId"] == "fixture-completed-run" for item in rendered["items"])
+    _intercept_native_download(browser_session)
     exported = _eval(browser_session, """
 (async () => {
   const card = document.querySelector('[data-research-run-id="fixture-completed-run"]');
@@ -333,6 +363,10 @@ def test_export_contains_scope_status_and_pdf_page_link(browser_session, actual_
 })()
 """)
 
+    native_downloads = _restore_native_download(browser_session)
+    assert len(native_downloads) == 1
+    assert native_downloads[0]["download"] == "research-fixture-completed-run.md"
+    assert native_downloads[0]["href"].startswith("blob:")
     assert "导出完成" in exported["status"]
     assert "## 范围" in exported["text"]
     assert "## 运行状态" in exported["text"]
