@@ -19,6 +19,7 @@ import json
 import inspect
 import logging
 import logging.handlers
+from math import isfinite
 import os
 import re
 import threading
@@ -78,7 +79,8 @@ from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
 from .chat_evaluation import FAILURE_CODES
 from .research_export import ExportValidationError, ResearchExporter
-from .research_memory import ResearchMemoryStore, artifact_evidence_ids, run_evidence_ids
+from .evidence_identity import artifact_evidence_ids
+from .research_memory import ResearchMemoryStore, run_evidence_ids
 from .research_workspace import ResearchWorkspaceQuery, ResearchWorkspaceStore
 from .research_agent import ResearchAgent
 from .research_executor import ResearchExecutor
@@ -2826,7 +2828,7 @@ def save_research_fact_memory(
     _owned_or_404(session_id, body.run_id)
     with _research_memory_lock:
         run, _research_run = _owned_run_inside_memory_lock(session_id, body.run_id)
-        facts = [fact for fact in run.facts if body.fact_id in fact.evidence_ids]
+        facts = [fact for fact in run.facts if fact.id and body.fact_id == fact.id]
         if len(facts) != 1:
             raise HTTPException(422, "事实标识不存在或不唯一")
         try:
@@ -2887,6 +2889,22 @@ _QUALITY_METRIC_FIELDS = (
     "citation_coverage", "scope_precision", "page_link_pass_rate", "tool_success_rate",
     "stop_recovery_pass_rate", "p95_stage_duration",
 )
+_QUALITY_GENERATED_AT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def _normalized_quality_generated_at(value: object) -> str | None:
+    """Return a canonical UTC timestamp only for timezone-aware ISO-8601 input."""
+    if not isinstance(value, str) or _QUALITY_GENERATED_AT_RE.fullmatch(value) is None:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc).isoformat()
 
 
 def _safe_failure_codes(value: object) -> Dict[str, int] | None:
@@ -2910,29 +2928,57 @@ def _safe_failure_codes(value: object) -> Dict[str, int] | None:
     return {code: counts[code] for code in sorted(counts)}
 
 
+def _safe_quality_suite(value: object, failure_code_field: str) -> Dict[str, Any] | None:
+    """Read one safe health/probe aggregate without retaining arbitrary sidecar data."""
+    if not isinstance(value, Mapping):
+        return None
+    case_count = value.get("case_count")
+    if (
+        not isinstance(value.get("passed"), bool)
+        or isinstance(case_count, bool)
+        or not isinstance(case_count, int)
+        or case_count < 0
+    ):
+        return None
+    metrics: Dict[str, float | int] = {}
+    for name in _QUALITY_METRIC_FIELDS:
+        metric = value.get(name)
+        if isinstance(metric, bool) or not isinstance(metric, (int, float)) or not isfinite(metric) or metric < 0:
+            return None
+        metrics[name] = metric
+    failure_codes = _safe_failure_codes(value.get(failure_code_field))
+    if failure_codes is None:
+        return None
+    return {
+        "passed": value["passed"],
+        "case_count": case_count,
+        **metrics,
+        failure_code_field: failure_codes,
+    }
+
+
 def _load_precomputed_quality_summary() -> Dict[str, Any]:
-    """Read only safe aggregate fields; this endpoint never executes evaluation."""
+    """Read only a version-2 safe aggregate; this endpoint never executes evaluation."""
     try:
         with open(QUALITY_SUMMARY_PATH, encoding="utf-8") as source:
             raw = json.load(source)
     except (OSError, json.JSONDecodeError):
         return {"available": False}
-    if not isinstance(raw, Mapping):
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != 2:
         return {"available": False}
-    case_count = raw.get("case_count")
-    if not isinstance(raw.get("passed"), bool) or isinstance(case_count, bool) or not isinstance(case_count, int):
+    generated_at = _normalized_quality_generated_at(raw.get("generated_at"))
+    if generated_at is None:
         return {"available": False}
-    if any(isinstance(raw.get(name), bool) or not isinstance(raw.get(name), (int, float)) for name in _QUALITY_METRIC_FIELDS):
-        return {"available": False}
-    failure_codes = _safe_failure_codes(raw.get("failure_codes"))
-    if failure_codes is None:
+    health = _safe_quality_suite(raw.get("health"), "failure_codes")
+    probe = _safe_quality_suite(raw.get("probe"), "detected_failure_codes")
+    if health is None or probe is None:
         return {"available": False}
     return {
         "available": True,
-        "passed": raw["passed"],
-        "case_count": case_count,
-        "failure_codes": failure_codes,
-        **{name: raw[name] for name in _QUALITY_METRIC_FIELDS},
+        "schema_version": 2,
+        "generated_at": generated_at,
+        "health": health,
+        "probe": probe,
     }
 
 

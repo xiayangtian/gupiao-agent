@@ -485,14 +485,40 @@
   function renderFactActions(fact, run) {
     if (!fact || !run || fact.verification !== 'verified' || fact.source_type !== 'pdf'
       || (run.status !== 'completed' && run.status !== 'partial')) return '';
+    var factId = String(fact.id || '').trim();
     var evidenceIds = Array.isArray(fact.evidence_ids) ? fact.evidence_ids.filter(Boolean) : [];
     var report = run.verification_report || {};
     var supported = Array.isArray(report.supported_fact_ids) ? report.supported_fact_ids : [];
-    if (!evidenceIds.length || !run.id || (report.status !== 'passed' && report.status !== 'partial')
+    if (!factId || !evidenceIds.length || !run.id || (report.status !== 'passed' && report.status !== 'partial')
       || !evidenceIds.every(function (id) { return supported.indexOf(id) >= 0; })) return '';
     return '<button type="button" class="chat-run-action" data-research-action="save-memory"'
-      + ' data-research-memory-kind="fact" data-research-id="' + escapeHtml(String(evidenceIds[0])) + '"'
+      + ' data-research-memory-kind="fact" data-research-id="' + escapeHtml(factId) + '"'
       + ' data-research-run-id="' + escapeHtml(String(run.id)) + '">保存到研究记忆</button>';
+  }
+
+  // Only safe aggregate booleans are rendered.  The API deliberately omits case,
+  // prompt, and failure details, and this renderer must never infer or expose them.
+  function renderResearchQuality(summary) {
+    var refreshCommand = '<code>' + escapeHtml(
+      'python3 scripts/run_chat_evaluation.py --fixture tests/fixtures/chat_eval_cases.json --output data/research_quality_summary.json'
+    ) + '</code>';
+    if (!summary || summary.available !== true
+      || !summary.health || typeof summary.health.passed !== 'boolean'
+      || !summary.probe || typeof summary.probe.passed !== 'boolean') {
+      return '<p class="research-quality-unavailable"><span aria-hidden="true">○</span> '
+        + '尚无本地质量摘要。可运行 ' + refreshCommand + ' 生成。</p>';
+    }
+    function suite(label, passed) {
+      return '<p class="research-quality-status research-quality-' + (passed ? 'passed' : 'failed') + '">'
+        + '<span aria-hidden="true">' + (passed ? '✓' : '×') + '</span> '
+        + escapeHtml(label) + '：' + (passed ? '通过' : '未通过') + '</p>';
+    }
+    return '<div class="research-quality-summary">'
+      + suite('健康评测', summary.health.passed)
+      + suite('负向探针', summary.probe.passed)
+      + '<p class="research-quality-generated-at">生成时间：'
+      + escapeHtml(String(summary.generated_at || '未记录')) + '</p>'
+      + '<p class="research-quality-refresh">可运行 ' + refreshCommand + ' 刷新。</p></div>';
   }
 
   function renderArtifactActions(run) {
@@ -640,6 +666,7 @@
     renderScope: renderScope,
     renderWorkspaceItem: renderWorkspaceItem,
     renderFactActions: renderFactActions,
+    renderResearchQuality: renderResearchQuality,
     renderArtifactActions: renderArtifactActions,
     renderDecisionAction: renderDecisionAction,
     renderMemoryEntry: renderMemoryEntry,

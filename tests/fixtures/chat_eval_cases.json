@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cases": [
     {
       "id": "report-number",
@@ -101,7 +101,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "cross-period",
@@ -237,7 +239,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "local-industry",
@@ -378,7 +382,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "realtime-market",
@@ -471,7 +477,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "news-attribution",
@@ -513,7 +521,25 @@
           },
           "fallback_reason": ""
         },
-        "facts": [],
+        "facts": [
+          {
+            "metric": "新闻归因指标",
+            "value": 1.0,
+            "unit": "次",
+            "period": "2026-09-16",
+            "period_kind": "point_in_time",
+            "entity_scope": "company",
+            "company_code": "601288",
+            "source_type": "web",
+            "evidence_ids": [
+              "https://example.com/news"
+            ],
+            "verification": "unavailable",
+            "as_of": "",
+            "original_value": null,
+            "original_unit": ""
+          }
+        ],
         "conflicts": [],
         "intent_decision": null,
         "tool_policy": null,
@@ -549,7 +575,11 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "probe",
+      "expected_failure_codes": [
+        "external_fact_missing_as_of"
+      ]
     },
     {
       "id": "scope-leak",
@@ -664,7 +694,11 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "probe",
+      "expected_failure_codes": [
+        "scope_leak"
+      ]
     },
     {
       "id": "pdf-without-page",
@@ -722,7 +756,7 @@
             "pdf_filename": "601288-2026.pdf",
             "page": 40,
             "snippet": "本地 PDF 文件缺失",
-            "pdf_url": null,
+            "pdf_url": "/api/history-pdf/601288-2026.pdf?jump=0#page=41",
             "availability": "missing_file",
             "url": "",
             "title": "",
@@ -742,7 +776,11 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "probe",
+      "expected_failure_codes": [
+        "invalid_pdf_page_url"
+      ]
     },
     {
       "id": "tool-failure",
@@ -815,7 +853,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "fact-conflict",
@@ -984,7 +1024,9 @@
         "legacy_evidence_unavailable": false,
         "supplement": null
       },
-      "research_run": null
+      "research_run": null,
+      "suite": "health",
+      "expected_failure_codes": []
     },
     {
       "id": "stop-recovery",
@@ -1002,10 +1044,10 @@
         "601288:2026-06-30:semi_annual"
       ],
       "forbidden_report_ids": [],
-      "expected_status": "stopped",
+      "expected_status": "completed",
       "answer_run": {
         "content": "fixture-stop-recovery 固定回答",
-        "status": "stopped",
+        "status": "completed",
         "scope": {
           "mode": "company_only",
           "companies": [
@@ -1030,7 +1072,13 @@
         "conflicts": [],
         "intent_decision": null,
         "tool_policy": null,
-        "verification_report": null,
+        "verification_report": {
+          "status": "passed",
+          "issues": [],
+          "supported_fact_ids": [
+            "601288:2026-06-30:semi_annual#p40"
+          ]
+        },
         "artifacts": [
           {
             "source": "pdf",
@@ -1116,7 +1164,11 @@
         "started_at": "2026-09-16T09:00:00+08:00",
         "finished_at": "2026-09-16T09:01:30+08:00",
         "resume_from_step_id": "retrieve"
-      }
+      },
+      "suite": "probe",
+      "expected_failure_codes": [
+        "stopped_run_rendered_complete"
+      ]
     }
   ]
 }

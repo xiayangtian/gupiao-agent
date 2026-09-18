@@ -6,15 +6,32 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.run_chat_evaluation import main as quality_command_main
 from webapp.browser_preflight import find_usable_agent_browser
 
 
 ROOT = Path(__file__).resolve().parents[2]
+FIXTURE = ROOT / "tests" / "fixtures" / "chat_eval_cases.json"
 BROWSER_TEST = ROOT / "tests" / "browser" / "test_analysis_dialog_layout.py"
 STRUCTURE_BROWSER_TEST = ROOT / "tests" / "browser" / "test_financial_structure_visuals.py"
 CHAT_TRUST_BROWSER_TEST = ROOT / "tests" / "browser" / "test_chat_trust_flow.py"
 WORKSPACE_BROWSER_TEST = ROOT / "tests" / "browser" / "test_research_workspace_flow.py"
 STRUCTURE_LAUNCHER = ROOT / "tests" / "browser" / "visual_test_app.py"
+
+
+def test_quality_command_writes_only_requested_temp_output(tmp_path):
+    """Explicit quality replay must not create or replace repository sidecars."""
+    output = tmp_path / "research_quality_summary.json"
+    repository_output = ROOT / "data" / "research_quality_summary.json"
+    before = repository_output.read_bytes() if repository_output.exists() else None
+
+    assert quality_command_main(["--fixture", str(FIXTURE), "--output", str(output)]) == 0
+
+    assert output.exists()
+    if before is None:
+        assert not repository_output.exists()
+    else:
+        assert repository_output.read_bytes() == before
 
 
 def test_dialog_layout_browser_probe_is_not_collected_as_a_unit_test():

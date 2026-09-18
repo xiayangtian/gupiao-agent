@@ -7,22 +7,16 @@ synthesizes a scope, evidence, or execution state that was not persisted.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import os
-import re
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 from webapp.chat_models import AnswerRun, EvidenceArtifact, Fact
+from webapp.evidence_identity import validated_pdf_url
 from webapp.research_models import ResearchRun
 
 
 class ExportValidationError(ValueError):
     """Raised when an immutable run cannot support a reviewable export."""
-
-
-_PDF_URL_RE = re.compile(
-    r"^/api/history-pdf/([^/?#]+)\?jump=(0|[1-9]\d*)#page=([1-9]\d*)$"
-)
 
 
 def _exported_at() -> str:
@@ -42,32 +36,6 @@ def _markdown_text(value: object) -> str:
         .replace("<", "\\<")
         .replace(">", "\\>")
     )
-
-
-def _validated_pdf_url(artifact: EvidenceArtifact) -> str | None:
-    """Accept only the exact local PDF-page URL shape emitted by M1.
-
-    ``EvidenceArtifact`` intentionally preserves unavailable/missing-file evidence,
-    and its ``pdf_url`` field is only a string at the model boundary.  Rechecking
-    the M1 local route shape before interpolating it into Markdown avoids turning a
-    historic or malformed artifact value into an export-time link.
-    """
-    if artifact.source != "pdf" or not artifact.pdf_url or not isinstance(artifact.page, int):
-        return None
-    match = _PDF_URL_RE.fullmatch(artifact.pdf_url)
-    if match is None or int(match.group(3)) != artifact.page:
-        return None
-    filename = unquote(match.group(1))
-    if (
-        not filename
-        or filename != os.path.basename(filename)
-        or "/" in filename
-        or "\\" in filename
-        or not filename.lower().endswith(".pdf")
-        or any(ord(char) < 32 for char in filename)
-    ):
-        return None
-    return artifact.pdf_url
 
 
 def _validated_web_url(artifact: EvidenceArtifact) -> str | None:
@@ -203,7 +171,7 @@ class ResearchExporter:
         for artifact in artifacts:
             if artifact.source == "pdf":
                 label = f"PDF 第 {artifact.page} 页"
-                url = _validated_pdf_url(artifact)
+                url = validated_pdf_url(artifact)
                 reference = f"[{label}]({url})" if url else f"{label}（链接不可用）"
                 result.append(
                     f"- {reference}：{_markdown_text(artifact.report_id)}；"

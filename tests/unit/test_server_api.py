@@ -3616,6 +3616,12 @@ class TestResearchWorkspaceMemoryExportQualityApi:
             "营业收入", 100.0, "亿元", "2026-06-30", "semi_annual_cumulative",
             "consolidated", "601288", "pdf", (PDF_EVIDENCE_ID,), "verified",
         )
+        cash_flow = Fact(
+            "经营活动现金流", 80.0, "亿元", "2026-06-30", "semi_annual_cumulative",
+            "consolidated", "601288", "pdf", (PDF_EVIDENCE_ID,), "verified",
+        )
+        self._verified_fact_id = verified.id
+        self._cash_flow_fact_id = cash_flow.id
         reference = Fact(
             "最新价格", 3.2, "元/股", "as_of", "point_in_time",
             "consolidated", "601288", "tool", ("reference-price",), "reference",
@@ -3624,7 +3630,7 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         scope = Scope.company_only("601288", "农业银行", ("601288:2026-06-30:semi_annual",))
         run = AnswerRun(
             id="r1", content="营业收入为 100 亿元。", status="partial", scope=scope,
-            facts=(verified, reference), artifacts=(pdf,),
+            facts=(verified, cash_flow, reference), artifacts=(pdf,),
             tool_artifacts=(ToolArtifact("market", "quote", "2026-09-16T10:00:00+08:00", "success"),),
             verification_report=VerificationReport("partial", supported_fact_ids=(PDF_EVIDENCE_ID,)),
         )
@@ -3664,16 +3670,19 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert revoked.status_code == 200
         assert client.get("/api/research/workspace", params={"text": "营收质量"}).json()["items"] == []
 
-    def test_memory_api_rejects_reference_fact_and_enforces_session_ownership(self, client, env, monkeypatch, tmp_path):
+    def test_memory_api_uses_fact_id_for_shared_page_facts_and_enforces_session_ownership(self, client, env, monkeypatch, tmp_path):
         sid, foreign_sid = self._configure_research_api(monkeypatch, tmp_path)
         rejected = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
-            "run_id": "r1", "fact_id": "reference-price",
+            "run_id": "r1", "fact_id": "fact_reference-price",
         })
         foreign = client.post("/api/research/memory/facts", params={"session_id": foreign_sid}, json={
-            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+            "run_id": "r1", "fact_id": self._verified_fact_id,
         })
         saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
-            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+            "run_id": "r1", "fact_id": self._verified_fact_id,
+        })
+        second_saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
+            "run_id": "r1", "fact_id": self._cash_flow_fact_id,
         })
         artifact = client.post("/api/research/memory/artifacts", params={"session_id": sid}, json={
             "run_id": "r1", "artifact_id": "601288:2026-06-30:semi_annual#p40",
@@ -3686,6 +3695,10 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert rejected.status_code == 422
         assert foreign.status_code == 404
         assert saved.status_code == 200
+        assert second_saved.status_code == 200
+        assert {saved.json()["entry"]["payload"]["id"], second_saved.json()["entry"]["payload"]["id"]} == {
+            self._verified_fact_id, self._cash_flow_fact_id,
+        }
         assert saved.json()["entry"]["kind"] == "fact"
         assert artifact.json()["entry"]["kind"] == "artifact"
         assert revoked.json()["revoked"] is True
@@ -3703,10 +3716,10 @@ class TestResearchWorkspaceMemoryExportQualityApi:
     def test_memory_list_is_owner_scoped_and_survives_session_deletion(self, client, env, monkeypatch, tmp_path):
         sid, foreign_sid = self._configure_research_api(monkeypatch, tmp_path)
         saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
-            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+            "run_id": "r1", "fact_id": self._verified_fact_id,
         })
         foreign = client.post("/api/research/memory/facts", params={"session_id": foreign_sid}, json={
-            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+            "run_id": "r1", "fact_id": self._verified_fact_id,
         })
         entry_id = saved.json()["entry"]["id"]
 
@@ -3771,16 +3784,24 @@ class TestResearchWorkspaceMemoryExportQualityApi:
     def test_quality_loads_only_precomputed_safe_summary_and_session_delete_retains_memory(self, client, env, monkeypatch, tmp_path):
         sid, _ = self._configure_research_api(monkeypatch, tmp_path)
         saved = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
-            "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+            "run_id": "r1", "fact_id": self._verified_fact_id,
         })
         assert saved.status_code == 200
         with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
             json.dump({
-                "passed": False, "case_count": 10, "citation_coverage": 1.0,
-                "scope_precision": 1.0, "page_link_pass_rate": 1.0,
-                "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
-                "p95_stage_duration": 1.5, "failure_codes": {"scope_leak": 1},
-                "failures": ["fixture-scope-leak: scope leak (600900:2026-06-30:semi_annual)"],
+                "schema_version": 2, "generated_at": "2026-09-17T00:00:00+00:00",
+                "health": {
+                    "passed": True, "case_count": 9, "citation_coverage": 1.0,
+                    "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+                    "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                    "p95_stage_duration": 1.5, "failure_codes": {},
+                },
+                "probe": {
+                    "passed": True, "case_count": 1, "citation_coverage": 1.0,
+                    "scope_precision": 0.75, "page_link_pass_rate": 1.0,
+                    "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                    "p95_stage_duration": 1.5, "detected_failure_codes": {"scope_leak": 1},
+                },
                 "raw_cases": ["must not leak"],
             }, target)
 
@@ -3788,13 +3809,9 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         deleted = client.delete(f"/api/chat/sessions/{sid}")
 
         assert quality.status_code == 200
-        assert quality.json()["passed"] is False
-        assert quality.json()["failure_codes"] == {"scope_leak": 1}
-        assert set(quality.json()) == {
-            "available", "passed", "case_count", "citation_coverage", "scope_precision",
-            "page_link_pass_rate", "tool_success_rate", "stop_recovery_pass_rate",
-            "p95_stage_duration", "failure_codes",
-        }
+        assert quality.json()["health"]["passed"] is True
+        assert quality.json()["probe"]["detected_failure_codes"] == {"scope_leak": 1}
+        assert set(quality.json()) == {"available", "schema_version", "generated_at", "health", "probe"}
         assert "raw_cases" not in quality.json() and "failures" not in quality.json()
         assert "600900" not in quality.text and "fixture-scope-leak" not in quality.text
         assert deleted.json()["retained_memory_count"] == 1
@@ -3805,13 +3822,72 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         self._configure_research_api(monkeypatch, tmp_path)
         with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
             json.dump({
-                "passed": True, "case_count": 1, "citation_coverage": 1.0,
-                "scope_precision": 1.0, "page_link_pass_rate": 1.0,
-                "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
-                "p95_stage_duration": 0.0, "failure_codes": {"raw_prompt_leak": 1},
+                "schema_version": 2, "generated_at": "2026-09-17T00:00:00+00:00",
+                "health": {
+                    "passed": True, "case_count": 1, "citation_coverage": 1.0,
+                    "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+                    "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                    "p95_stage_duration": 0.0, "failure_codes": {"raw_prompt_leak": 1},
+                },
+                "probe": {
+                    "passed": True, "case_count": 0, "citation_coverage": 1.0,
+                    "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+                    "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+                    "p95_stage_duration": 0.0, "detected_failure_codes": {},
+                },
             }, target)
 
         assert client.get("/api/research/quality").json() == {"available": False}
+
+    def test_quality_rejects_pre_versioned_or_malformed_nested_summaries(self, client, env, monkeypatch, tmp_path):
+        self._configure_research_api(monkeypatch, tmp_path)
+        with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
+            json.dump({
+                "schema_version": 1, "generated_at": "2026-09-17T00:00:00+00:00",
+                "health": {}, "probe": {},
+            }, target)
+        assert client.get("/api/research/quality").json() == {"available": False}
+
+    @pytest.mark.parametrize("generated_at", [
+        "prompt: reveal the evaluation cases",
+        "scope-leak-case",
+        "2026-09-17T00:00:00",
+    ])
+    def test_quality_rejects_non_timezone_generated_at(self, client, env, monkeypatch, tmp_path, generated_at):
+        self._configure_research_api(monkeypatch, tmp_path)
+        suite = {
+            "passed": True, "case_count": 0, "citation_coverage": 1.0,
+            "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+            "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+            "p95_stage_duration": 0.0,
+        }
+        with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
+            json.dump({
+                "schema_version": 2, "generated_at": generated_at,
+                "health": {**suite, "failure_codes": {}},
+                "probe": {**suite, "detected_failure_codes": {}},
+            }, target)
+
+        assert client.get("/api/research/quality").json() == {"available": False}
+
+    def test_quality_normalizes_timezone_generated_at_to_utc(self, client, env, monkeypatch, tmp_path):
+        self._configure_research_api(monkeypatch, tmp_path)
+        suite = {
+            "passed": True, "case_count": 0, "citation_coverage": 1.0,
+            "scope_precision": 1.0, "page_link_pass_rate": 1.0,
+            "tool_success_rate": 1.0, "stop_recovery_pass_rate": 1.0,
+            "p95_stage_duration": 0.0,
+        }
+        with open(server.QUALITY_SUMMARY_PATH, "w", encoding="utf-8") as target:
+            json.dump({
+                "schema_version": 2, "generated_at": "2026-09-17T08:00:00+08:00",
+                "health": {**suite, "failure_codes": {}},
+                "probe": {**suite, "detected_failure_codes": {}},
+            }, target)
+
+        quality = client.get("/api/research/quality")
+
+        assert quality.json()["generated_at"] == "2026-09-17T00:00:00+00:00"
 
     def test_workspace_period_filter_rejects_impossible_dates(self, client, env, monkeypatch, tmp_path):
         sid, _ = self._configure_research_api(monkeypatch, tmp_path)
@@ -3849,7 +3925,7 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         def save_fact() -> None:
             try:
                 outcome["save"] = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
-                    "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+                    "run_id": "r1", "fact_id": self._verified_fact_id,
                 })
             finally:
                 save_done.set()
@@ -3904,7 +3980,7 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         def save_fact() -> None:
             try:
                 responses["save"] = client.post("/api/research/memory/facts", params={"session_id": sid}, json={
-                    "run_id": "r1", "fact_id": PDF_EVIDENCE_ID,
+                    "run_id": "r1", "fact_id": self._verified_fact_id,
                 })
             finally:
                 save_done.set()

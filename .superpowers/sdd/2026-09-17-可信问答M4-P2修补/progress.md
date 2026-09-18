@@ -1,0 +1,53 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-09-17-可信问答M4-P2修补.md
+
+## Preflight
+
+| Tasks / interface | Producer → consumer | Finding / ruling |
+| --- | --- | --- |
+| T1 → T2/T4 | Fact.id and evidence identity → memory/API/UI consumers | Compatible; old Fact must read with empty ID and fail closed only for memory save. |
+| T2 → T3/T4 | Shared evidence identity and Fact-ID memory API → evaluation/UI | Compatible; server/API must preserve owner checks. |
+| T3 → T4/T5 | Health/probe safe summary → API/UI/validation | Compatible; command is explicit and atomic, never runs in a request. |
+| T4 → T5 | UI refresh and quality status → browser QA | Compatible; refresh must retain filters and generation guard. |
+| T5 | Full validation/documentation | Compatible; registry stays 实施中 until merged. |
+
+Ruling: Execute in plan order because Fact ID/evidence identity is the compatibility boundary for memory, evaluator, API and UI — cost if wrong: downstream changes must be revised before merge.
+
+Task 1: complete (commits bfea3f3..95487aa, producer review clean for Task 1 scope)
+Task 1: Ruling: reviewer P1 that memory/export/evaluator still use legacy evidence helpers and old Fact remains savable is plan-mandated Task 2 work, not a Task 1 defect — Task 2 must migrate all consumers and add old-Fact/unsafe-URL integration coverage; cost if wrong: an uncompleted Task 2 would leave unsafe saves enabled and block merge.
+Task 1: minor deferred: add an explicit full supplied `fact_` ID round-trip test in Task 2; cost if wrong: preservation behavior could regress without direct coverage.
+
+## Task ledger
+
+| Task | Status | Commit | Validation | Notes |
+| --- | --- | --- | --- | --- |
+| Task 1 — 稳定 Fact ID 与统一证据身份 | 已完成 | `95487aa` | RED: focused collection failed as expected (`ModuleNotFoundError`); GREEN: `36 passed`; related regression: `44 passed`; `git diff --check` passed | 新 Fact 生成 `fact_` ID；旧序列化 Fact 保持空 ID。完整记录见 `task-1-report.md`。 |
+| Task 2 — 使用 Fact ID 保存研究记忆并迁移后端消费者 | 已完成 | `HEAD` | RED: `2 failed, 1 passed`（legacy Fact 未拒绝、Fact ID API 查找失败）；GREEN: focused `10 passed`; Task 2 regression `210 passed`; related contracts `246 passed`; `git diff --check` passed | memory 拒绝空 ID legacy Fact；API 精确匹配 Fact ID；memory/export/evaluator 复用 evidence_identity；覆盖 unsafe PDF URL、同页多 Fact 与完整 supplied `fact_` ID round-trip。完整记录见 `task-2-report.md`。 |
+| Task 3 — 健康/负向评测分组与显式质量摘要命令 | 已完成 | `HEAD` | 初始：RED 缺失 CLI；GREEN focused `5 passed`; 回归 `189 passed, 3 warnings`。Fix round 1：RED `6 failed`；GREEN focused `6 passed, 187 deselected, 3 warnings`；回归 `193 passed, 3 warnings`；显式质量命令与 `git diff --check` 通过 | fixture v2 强制 health/probe 与预期失败码；Fix round 1 将 scope/invalid-PDF/external-missing-as_of/stopped-rendered-complete 四个固定错误归入 probe，四个检测码各为 1；API fail-closed 严格读取带时区 ISO `generated_at` 并归一 UTC；字符串 schema version 被拒绝。完整记录见 `task-3-report.md`。 |
+| Task 4 — 工作台即时一致性与质量观测界面 | 已完成 | `HEAD` | 初始 RED/GREEN、JS rendering `28 passed`、browser workbench `12 passed`、静态检查通过；Fix round 1：RED `2 failed, 27 deselected`；GREEN focused `2 passed, 27 deselected`；JS `29 passed`；browser `12 passed`；Fix round 2：RED `2 failed, 28 deselected`；GREEN focused `2 passed, 28 deselected`；JS `30 passed`；browser `12 passed`；精确本地命令、`node --check` 与 `git diff --check` 通过 | 工作台打开时只读质量摘要；保存/撤销后复用当前筛选和 generation 保护刷新；旧 Fact 无保存动作。Fix round 1：质量摘要安全显示 `generated_at` 并始终给出本地刷新命令；工作台刷新同时要求 `#research-workspace` 与 `#page-chat` 可见。Fix round 2：质量命令含 fixture/output 完整参数；记忆面板与列表共享 chat-page + panel 可见性谓词。完整记录见 `task-4-report.md`。 |
+| Task 5 — 全链路验收、文档与回归 | 已完成（未合并） | `25276a1` | 命令隔离 `1 passed, 10 deselected`；全量 `1156 passed, 2 skipped, 3 warnings`；API `169 passed, 3 warnings`；CSS、JS syntax、`git diff --check` 通过；显式质量命令 health/probe 均通过；三视口 browser `12 passed` | 文档裁定：不得在未合入分支修改 `docs/FEATURE-CATALOG.md` 或 README，即使标注 pending 也不例外。Ruling：AGENTS.md 明确规定功能目录/README 仅记录已合入 main 的能力，优先于计划 Task 5 的笼统文档要求；本 Task 只在 M4 P2 completion report 与 progress ledger 记录准确的命令、验证、用户可见变化和“合入后必须同步 FEATURE-CATALOG/README”的待办。合入 main 后由协调方用实际 merge SHA 和最终验证结果更新这两个文档。代价：分支阶段的 catalog/README 暂不展示新命令，避免未合入功能被当作已发布。详见 `task-5-report.md`。 |
+
+## Task 2 Fix round 1（审查 P1）
+
+- 新增共享 web 身份 monkeypatch 回归后，确认旧的 evaluator 本地 URL 拼接会失败（`external_facts_missing_source == 1`）。
+- `_external_evidence_ids()` 现为每个 web artifact 调用 `artifact_evidence_ids()`；仅 evaluator 自有 tool identity 保留本地拼接。
+- 验证：`python3 -m pytest tests/unit/test_research_memory.py tests/unit/test_research_export.py tests/unit/test_chat_evaluation.py tests/unit/test_server_api.py -q` → `211 passed, 3 warnings`；`git diff --check` 通过。
+- 范围：未实施 Task 3--5，未推送或合并；详细记录见 `task-2-report.md`。
+
+## Task 3 Fix round 1（审查 P1/P2）
+
+- 已修正 fixture 分组、quality API 时间戳 fail-closed/UTC 归一，以及 fixture schema version 的类型拒绝；完整 RED/GREEN、CLI 和 diff evidence 见 `task-3-report.md`。
+- 范围：未实施 Task 4--5，未推送或合并。
+
+## Task 4 Fix round 1（计划/设计约束 P2）
+
+- 可用质量摘要安全转义显示 `generated_at`，且可用/不可用状态均显示精确本地刷新命令；health/probe 以外的失败原文不参与渲染。
+- `refreshResearchWorkspaceIfOpen()` 仅在 `#research-workspace` 与 `#page-chat` 均可见时加载，离开聊天页的异步保存/撤销不更新不可见面板。
+- 验证：RED `2 failed, 27 deselected`；GREEN focused `2 passed, 27 deselected`；`tests/unit/test_chat_rendering_js.py` `29 passed`；`tests/browser/test_research_workspace_flow.py` `12 passed`；Node syntax 和 `git diff --check` 通过。
+- 范围：未实施 Task 5，未推送或合并；全局任务台账工具不可用，本地 SDD 台账已更新。
+
+## Task 4 Fix round 2（审查 P1）— 已完成（未合并）
+
+- 质量 UI 在可用/不可用状态均经 `escapeHtml` 显示可直接执行的完整本地命令：`python3 scripts/run_chat_evaluation.py --fixture tests/fixtures/chat_eval_cases.json --output data/research_quality_summary.json`。
+- `refreshResearchWorkspaceIfOpen()` 与 `refreshResearchMemoryPanel()` 复用 `researchWorkspacePanelIsVisible()`；该谓词同时要求 `#page-chat` 和 `#research-workspace` 可见，因此保存决策或撤销完成后离开聊天页不会 fetch 或改写隐藏记忆面板。
+- 验证：RED `2 failed, 28 deselected`；GREEN focused `2 passed, 28 deselected`；JS 回归 `30 passed`；浏览器工作台回归 `12 passed`；精确本地命令成功写入摘要；Node syntax 与 `git diff --check` 通过。完整记录见 `task-4-report.md`。
+- 范围：未实施 Task 5，未推送或合并；全局任务台账工具不可用，本地 SDD 台账已更新。

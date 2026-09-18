@@ -2243,6 +2243,12 @@ input, select, button { font-family: inherit; font-size: inherit; }
 .research-filter-actions, .research-workspace-actions, .research-memory-actions, .research-decision-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
 .research-filter-actions { margin-top: var(--space-sm); }
 .research-workspace-status { min-height: 20px; margin-top: var(--space-sm); color: var(--text-secondary); font-size: 12px; }
+.research-quality-panel { display: grid; gap: 6px; margin-top: var(--space-sm); padding: var(--space-sm); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.research-quality-panel h4 { margin: 0; font-size: 14px; }
+.research-quality-status { min-height: 20px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.research-quality-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px var(--space-sm); }
+.research-quality-status, .research-quality-unavailable { margin: 0; overflow-wrap: anywhere; }
+.research-quality-status span, .research-quality-unavailable span { display: inline-block; min-width: 1em; font-weight: 700; }
 .research-workspace-list { display: grid; gap: var(--space-sm); }
 .research-workspace-item { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-md); padding: var(--space-sm); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
 .research-workspace-item-main { min-width: 0; }
@@ -2831,7 +2837,7 @@ details.citation-card .citation-snippet { margin-top: 6px; }
   .research-workspace { width: 100%; box-sizing: border-box; max-height: none; }
   .research-workspace-head { gap: var(--space-sm); }
   .research-workspace-head p { overflow-wrap: anywhere; }
-  .research-filter-grid { grid-template-columns: 1fr; }
+  .research-filter-grid, .research-quality-summary { grid-template-columns: 1fr; }
   .research-filter-actions, .research-workspace-actions, .research-decision-actions { flex-direction: column; }
   .research-filter-actions .btn, .research-workspace-actions .btn, .research-decision-actions .btn { width: 100%; }
   .research-memory-row { align-items: flex-start; }

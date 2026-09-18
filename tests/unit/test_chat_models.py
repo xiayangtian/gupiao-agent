@@ -272,6 +272,42 @@ def test_answer_run_without_supplement_summary_still_reads():
     assert run.supplement is None
 
 
+def test_new_fact_gets_stable_id_and_legacy_payload_reads_without_one():
+    fact = Fact(
+        metric="营业收入", value=100, unit="亿元", period="2026-06-30",
+        period_kind="semi_annual_cumulative", entity_scope="consolidated",
+        company_code="601288", source_type="pdf", evidence_ids=("r#p40",),
+        verification="verified",
+    )
+
+    assert fact.id.startswith("fact_")
+    assert Fact.from_dict({key: value for key, value in fact.to_dict().items() if key != "id"}).id == ""
+
+
+def test_fact_rejects_supplied_non_stable_id():
+    with pytest.raises(ValueError, match="fact_"):
+        Fact(
+            metric="营业收入", value=100, unit="亿元", period="2026-06-30",
+            period_kind="semi_annual_cumulative", entity_scope="consolidated",
+            company_code="601288", source_type="pdf", evidence_ids=("r#p40",),
+            id="legacy-1",
+        )
+
+
+def test_two_facts_on_the_same_pdf_page_get_distinct_ids():
+    common = {
+        "unit": "亿元", "period": "2026-06-30",
+        "period_kind": "semi_annual_cumulative", "entity_scope": "consolidated",
+        "company_code": "601288", "source_type": "pdf", "evidence_ids": ("r#p40",),
+        "verification": "verified",
+    }
+
+    revenue_fact = Fact(metric="营业收入", value=100, **common)
+    cash_flow_fact = Fact(metric="经营活动现金流量净额", value=20, **common)
+
+    assert revenue_fact.id != cash_flow_fact.id
+
+
 def test_all_contracts_are_json_round_trippable_and_frozen():
     fact = Fact(
         metric="revenue", value=1.0, unit="亿元", period="2026-06-30",
