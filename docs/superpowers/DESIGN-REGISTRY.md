@@ -17,6 +17,7 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
+| 模型执行计划器 | 待实现 | 可直接执行 | [主记录](#model-execution-planner) |
 
 ## 全部设计
 
@@ -45,3 +46,4 @@
 | <a id="financial-structure-visuals"></a>财务结构可视化 | [设计](specs/2026-09-10-财务结构可视化-design.md) | [计划](plans/2026-09-10-财务结构可视化.md) | 已实现 | — | 合并 1107509；`python3 -m pytest tests/unit/test_visualizations.py -q`：14 passed in 0.12s | 2026-09-14 |
 | <a id="design-registry"></a>方案设计台账 | [设计](specs/2026-09-14-方案设计台账-design.md) | [计划](plans/2026-09-14-方案设计台账.md) | 已实现 | — | 合并 f27056c；`python3 -m pytest tests/unit/test_design_registry.py -q` → 4 passed in 0.11s | 2026-09-14 |
 | <a id="chat-pdf-supplement"></a>智能问答财报补充下载 | [设计](specs/2026-09-14-智能问答财报补充下载-design.md) | [计划](plans/2026-09-14-问答补报.md) | 已实现 | — | 合并 1132bc6；`python3 -m pytest tests/unit -q`：903 passed，3 warnings；`python3 -m pytest tests/browser -q`：26 passed；用户授权后才下载、仅以 `source="pdf"` 索引成功报告恢复回答 | 2026-09-15 |
+| <a id="model-execution-planner"></a>模型执行计划器 | [设计](specs/2026-09-17-模型执行计划器-design.md) | [计划](plans/2026-09-17-模型执行计划器.md) | 待实现 | 可直接执行 | 用户确认 2026-09-17：采用轻量模型计划器；尚未开始代码实施 | 2026-09-17 |
