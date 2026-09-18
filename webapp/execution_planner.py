@@ -34,7 +34,7 @@ class ExecutionPlanner:
             raw = self._json_planner(question, snapshot)
             candidate = ExecutionPlan.from_dict(raw)
             valid, issues = validate_execution_plan(candidate, scope, capabilities.available_kinds, capabilities.max_external_calls)
-        except Exception:
+        except Exception as exc:
             # 计划器是可选能力：任何 provider/JSON 失败都必须 fail-closed，不能中断问答。
-            return PlanningResult("fallback", issues=(PlanIssue("invalid_plan", "执行计划未通过安全校验。"),))
+            return PlanningResult("fallback", issues=(PlanIssue("invalid_plan:" + type(exc).__name__, "执行计划未通过安全校验。"),))
         return PlanningResult("validated", valid, issues) if valid else PlanningResult("fallback", issues=issues)
