@@ -48,3 +48,12 @@ Task 2: complete (commits f8f8b94..1babf9f, Task 3-owned P1 carried forward)
 - GREEN: the same command passed (1 passed, 12 deselected); safety suite (13 passed), workspace browser suite (12 passed), server/rendering regression (199 passed), full suite (1145 passed, 2 skipped), `git diff --check`, and CSS check all passed. Browser acceptance recorded no console/page errors, failed same-origin requests, or native downloads.
 
 Task 3: complete locally, unmerged; task report: `task-3-report.md`. README, FEATURE-CATALOG, and DESIGN-REGISTRY require the post-merge actions recorded there. Task-ledger integration remains unavailable (未登记).
+
+## 暂停点（2026-09-20，用户要求）
+
+- 分支 `feat/remove-research-memory`，HEAD `87b34a4`，工作区干净，无未提交改动。
+- Task 1（f8f8b94）、Task 2（1babf9f）、Task 3（87b34a4）均已提交并完成独立审查；Task 3 审查结论 OK with notes，遗留 3 个 P2。
+- 暂停时正在执行 Task 3 fix round 1（run 38416e4b，已被用户要求中断，未产生提交）。
+- 恢复动作：重新派发 Task 3 fix round 1，修 3 个 P2 — (1) test_research_workspace_flow.py:274-294 两个无法失败的 chat 级缺失断言；(2) DESIGN-REGISTRY.md 状态改为 `实施中` 并同步未完成索引；(3) task-3-report.md 修正下载与偏离表述。随后范围复审、最终全分支审查、本地合入与合入后文档更新。
+
+Task 3: fix round 1/5 (3 P2 addressed directly after two runner startup-confirm failures; browser chat absence probe now opens completed session, registry is 实施中, report wording corrected). Ruling: controller applied this bounded fix only after user explicitly approved direct implementation; cost if wrong: fix receives same scoped verification below.

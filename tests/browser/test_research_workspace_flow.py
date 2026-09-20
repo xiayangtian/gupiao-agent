@@ -276,10 +276,18 @@ def test_workspace_has_no_removed_memory_or_decision_entry(browser_session, actu
     _start_observing(browser_session)
     _eval(browser_session, _workspace_script())
     rendered = _eval(browser_session, """
-(() => {
+(async () => {
+  const workspace = await (await fetch('/api/research/workspace')).json();
+  const completed = workspace.items.find(item => item.run_id === 'fixture-completed-run');
+  await openChatSession(completed.session_id);
+  const deadline = Date.now() + 10000;
+  while (!document.querySelector('#chat-history .chat-run') && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
   const removedMemory = 'research' + '-memory';
   const removedDecision = 'save' + '-decision';
   return JSON.stringify({
+    chatRun: !!document.querySelector('#chat-history .chat-run'),
     panel: !!document.querySelector('.' + removedMemory + '-panel'),
     factAction: !!document.querySelector('[data-' + removedMemory + '-kind]'),
     decisionAction: !!document.querySelector('[data-research-action="' + removedDecision + '"]'),
@@ -287,7 +295,7 @@ def test_workspace_has_no_removed_memory_or_decision_entry(browser_session, actu
 })()
 """)
 
-    assert rendered == {"panel": False, "factAction": False, "decisionAction": False}
+    assert rendered == {"chatRun": True, "panel": False, "factAction": False, "decisionAction": False}
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
     assert _failed_requests(browser_session, actual_app_url) == []
