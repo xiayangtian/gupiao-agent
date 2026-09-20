@@ -2118,7 +2118,6 @@ var chatSessions = [];       // 历史会话列表
 var researchWorkspaceItems = [];
 var researchWorkspaceLoadGeneration = 0;
 var researchRunOwners = {};
-var researchRunEvidenceIds = {};
 // 进行中的流式请求：sessionKey -> { reader, stopped, answerText, hasContent }
 // 支持「在不同会话中同时发起请求」——每个会话独立一个流，互不阻塞
 var chatStreams = {};
@@ -2345,85 +2344,13 @@ async function exportResearch(runId, format) {
   }
 }
 
-async function saveResearchMemory(kind, id, sourceRunId) {
-  if (kind !== 'decision') return saveResearchMemoryEntry(kind, id, sourceRunId);
-  var runId = id;
-  if (!runId) return;
-  var dialog = $('#research-decision-dialog');
-  if (!dialog) return;
-  $('#research-decision-run-id').value = runId;
-  $('#research-decision-text').value = '';
-  if (dialog.showModal) dialog.showModal();
-}
-
-async function saveResearchMemoryEntry(kind, id, runId) {
-  var sessionId = researchRunOwners[runId] || chatSessionId;
-  if (!sessionId || !runId) return;
-  var endpoint = kind === 'fact' ? 'facts' : 'artifacts';
-  var body = kind === 'fact' ? { run_id: runId, fact_id: id } : { run_id: runId, artifact_id: id };
-  try {
-    var response = await fetch('/api/research/memory/' + endpoint + '?session_id=' + encodeURIComponent(sessionId), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    if (!response.ok) throw new Error('save failed');
-    appendResearchMemoryNotice((await response.json()).entry);
-    refreshResearchMemoryPanel();
-  } catch (_) { appendResearchMemoryNotice(null, '保存失败：该证据可能不符合研究记忆条件。'); }
-}
-
-function appendResearchMemoryNotice(entry, fallback) {
-  appendChatNotice(entry && window.ChatRendering
-    ? window.ChatRendering.renderMemoryEntry(entry)
-    : '<div role="status">' + escapeHtml(fallback || '保存失败。') + '</div>');
-}
-
 function appendChatNotice(html) {
   var box = $('#chat-history');
   if (!box) return;
   var div = document.createElement('div');
-  div.className = 'research-memory-notice';
+  div.className = 'chat-session-notice';
   div.innerHTML = html;
   box.appendChild(div); scrollChatToBottom();
-}
-
-// 持久化研究记忆列表：与内存提示不同，刷新页面后仍由服务端重建。
-async function loadResearchMemory() {
-  var list = $('#research-memory-list');
-  if (!list) return;
-  var status = $('#research-memory-status');
-  if (status) status.textContent = '正在读取已持久化的研究记忆…';
-  try {
-    var response = await fetch('/api/research/memory');
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-    var payload = await response.json();
-    var entries = Array.isArray(payload.entries) ? payload.entries : [];
-    var titles = {};
-    chatSessions.forEach(function (session) { titles[session.id] = session.title || '新会话'; });
-    list.innerHTML = entries.length && window.ChatRendering
-      ? window.ChatRendering.renderMemoryList(entries, titles)
-      : '<p class="hint">暂无已保存的研究记忆；在回答中显式保存后会出现在这里。</p>';
-    if (status) status.textContent = '已显示 ' + entries.length + ' 条已保存研究记忆。';
-  } catch (_) {
-    list.innerHTML = '<p class="hint">研究记忆暂时不可用，请稍后重试。</p>';
-    if (status) status.textContent = '读取研究记忆失败。';
-  }
-}
-
-function refreshResearchMemoryPanel() {
-  if (researchWorkspacePanelIsVisible()) return loadResearchMemory();
-  return Promise.resolve();
-}
-
-async function revokeResearchMemory(id) {
-  if (!id || !confirm('确定撤销这条研究记忆？撤销后不会删除原始 PDF 或会话。')) return;
-  try {
-    var response = await fetch('/api/research/memory/' + encodeURIComponent(id), { method: 'DELETE' });
-    if (!response.ok) throw new Error('revoke failed');
-    var button = document.querySelector('[data-research-memory-id="' + CSS.escape(id) + '"]');
-    if (button && button.parentNode) button.parentNode.textContent = '研究记忆已撤销。';
-    await refreshResearchWorkspaceIfOpen();
-    refreshResearchMemoryPanel();
-  } catch (_) { appendResearchMemoryNotice(null, '撤销研究记忆失败，请重试。'); }
 }
 
 function bindResearchWorkspace() {
@@ -2434,7 +2361,7 @@ function bindResearchWorkspace() {
   toggle.dataset.bound = '1';
   function setOpen(open) {
     panel.classList.toggle('hidden', !open); toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (open) { loadResearchWorkspace(researchWorkspaceFilters()); loadResearchQuality(); loadResearchMemory(); }
+    if (open) { loadResearchWorkspace(researchWorkspaceFilters()); loadResearchQuality(); }
   }
   toggle.addEventListener('click', function () { setOpen(panel.classList.contains('hidden')); });
   close.addEventListener('click', function () { setOpen(false); toggle.focus(); });
@@ -2447,32 +2374,12 @@ function bindResearchWorkspace() {
   panel.addEventListener('click', function (event) {
     var button = event.target.closest && event.target.closest('[data-research-action]');
     if (!button) return;
-    if (button.dataset.researchAction === 'revoke-memory') { revokeResearchMemory(button.dataset.researchMemoryId); return; }
     var item = button.closest('.research-workspace-item');
     if (!item) return;
     var runId = item.dataset.researchRunId;
     if (button.dataset.researchAction === 'open') { openChatSession(item.dataset.researchSessionId); return; }
     if (button.dataset.researchAction === 'favorite') { toggleResearchFavorite(runId); return; }
     if (button.dataset.researchAction === 'export') exportResearch(runId, button.dataset.researchFormat);
-  });
-  var decisionDialog = $('#research-decision-dialog');
-  $('#research-decision-cancel').addEventListener('click', function () { decisionDialog.close(); });
-  $('#research-decision-form').addEventListener('submit', async function (event) {
-    event.preventDefault();
-    var runId = $('#research-decision-run-id').value;
-    var text = $('#research-decision-text').value.trim();
-    var sessionId = researchRunOwners[runId] || chatSessionId;
-    var evidenceIds = researchRunEvidenceIds[runId] || [];
-    if (!text || !sessionId || !evidenceIds.length) return;
-    try {
-      var response = await fetch('/api/research/memory/decisions?session_id=' + encodeURIComponent(sessionId), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId, text: text, evidence_ids: evidenceIds }),
-      });
-      if (!response.ok) throw new Error('decision save failed');
-      decisionDialog.close(); appendResearchMemoryNotice((await response.json()).entry);
-      await refreshResearchWorkspaceIfOpen();
-      refreshResearchMemoryPanel();
-    } catch (_) { appendResearchMemoryNotice(null, '保存失败：研究决策必须引用来源运行中的证据。'); }
   });
   if (window.matchMedia && window.matchMedia('(max-width: 390px)').matches) $('#research-workspace-filters').open = false;
 }
@@ -2577,14 +2484,11 @@ async function deleteChatSession(sid) {
       if (box) box.innerHTML = '';
     }
     await loadChatSessions();
-    // 会话列表刷新后再重建记忆面板：分组标题依赖当前已知会话，早于
-    // loadChatSessions 渲染会让已删除会话的记忆仍显示旧会话名。
-    refreshResearchMemoryPanel();
     var deleteNotice = window.ChatRendering ? window.ChatRendering.renderDeleteResult(deleteResult) : '';
     var history = $('#chat-history');
     if (history && deleteNotice) {
       var notice = document.createElement('div');
-      notice.className = 'research-memory-notice';
+      notice.className = 'chat-session-notice';
       notice.innerHTML = deleteNotice;
       history.appendChild(notice);
     }
@@ -3444,20 +3348,6 @@ function appendSupplementSummary(box, run) {
   box.appendChild(section);
 }
 
-function researchEvidenceIds(run) {
-  if (!run || typeof run !== 'object') return [];
-  var ids = (Array.isArray(run.facts) ? run.facts : []).reduce(function (values, fact) {
-    return values.concat(Array.isArray(fact.evidence_ids) ? fact.evidence_ids : []);
-  }, []);
-  (Array.isArray(run.artifacts) ? run.artifacts : []).forEach(function (artifact) {
-    if (!artifact || typeof artifact !== 'object') return;
-    var id = artifact.source === 'web' ? artifact.url
-      : (artifact.pdf_url || artifact.pdf_filename || (artifact.report_id && artifact.page ? artifact.report_id + '#p' + artifact.page : ''));
-    if (id) ids.push(id);
-  });
-  return ids.filter(function (id, index, all) { return typeof id === 'string' && id && all.indexOf(id) === index; });
-}
-
 function appendAssistantRun(sel, message) {
   var box = $(sel);
   if (!box) return;
@@ -3484,14 +3374,8 @@ function appendAssistantRun(sel, message) {
     if (policyHtml) parts.push(policyHtml);
     var factsHtml = rendering.renderFactsAndConflicts(run);
     if (factsHtml) parts.push(factsHtml);
-    var factActionsHtml = (run && Array.isArray(run.facts)) ? run.facts.map(function (fact) {
-      return rendering.renderFactActions(fact, run);
-    }).filter(Boolean).join('') : '';
-    if (factActionsHtml) parts.push('<div class="research-memory-actions">' + factActionsHtml + '</div>');
     var artifactsHtml = rendering.renderRunArtifacts(run);
     if (artifactsHtml) parts.push(artifactsHtml);
-    var artifactActionsHtml = rendering.renderArtifactActions(run);
-    if (artifactActionsHtml) parts.push(artifactActionsHtml);
     var verificationHtml = rendering.renderVerification(run && run.verification_report);
     if (verificationHtml) parts.push(verificationHtml);
   }
@@ -3503,11 +3387,6 @@ function appendAssistantRun(sel, message) {
   appendSupplementSummary(wrapper, run);
   if (run && run.id) {
     researchRunOwners[run.id] = chatSessionId;
-    researchRunEvidenceIds[run.id] = researchEvidenceIds(run);
-    if (rendering) {
-      var decisionHtml = rendering.renderDecisionAction(run, researchRunEvidenceIds[run.id]);
-      if (decisionHtml) wrapper.insertAdjacentHTML('beforeend', decisionHtml);
-    }
   }
   var recoveryHtml = rendering ? rendering.renderResearchRecovery(run, message && message.research_run) : '';
   if (recoveryHtml) wrapper.insertAdjacentHTML('beforeend', recoveryHtml);
@@ -3573,23 +3452,6 @@ function bindChatRunActions() {
   if (!box || box.dataset.runActionsBound) return;
   box.dataset.runActionsBound = '1';
   box.addEventListener('click', function (e) {
-    var researchAction = e.target && e.target.closest ? e.target.closest('[data-research-action]') : null;
-    if (researchAction) {
-      var kind = researchAction.dataset.researchMemoryKind;
-      var runId = researchAction.dataset.researchRunId;
-      if (researchAction.dataset.researchAction === 'save-memory') {
-        saveResearchMemory(kind, researchAction.dataset.researchId, runId);
-        return;
-      }
-      if (researchAction.dataset.researchAction === 'save-decision') {
-        saveResearchMemory('decision', runId);
-        return;
-      }
-      if (researchAction.dataset.researchAction === 'revoke-memory') {
-        revokeResearchMemory(researchAction.dataset.researchMemoryId);
-        return;
-      }
-    }
     var copy = e.target && e.target.closest ? e.target.closest('[data-chat-action="copy-run-id"]') : null;
     if (copy) {
       copyChatRunId(copy);
