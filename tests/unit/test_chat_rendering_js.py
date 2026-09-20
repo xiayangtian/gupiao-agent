@@ -497,10 +497,10 @@ def test_workspace_item_shows_persisted_scope_status_and_favorite_actions():
         f"""
         const r = require({json.dumps(str(CHAT_RENDERING_JS))});
         console.log(JSON.stringify({{html: r.renderWorkspaceItem({{
-          session_id: 'session-1', run_id: 'run-1', title: '现金流核验',
+          session_id: 'session-1', run_id: 'run-1', title: '农业银行现金流核验',
           company_codes: ['601288'], industry: '银行业', periods: ['2026-06-30'],
           intent: 'report_fact', status: 'completed', updated_at: '2026-09-17T10:00:00Z',
-          favorite: false, searchable_summary: '农业银行'
+          favorite: false
         }})}}));
         """
     )
@@ -510,6 +510,35 @@ def test_workspace_item_shows_persisted_scope_status_and_favorite_actions():
     assert '收藏' in html
     assert '601288' in html
     assert 'data-research-action="favorite"' in html
+
+
+def test_research_workspace_has_no_memory_or_decision_controls():
+    """已完成研究不得再渲染保存记忆或决策的入口。"""
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const html = r.renderWorkspaceItem({{
+          session_id: 'session-1', run_id: 'run-1', title: '现金流核验',
+          status: 'completed', updated_at: '2026-09-17T10:00:00Z'
+        }});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+
+    source = CHAT_RENDERING_JS.read_text(encoding="utf-8")
+    assert 'data-research-action="save-decision"' not in result["html"]
+    assert 'data-research-memory-kind' not in result["html"]
+    assert 'data-research-action="save-decision"' not in source
+    assert 'data-research-memory-kind' not in source
+
+
+def test_research_workspace_document_has_no_memory_surface():
+    page = (ROOT / "webapp/static/index.html").read_text(encoding="utf-8")
+    script = APP_JS.read_text(encoding="utf-8")
+
+    assert "research-memory-panel" not in page
+    assert "research-decision-dialog" not in page
+    assert "/api/research/memory/" not in script
 
 
 def test_workspace_item_shows_persisted_evidence_availability_flag():
@@ -532,36 +561,6 @@ def test_workspace_item_shows_persisted_evidence_availability_flag():
     assert '证据：可用' in result['available']
     assert '证据：暂不可用' in result['unavailable']
 
-
-def test_reference_fact_has_no_save_to_memory_action():
-    """reference/conflict/unavailable 事实绝不渲染保存为确认事实的动作。"""
-    result = _run_node(
-        f"""
-        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
-        console.log(JSON.stringify({{
-          reference: r.renderFactActions({{verification: 'reference', source_type: 'tool'}}, {{id: 'run-1', status: 'completed'}}),
-          verified: r.renderFactActions({{id: 'fact_1', verification: 'verified', source_type: 'pdf', evidence_ids: ['pdf-1']}}, {{id: 'run-1', status: 'completed', verification_report: {{status: 'passed', supported_fact_ids: ['pdf-1']}}}})
-        }}));
-        """
-    )
-    assert '保存到研究记忆' not in result['reference']
-    assert '保存到研究记忆' in result['verified']
-    assert 'data-research-id="fact_1"' in result['verified']
-
-
-def test_fact_without_stable_id_has_no_memory_action():
-    """旧 Fact 没有稳定身份时只能展示，不能渲染保存动作。"""
-    result = _run_node(
-        f"""
-        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
-        console.log(JSON.stringify({{html: r.renderFactActions(
-          {{verification: 'verified', source_type: 'pdf', evidence_ids: ['pdf-1']}},
-          {{id: 'run-1', status: 'completed', verification_report: {{status: 'passed', supported_fact_ids: ['pdf-1']}}}}
-        )}}));
-        """
-    )
-
-    assert "保存到研究记忆" not in result["html"]
 
 
 def test_quality_renderer_shows_safe_health_and_probe_statuses():
@@ -636,109 +635,21 @@ def test_refresh_workspace_requires_visible_chat_page_and_workspace_panel():
     assert result == {"visible": 1, "workspaceHidden": 0, "chatHidden": 0}
 
 
-def test_refresh_memory_panel_requires_visible_chat_page_and_workspace_panel():
-    """保存或撤销完成后，隐藏聊天页的记忆面板不得 fetch 或改写。"""
-    source = APP_JS.read_text(encoding="utf-8")
-    assert "function researchWorkspacePanelIsVisible()" in source
-    workspace_refresh = source[source.index("function refreshResearchWorkspaceIfOpen() {"):
-                               source.index("async function loadResearchQuality()")]
-    memory_refresh = source[source.index("function refreshResearchMemoryPanel() {"):
-                           source.index("async function revokeResearchMemory", source.index("function refreshResearchMemoryPanel() {"))]
-    assert "researchWorkspacePanelIsVisible()" in workspace_refresh
-    assert "researchWorkspacePanelIsVisible()" in memory_refresh
 
-    result = _run_node(
-        f"""
-        const fs = require('fs');
-        const vm = require('vm');
-        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
-        const start = src.indexOf('function researchWorkspacePanelIsVisible() {{');
-        const workspaceEnd = src.indexOf('async function loadResearchQuality()', start);
-        const memoryStart = src.indexOf('function refreshResearchMemoryPanel() {{');
-        const end = src.indexOf('async function revokeResearchMemory', memoryStart);
-        if (start < 0 || workspaceEnd < 0 || memoryStart < 0 || end < 0) throw new Error('研究工作台可见性刷新函数未找到');
-        const fnSource = src.slice(start, workspaceEnd) + src.slice(memoryStart, end);
-
-        async function refreshCount(workspaceHidden, chatHidden) {{
-          let calls = 0;
-          const workspace = {{classList: {{contains: () => workspaceHidden}}}};
-          const chatPage = {{classList: {{contains: () => chatHidden}}}};
-          const sandbox = {{
-            $: (selector) => selector === '#research-workspace' ? workspace :
-              (selector === '#page-chat' ? chatPage : null),
-            researchWorkspaceFilters: () => ({{status: 'completed'}}),
-            loadResearchWorkspace: () => Promise.resolve(),
-            loadResearchMemory: () => {{ calls += 1; return Promise.resolve(); }},
-            Promise,
-          }};
-          vm.createContext(sandbox);
-          vm.runInContext(fnSource, sandbox);
-          await sandbox.refreshResearchMemoryPanel();
-          return calls;
-        }}
-
-        (async () => console.log(JSON.stringify({{
-          visible: await refreshCount(false, false),
-          workspaceHidden: await refreshCount(true, false),
-          chatHidden: await refreshCount(false, true),
-        }})))();
-        """
-    )
-
-    assert result == {"visible": 1, "workspaceHidden": 0, "chatHidden": 0}
-
-
-def test_delete_result_discloses_retained_memory_and_export_state_is_textual():
-    """删除保留记忆和导出状态均以文本表达，不能只用颜色传达。"""
+def test_delete_result_and_export_state_are_textual():
+    """会话删除和导出状态均以文本表达，不能只用颜色传达。"""
     result = _run_node(
         f"""
         const r = require({json.dumps(str(CHAT_RENDERING_JS))});
         console.log(JSON.stringify({{
-          deleted: r.renderDeleteResult({{retained_memory_count: 2}}),
+          deleted: r.renderDeleteResult(),
           export: r.renderExportState('partial')
         }}));
         """
     )
-    assert '2 条研究记忆仍被保留' in result['deleted']
+    assert '会话已删除' in result['deleted']
+    assert '研究记忆' not in result['deleted']
     assert '部分完成' in result['export']
-
-
-def test_memory_list_groups_by_owner_and_keeps_deleted_session_entries_revocable():
-    """持久化记忆列表按归属会话分组；已删除会话的记忆单独分组且仍可撤销。"""
-    result = _run_node(
-        f"""
-        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
-        console.log(JSON.stringify({{html: r.renderMemoryList([
-          {{id: 'decision-1', kind: 'decision', source_run_id: 'run-1', owner_session_id: 'session-live',
-            payload: {{text: '关注现金流改善', evidence_ids: ['pdf-1']}}, created_at: '2026-09-17T10:00:00Z'}},
-          {{id: 'fact-1', kind: 'fact', source_run_id: 'run-2', owner_session_id: 'session-deleted',
-            payload: {{metric: '营业收入', value: 100, unit: '亿元'}}, created_at: '2026-09-17T11:00:00Z'}}
-        ], {{'session-live': '农业银行研究'}})}}
-        ));
-        """
-    )
-    html = result['html']
-    assert '农业银行研究' in html
-    assert '来自已删除会话' in html
-    assert html.count('data-research-action="revoke-memory"') == 2
-    assert 'data-research-memory-id="decision-1"' in html
-    assert 'data-research-memory-id="fact-1"' in html
-    assert '关注现金流改善' in html
-
-
-def test_memory_list_hides_entries_without_a_recorded_owner():
-    """旧 sidecar 条目没有记录归属，列表必须 fail-closed 不展示。"""
-    result = _run_node(
-        f"""
-        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
-        console.log(JSON.stringify({{html: r.renderMemoryList([
-          {{id: 'legacy-1', kind: 'decision', source_run_id: 'run-1', owner_session_id: null,
-            payload: {{text: '旧决策', evidence_ids: ['pdf-1']}}, created_at: '2026-09-17T10:00:00Z'}}
-        ], {{}})}}));
-        """
-    )
-
-    assert result['html'] == ''
 
 
 def test_run_reuse_actions_reuse_existing_run_identity_without_new_privileges():

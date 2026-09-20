@@ -23,6 +23,7 @@ from math import isfinite
 import os
 import re
 import threading
+from pathlib import Path
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -81,8 +82,6 @@ from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
 from .chat_evaluation import FAILURE_CODES
 from .research_export import ExportValidationError, ResearchExporter
-from .evidence_identity import artifact_evidence_ids
-from .research_memory import ResearchMemoryStore, run_evidence_ids
 from .research_workspace import ResearchWorkspaceQuery, ResearchWorkspaceStore
 from .research_agent import ResearchAgent
 from .research_executor import ResearchExecutor
@@ -110,6 +109,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 REPORTS_DIR = os.path.join(BASE_DIR, "reports")
 ANALYSIS_DIR = os.path.join(REPORTS_DIR, "analysis")
+DATA_DIR = Path(BASE_DIR) / "data"
 
 app = FastAPI(title="财报分析工具")
 
@@ -130,16 +130,19 @@ chat_sessions: Dict[str, List[Dict[str, str]]] = {}
 _chat_lock = threading.Lock()
 # 智能问答历史会话（JSON 文件持久化，data/chat_sessions.json）
 chat_store = ChatStore()
-# M4 sidecars contain only derived workspace metadata and explicit memory entries;
-# immutable AnswerRun/ResearchRun records remain in ChatStore.  The workspace reads
-# active decision memories from the same sidecar to expose them to keyword search.
-research_memory = ResearchMemoryStore()
-research_workspace = ResearchWorkspaceStore(chat_store, memory_path=research_memory.path)
-# Explicit-memory writes and the session-deletion count share one coordination
-# lock.  Lock order is `_research_memory_lock` -> ChatStore lock; no code path may
-# hold the ChatStore lock (or any store lock) and then wait for this lock.
-_research_memory_lock = threading.RLock()
+# The workspace sidecar stores only favorites keyed by immutable run/session identities.
+research_workspace = ResearchWorkspaceStore(chat_store)
 QUALITY_SUMMARY_PATH = os.path.join(BASE_DIR, "data", "research_quality_summary.json")
+
+
+def _remove_legacy_research_memory_sidecar() -> None:
+    """Delete the one retired local memory sidecar before serving requests."""
+    path = DATA_DIR / "research_memory.json"
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.error("无法清理已移除的研究记忆数据：%s", path)
+        raise RuntimeError("无法清理已移除的研究记忆数据") from exc
 
 
 def _startup_task_manager() -> None:
@@ -162,6 +165,7 @@ def _shutdown_task_manager() -> None:
             task_manager = None
 
 
+app.router.add_event_handler("startup", _remove_legacy_research_memory_sidecar)
 app.router.add_event_handler("startup", _startup_task_manager)
 app.router.add_event_handler("shutdown", _shutdown_task_manager)
 
@@ -598,22 +602,6 @@ class RagIngestOneRequest(BaseModel):
 
 class FavoriteRunRequest(BaseModel):
     favorite: bool
-
-
-class SaveFactMemoryRequest(BaseModel):
-    run_id: str = Field(min_length=1, max_length=128)
-    fact_id: str = Field(min_length=1, max_length=512)
-
-
-class SaveArtifactMemoryRequest(BaseModel):
-    run_id: str = Field(min_length=1, max_length=128)
-    artifact_id: str = Field(min_length=1, max_length=1024)
-
-
-class SaveDecisionMemoryRequest(BaseModel):
-    run_id: str = Field(min_length=1, max_length=128)
-    text: str = Field(min_length=1, max_length=2000)
-    evidence_ids: List[str] = Field(min_length=1, max_length=50)
 
 
 # ── 工具函数 ───────────────────────────────────────────────
@@ -2839,31 +2827,6 @@ def _owned_or_404(session_id: str, run_id: str) -> tuple[AnswerRun, ResearchRun 
     return owned
 
 
-def _owned_run_inside_memory_lock(session_id: str, run_id: str) -> tuple[AnswerRun, ResearchRun | None]:
-    """Re-verify run ownership while holding ``_research_memory_lock``.
-
-    A save request can pass its lock-free pre-check and then wait for the
-    coordination lock while its session is deleted by a parallel request.  The
-    write must be rejected there instead of landing in a deleted session's memory.
-    """
-    return _owned_or_404(session_id, run_id)
-
-
-def _memory_store_for_owned_run(run: AnswerRun, owner_session_id: str) -> ResearchMemoryStore:
-    """Bind a short-lived store to one already owner-checked run and session.
-
-    ``ResearchMemoryStore.save_*`` intentionally resolves the source itself.
-    Giving that lookup only this request's run preserves its fail-closed contract
-    without granting the memory layer a cross-session run lookup, and the owner is
-    the session this request already re-verified, never a client-supplied value.
-    """
-    return ResearchMemoryStore(
-        research_memory.path,
-        run_lookup=lambda requested_run_id: run if requested_run_id == run.id else None,
-        owner_session_id=owner_session_id,
-    )
-
-
 @app.get("/api/research/workspace")
 def get_research_workspace(
     company_code: Optional[str] = Query(default=None, pattern=r"^\d{6}$"),
@@ -2925,87 +2888,6 @@ def export_research_run(
         return PlainTextResponse(exporter.to_markdown(run, research_run), media_type="text/markdown")
     except ExportValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
-
-
-@app.get("/api/research/memory")
-def list_research_memory(
-    owner_session_id: Optional[str] = Query(default=None, min_length=1, max_length=128),
-) -> Dict[str, Any]:
-    """List active explicit memories, optionally scoped to one owner session.
-
-    The store records the owner session that already passed the save request's
-    ownership check.  This app serves a single local user with no authentication, so
-    listing this machine's own active memories does not widen access; entries saved
-    before owners were recorded are excluded instead of being guessed into a scope.
-    """
-    entries = ResearchMemoryStore(research_memory.path).list_owned_active(owner_session_id)
-    return {"entries": [entry.to_dict() for entry in entries]}
-
-
-@app.post("/api/research/memory/facts")
-def save_research_fact_memory(
-    body: SaveFactMemoryRequest,
-    session_id: str = Query(..., min_length=1, max_length=128),
-) -> Dict[str, Any]:
-    # Lock-free pre-check: unknown or foreign runs never wait for the lock.
-    _owned_or_404(session_id, body.run_id)
-    with _research_memory_lock:
-        run, _research_run = _owned_run_inside_memory_lock(session_id, body.run_id)
-        facts = [fact for fact in run.facts if fact.id and body.fact_id == fact.id]
-        if len(facts) != 1:
-            raise HTTPException(422, "事实标识不存在或不唯一")
-        try:
-            entry = _memory_store_for_owned_run(run, session_id).save_fact(facts[0], body.run_id)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-    return {"entry": entry.to_dict()}
-
-
-@app.post("/api/research/memory/artifacts")
-def save_research_artifact_memory(
-    body: SaveArtifactMemoryRequest,
-    session_id: str = Query(..., min_length=1, max_length=128),
-) -> Dict[str, Any]:
-    # Lock-free pre-check: unknown or foreign runs never wait for the lock.
-    _owned_or_404(session_id, body.run_id)
-    with _research_memory_lock:
-        run, _research_run = _owned_run_inside_memory_lock(session_id, body.run_id)
-        artifacts = [artifact for artifact in run.artifacts if body.artifact_id in artifact_evidence_ids(artifact)]
-        if len(artifacts) != 1:
-            raise HTTPException(422, "证据标识不存在或不唯一")
-        try:
-            entry = _memory_store_for_owned_run(run, session_id).save_artifact(artifacts[0], body.run_id)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-    return {"entry": entry.to_dict()}
-
-
-@app.post("/api/research/memory/decisions")
-def save_research_decision_memory(
-    body: SaveDecisionMemoryRequest,
-    session_id: str = Query(..., min_length=1, max_length=128),
-) -> Dict[str, Any]:
-    # Lock-free pre-check: unknown or foreign runs never wait for the lock.
-    _owned_or_404(session_id, body.run_id)
-    with _research_memory_lock:
-        run, _research_run = _owned_run_inside_memory_lock(session_id, body.run_id)
-        evidence_ids = tuple(body.evidence_ids)
-        if len(set(evidence_ids)) != len(evidence_ids) or not set(evidence_ids).issubset(run_evidence_ids(run)):
-            raise HTTPException(422, "研究决策必须引用来源运行中的证据")
-        try:
-            entry = _memory_store_for_owned_run(run, session_id).save_decision(body.text, body.run_id, evidence_ids)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-    return {"entry": entry.to_dict()}
-
-
-@app.delete("/api/research/memory/{entry_id}")
-def revoke_research_memory(entry_id: str) -> Dict[str, Any]:
-    with _research_memory_lock:
-        revoked = ResearchMemoryStore(research_memory.path).revoke(entry_id)
-    if not revoked:
-        raise HTTPException(404, "研究记忆不存在或已撤销")
-    return {"revoked": True, "id": entry_id}
 
 
 _QUALITY_METRIC_FIELDS = (
@@ -3144,15 +3026,10 @@ def rename_chat_session(sid: str, body: RenameSessionRequest) -> Dict[str, Any]:
 
 
 def _delete_chat_session(sid: str) -> Optional[Dict[str, Any]]:
-    """Delete one session with the same memory-race protection used by all callers."""
-    owned_run_ids = {record.run.id for record in chat_store.iter_session_runs() if record.session_id == sid}
+    """Delete one session and its workspace favorites."""
     if not chat_store.delete_session(sid):
         return None
-    with _research_memory_lock:
-        retained_memory_count = sum(
-            entry.source_run_id in owned_run_ids for entry in ResearchMemoryStore(research_memory.path).list_active()
-        )
-    return {"ok": True, "session_id": sid, "retained_memory_count": retained_memory_count}
+    return {"ok": True, "session_id": sid}
 
 
 @app.delete("/api/chat/sessions/{sid}")
@@ -3166,16 +3043,14 @@ def delete_chat_session(sid: str) -> Dict[str, Any]:
 @app.post("/api/chat/sessions/batch-delete")
 def batch_delete_chat_sessions(body: DeleteSessionsRequest) -> Dict[str, Any]:
     """Delete selected sessions; missing IDs are reported without aborting valid deletions."""
-    deleted, missing, retained = [], [], 0
+    deleted, missing = [], []
     for sid in dict.fromkeys(body.session_ids):
         result = _delete_chat_session(sid)
         if result is None:
             missing.append(sid)
         else:
             deleted.append(sid)
-            retained += result["retained_memory_count"]
-    return {"ok": True, "deleted_session_ids": deleted, "missing_session_ids": missing,
-            "retained_memory_count": retained}
+    return {"ok": True, "deleted_session_ids": deleted, "missing_session_ids": missing}
 
 
 @app.get("/api/rag/status")

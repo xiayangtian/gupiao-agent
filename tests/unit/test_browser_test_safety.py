@@ -166,10 +166,10 @@ def test_workspace_browser_flow_uses_isolated_deterministic_m4_fixtures():
     assert "fixture-completed-run" in launcher
     assert "_seed_workspace_fixtures" in launcher
     assert "ResearchWorkspaceStore(" in launcher
-    assert "ResearchMemoryStore(" in launcher
+    assert "ResearchMemoryStore" not in launcher
     assert "tempfile.mkdtemp" in launcher
     assert "server.research_workspace = ResearchWorkspaceStore" in launcher
-    assert "server.research_memory = ResearchMemoryStore" in launcher
+    assert "server.research_memory" not in launcher
     assert "IngestionService" not in launcher
     assert "ReportDownloader" not in launcher
     assert "CNINFODatasource" not in launcher
@@ -182,6 +182,16 @@ def test_workspace_browser_flow_uses_isolated_deterministic_m4_fixtures():
     assert "_console_errors" in source
     assert "_page_errors" in source
     assert "_failed_requests" in source
+
+
+def test_workspace_browser_fixture_does_not_seed_removed_memory_feature():
+    source = WORKSPACE_BROWSER_TEST.read_text(encoding="utf-8")
+    launcher = STRUCTURE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "ResearchMemoryStore" not in launcher
+    assert "save_decision" not in launcher
+    assert "research-memory" not in source
+    assert "save-decision" not in source
 
 
 def test_workspace_export_browser_test_intercepts_native_downloads():
