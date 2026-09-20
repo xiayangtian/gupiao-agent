@@ -665,12 +665,15 @@
     var plan = run.execution_plan || {};
     var steps = Array.isArray(plan.steps) ? plan.steps : [];
     if (!steps.length) return '';
-    var labels = {retrieve: '本地财报', market_quote: '实时行情', web_search: '网页信息', answer: '分析'};
+    var labels = {retrieve: '本地财报', market_quote: '个股实时行情', market_indices: 'A 股主要指数', market_breadth: '市场广度与成交', sector_performance: '行业与概念板块', market_fund_flow: '市场资金流', web_search: '网页事件解释', answer: '综合分析'};
     var text = steps.map(function (step) { return labels[step.kind] || '来源步骤'; }).join(' → ');
     var source = run.source_summary || {};
-    var local = source.local_pdf === '未使用' ? '未使用本地财报' : '';
+    var notes = [];
+    if (source.local_pdf === '未使用') notes.push('未使用本地财报');
+    if (plan.source_mode === 'general_web') notes.push('非股票问题：仅模型与网页搜索');
+    if (plan.source_mode === 'market_recap') notes.push('A 股日/周复盘');
     return '<div class="chat-execution-summary" aria-label="执行来源">已按计划：'
-      + escapeHtml(text) + (local ? ' · ' + escapeHtml(local) : '') + '</div>';
+      + escapeHtml(text) + (notes.length ? ' · ' + escapeHtml(notes.join('；')) : '') + '</div>';
   }
 
   return {
