@@ -26,7 +26,7 @@
 
 研究记忆和决策的持久化能力已由 Task 1/2 移除；启动时仅删除默认 `data/research_memory.json`，删除失败会阻止启动。此次浏览器回归不再创建、保存、读取或撤销该数据，导出点击被测试拦截，未触达原生下载。
 
-按未合入分支 ruling，本任务未修改 `README.md`、`docs/FEATURE-CATALOG.md` 或 `docs/superpowers/DESIGN-REGISTRY.md`。合入 `main` 后必须以实际合并短 SHA 和本报告中的实际验证结果更新设计台账；README 移除研究记忆/决策说明；FEATURE-CATALOG 移除记忆 API/侧车/不变量并记录破坏性移除。
+按未合入分支 ruling，本任务未修改 `README.md` 或 `docs/FEATURE-CATALOG.md`；`docs/superpowers/DESIGN-REGISTRY.md` 已按项目规则更新为“实施中”。合入 `main` 后必须以实际合并短 SHA 和本报告中的实际验证结果将设计台账更新为“已实现”；README 移除研究记忆/决策说明；FEATURE-CATALOG 移除记忆 API/侧车/不变量并记录破坏性移除。
 
 ## 偏离与风险
 

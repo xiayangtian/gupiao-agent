@@ -57,3 +57,4 @@ Task 3: complete locally, unmerged; task report: `task-3-report.md`. README, FEA
 - 恢复动作：重新派发 Task 3 fix round 1，修 3 个 P2 — (1) test_research_workspace_flow.py:274-294 两个无法失败的 chat 级缺失断言；(2) DESIGN-REGISTRY.md 状态改为 `实施中` 并同步未完成索引；(3) task-3-report.md 修正下载与偏离表述。随后范围复审、最终全分支审查、本地合入与合入后文档更新。
 
 Task 3: fix round 1/5 (3 P2 addressed directly after two runner startup-confirm failures; browser chat absence probe now opens completed session, registry is 实施中, report wording corrected). Ruling: controller applied this bounded fix only after user explicitly approved direct implementation; cost if wrong: fix receives same scoped verification below.
+Task 3: fix round 1 re-review P2 corrected — task report now distinguishes unchanged README/FEATURE-CATALOG from registry 实施中 update.
