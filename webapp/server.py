@@ -2153,7 +2153,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     "{\"objective\":\"简短目标\",\"source_mode\":\"local_evidence|external_market|mixed\","
                     "\"steps\":[{\"id\":\"retrieve|quote|web|answer\",\"kind\":\"retrieve|market_quote|web_search|answer\",\"required\":true,\"depends_on\":[]}],"
                     "\"acceptance\":[\"可读验收条件\"]}。步骤必须以 answer 结尾；只可用步骤为 "
-                    + ",".join(snapshot["available_steps"]) + "；不得输出工具名、参数、公司代码或推理。"),
+                    + ",".join(snapshot["available_steps"]) + "；涉及今日、实时、行情、新闻或公告时必须选择外部步骤，除非问题明确要求历史财报，否则不得选择 retrieve；不得输出工具名、参数、公司代码或推理。"),
         )
         def parse(response):
             content = str(response.get("content") or "").strip()
