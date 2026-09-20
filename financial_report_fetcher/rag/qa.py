@@ -421,6 +421,7 @@ class RagQA:
         scope: Optional[Scope] = None,
         run_id: Optional[str] = None,
         tool_policy: Optional[ToolPolicy] = None,
+        skip_retrieval: bool = False,
     ):
         """流式检索回答，可选工具调用编排。事件：
 
@@ -439,16 +440,19 @@ class RagQA:
         之后强制生成最终答案。未注入 tool_executor 或未传 tools 时走纯 RAG 路径。
         """
         retrieval_degraded = False
-        try:
-            hits = self._query_with_priority(question, scope, priority_report_id, filters)
-        except Exception as exc:  # 首次 embedding 下载失败时不让整条流式问答中断
-            # 只记录可关联的诊断信息：异常文本可能包含用户问题，绝不写入日志。
-            logger.warning(
-                "rag_retrieval_failed run_id=%s error_type=%s",
-                run_id or "-", type(exc).__name__,
-            )
+        if skip_retrieval:
             hits = []
-            retrieval_degraded = True
+        else:
+            try:
+                hits = self._query_with_priority(question, scope, priority_report_id, filters)
+            except Exception as exc:  # 首次 embedding 下载失败时不让整条流式问答中断
+            # 只记录可关联的诊断信息：异常文本可能包含用户问题，绝不写入日志。
+                logger.warning(
+                    "rag_retrieval_failed run_id=%s error_type=%s",
+                    run_id or "-", type(exc).__name__,
+                )
+                hits = []
+                retrieval_degraded = True
         retrieval_report_ids = self._retrieval_report_ids(hits)
         # A policy is authoritative in the trusted-chat path. Legacy callers may
         # still supply raw tools without one, preserving the prior API behavior.
