@@ -1,0 +1,1 @@
+superpowers/plans/2026-09-18-移除研究记忆与决策.md
