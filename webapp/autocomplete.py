@@ -103,6 +103,16 @@ class StockIndex:
                 return name
         return None
 
+    def match_company_name(self, text: str) -> Optional[Dict[str, str]]:
+        """从问题中确定唯一股票名称；仅用于服务端冻结行情 Scope。"""
+        if self._entries is None:
+            return None
+        matches = [(code, name) for code, name in self._entries if name and name in text]
+        if len(matches) != 1:
+            return None
+        code, name = matches[0]
+        return {"code": code, "name": name}
+
     def is_valid_code(self, code: str) -> bool:
         if not code.isdigit() or self._entries is None:
             return False

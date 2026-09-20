@@ -2125,6 +2125,13 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     # 解析并冻结 Scope（在启动生产线程之前；失败回退全库，不让线程崩溃）
     # run_id 提前生成，使范围解析失败也能与本次问答关联检索。
     scope = await asyncio.to_thread(_resolve_scope, body, run_id)
+    # 个股走势不依赖本地财报索引：从已就绪的股票名称索引冻结唯一公司，
+    # 使计划校验能强制行情快照与 K 线，而非以大盘指数替代。
+    trend_words = ("走势", "趋势", "近期", "近来", "最近", "表现", "价格")
+    if not scope.companies and any(word in body.question for word in trend_words):
+        matched_company = stock_index.match_company_name(body.question)
+        if matched_company is not None:
+            scope = Scope.company_only(matched_company["code"], matched_company["name"], ())
 
     # Scope 冻结后先用模型生成受限执行计划；计划失败才回退旧规则。
     tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None

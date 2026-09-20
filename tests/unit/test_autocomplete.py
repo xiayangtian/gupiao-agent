@@ -80,6 +80,12 @@ def test_company_name_lookup():
     assert idx.company_name("999999") is None
 
 
+def test_match_company_name_requires_a_unique_name():
+    idx = _ready_index()
+    assert idx.match_company_name("分析长江电力近期走势") == {"code": "600900", "name": "长江电力"}
+    assert idx.match_company_name("分析长江电力和贵州茅台走势") is None
+
+
 def test_build_failure_allows_retry():
     idx = StockIndex(datasource=FailingDatasource())
     idx.start()
