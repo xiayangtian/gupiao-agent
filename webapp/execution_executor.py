@@ -8,7 +8,7 @@ from webapp.chat_models import Scope
 from webapp.execution_plan import ExecutionPlan
 
 _MARKET_KINDS = frozenset((
-    "market_quote", "market_indices", "market_breadth",
+    "market_quote", "market_kline", "market_indices", "market_breadth",
     "sector_performance", "market_fund_flow",
 ))
 _A_SHARE_INDICES = ("sh000001", "sz399001", "sz399006", "sh000688")
@@ -27,6 +27,20 @@ class ExecutionStepResult:
 class ExecutionResult:
     steps: tuple[ExecutionStepResult, ...]
     source_summary: dict[str, str]
+
+
+def company_kline_handler(tencent_quote: Any) -> Callable[[str, Scope], dict[str, Any]]:
+    """获取已冻结公司 Scope 的近期日/周 K 线，绝不接受模型股票代码。"""
+    def handler(question: str, scope: Scope) -> dict[str, Any]:
+        if not scope.companies:
+            raise RuntimeError("个股走势缺少公司范围")
+        weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
+        period, count = ("week", 5) if weekly else ("day", 10)
+        rows = tencent_quote.kline(scope.companies[0].code, period=period, count=count, adjust="none")
+        if not rows:
+            raise RuntimeError("腾讯行情未返回个股 K 线")
+        return {"provider": "tencent", "symbol": scope.companies[0].code, "period": period, "bars": rows}
+    return handler
 
 
 def a_share_indices_handler(tencent_quote: Any) -> Callable[[str, Scope], dict[str, Any]]:

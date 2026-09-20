@@ -6,10 +6,10 @@ from typing import Any, Literal, Mapping
 
 from webapp.chat_models import Scope
 
-StepKind = Literal["retrieve", "market_quote", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search", "answer"]
+StepKind = Literal["retrieve", "market_quote", "market_kline", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search", "answer"]
 SourceMode = Literal["local_evidence", "external_market", "market_recap", "general_web", "mixed"]
 
-_STEP_KINDS = frozenset(("retrieve", "market_quote", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search", "answer"))
+_STEP_KINDS = frozenset(("retrieve", "market_quote", "market_kline", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search", "answer"))
 _SOURCE_MODES = frozenset(("local_evidence", "external_market", "market_recap", "general_web", "mixed"))
 
 
@@ -92,7 +92,7 @@ def validate_execution_plan(plan: ExecutionPlan, scope: Scope, available_kinds: 
     for step in plan.steps:
         if step.kind != "answer" and step.kind not in available_kinds:
             issues.append(PlanIssue("unavailable_step", "计划请求的来源当前不可用。"))
-        if step.kind in {"market_quote", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search"}:
+        if step.kind in {"market_quote", "market_kline", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search"}:
             external += 1
         if any(dep not in by_id for dep in step.depends_on):
             issues.append(PlanIssue("unknown_dependency", "计划步骤依赖不存在。"))

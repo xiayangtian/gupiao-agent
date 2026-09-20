@@ -76,7 +76,7 @@ from .chat_facts import FactNormalizer, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
 from .execution_planner import ExecutionPlanner, PlanningCapabilities
-from .execution_executor import ExecutionExecutor, a_share_indices_handler
+from .execution_executor import ExecutionExecutor, a_share_indices_handler, company_kline_handler
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolver
 from .chat_store import ChatStore
@@ -2139,13 +2139,15 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         available_kinds.add("web_search")
     # 腾讯指数行情是本地受控能力，不依赖 MCP 清单。
     available_kinds.add("market_indices")
+    # 腾讯 K 线是冻结公司 Scope 的本地受控能力。
+    available_kinds.add("market_kline")
     def _plan_json(question, snapshot):
         response = ai_client.chat(
             messages=[{"role": "user", "content": question}], temperature=0,
             max_tokens=400, response_format={"type": "json_object"}, thinking={"type": "disabled"},
             system=("为智能问答选择来源步骤，只返回一个 JSON 对象："
                     "{\"objective\":\"简短目标\",\"source_mode\":\"local_evidence|external_market|market_recap|general_web|mixed\","
-                    "\"steps\":[{\"id\":\"retrieve|quote|indices|web|answer\",\"kind\":\"retrieve|market_quote|market_indices|web_search|answer\",\"required\":true,\"depends_on\":[]}],"
+                    "\"steps\":[{\"id\":\"retrieve|quote|kline|indices|web|answer\",\"kind\":\"retrieve|market_quote|market_kline|market_indices|web_search|answer\",\"required\":true,\"depends_on\":[]}],"
                     "\"acceptance\":[\"可读验收条件\"]}。步骤必须以 answer 结尾；只可用步骤为 "
                     + ",".join(snapshot["available_steps"]) + "；涉及今日、实时、行情、新闻或公告时必须选择外部步骤，除非问题明确要求历史财报，否则不得选择 retrieve；不得输出工具名、参数、公司代码或推理。"),
         )
@@ -2226,7 +2228,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         def _produce() -> Any:
             # 已验证计划的外部来源由服务端先确定性执行，模型只接收执行产物。
             plan_history = list(history)
-            if planning.plan is not None and any(step.kind in {"market_quote", "market_indices", "web_search"} for step in planning.plan.steps):
+            if planning.plan is not None and any(step.kind in {"market_quote", "market_kline", "market_indices", "web_search"} for step in planning.plan.steps):
                 cfg = RagConfig.load()
                 execute_tool = _build_chat_tool_executor(cfg) or _unavailable_tool_executor()
                 quote_tool = next((name for name in policy.allowed_tools if name.startswith("get_realtime") or name.startswith("get_quote")), "")
@@ -2239,6 +2241,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     return execute_tool("web_search", {"query": question})
                 result = ExecutionExecutor(
                     market_quote=quote if quote_tool else None,
+                    market_kline=company_kline_handler(tencent_quote),
                     market_indices=a_share_indices_handler(tencent_quote),
                     web_search=search if "web_search" in policy.allowed_tools else None,
                 ).execute(planning.plan, body.question, scope)
@@ -2258,7 +2261,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             try:
                 kwargs = dict(question=body.question, history=plan_history, filters=body.filters, tools=tools,
                               priority_report_id=priority_report_id, scope=scope, run_id=run_id,
-                              skip_retrieval=bool(planning.plan and planning.plan.source_mode in {"market_recap", "general_web"}))
+                              skip_retrieval=bool(planning.plan and planning.plan.source_mode in {"market_recap", "general_web", "external_market"}))
                 # M1-compatible injected test adapters may not yet expose the M2
                 # argument; production RagQA always receives the policy.
                 parameters = inspect.signature(chat_qa.answer_stream).parameters.values()
