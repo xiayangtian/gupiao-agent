@@ -2477,9 +2477,10 @@ async function deleteSelectedChatSessions() {
     if (ids.indexOf(chatSessionId) >= 0) { chatSessionId = null; var box = $('#chat-history'); if (box) box.innerHTML = ''; }
     selectedChatSessionIds.clear();
     await loadChatSessions();
-    refreshResearchMemoryPanel();
     if (result.deleted_session_ids.length) alert('已删除 ' + result.deleted_session_ids.length + ' 个会话。');
-  } catch (_) { alert('批量删除失败，请稍后重试。'); }
+  } catch (err) {
+    alert('批量删除失败：' + (err && err.message ? err.message : '请稍后重试。'));
+  }
 }
 
 async function renameChatSession(sid) {
