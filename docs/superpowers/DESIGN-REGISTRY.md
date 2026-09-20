@@ -18,8 +18,6 @@
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
 | A 股行情复盘 MCP | 待实现 | 可直接执行 | [主记录](#a-share-market-recap) |
-| 移除研究记忆与研究决策 | 实施中 | — | [主记录](#remove-research-memory) |
-| 模型执行计划器 | 实施中 | — | [主记录](#model-execution-planner) |
 
 ## 全部设计
 
@@ -44,7 +42,7 @@
 | <a id="trusted-chat-m2"></a>智能问答可信 Agent M2：受控检索与事实核验 | 同 M1 总体设计 | [M2](plans/2026-09-10-智能问答可信Agent-M2.md) | 已实现 | — | 合并 3c64060；`python3 -m pytest -q`：1008 passed，1 skipped，3 warnings；`git diff --check` 通过 | 2026-09-16 |
 | <a id="trusted-chat-m3"></a>智能问答可信 Agent M3：研究型 Agent | 同 M1 总体设计 | [M3](plans/2026-09-10-智能问答可信Agent-M3.md) | 已实现 | — | 合并 dca62e4；`python3 -m pytest -q`：1049 passed，1 skipped，3 warnings；研究流浏览器回归：4 passed；`git diff --check` 与 CSS 检查通过 | 2026-09-16 |
 | <a id="trusted-chat-m4"></a>智能问答可信 Agent M4：研究工作台与质量运营 | 同 M1 总体设计 | [M4](plans/2026-09-10-智能问答可信Agent-M4.md) | 已实现 | — | 合并 7d89a7e；`python3 -m pytest -q`：1127 passed，2 skipped，3 warnings；工作台浏览器回归 10 passed；`git diff --check` 与 CSS 检查通过 | 2026-09-17 |
-| <a id="remove-research-memory"></a>移除研究记忆与研究决策 | [设计](specs/2026-09-18-移除研究记忆与决策设计.md) | [计划](plans/2026-09-18-移除研究记忆与决策.md) | 实施中 | — | 分支 `feat/remove-research-memory` 已于 2026-09-18 创建；进度 `.superpowers/sdd/2026-09-18-移除研究记忆与决策/progress.md` | 2026-09-18 |
+| <a id="remove-research-memory"></a>移除研究记忆与研究决策 | [设计](specs/2026-09-18-移除研究记忆与决策设计.md) | [计划](plans/2026-09-18-移除研究记忆与决策.md) | 已实现 | — | 合并 f9472e6；`python3 -m pytest -q`：1147 passed，2 skipped，3 warnings；工作台浏览器 12 passed；`git diff --check` 与 CSS 检查通过 | 2026-09-20 |
 | <a id="trusted-chat-m4-p2"></a>可信问答 M4 P2：工作台体验与质量运营修补 | [设计](specs/2026-09-17-可信问答M4-P2修补-design.md) | [计划](plans/2026-09-17-可信问答M4-P2修补.md) | 已实现 | — | 合并 e0dcde6；`python3 -m pytest -q`：1155 passed，2 skipped，3 warnings，1 个既有浏览器环境 ERROR 单独复跑通过；工作台浏览器 12 passed；质量命令、`git diff --check` 与 CSS 检查通过 | 2026-09-17 |
 | <a id="financial-structure-visuals"></a>财务结构可视化 | [设计](specs/2026-09-10-财务结构可视化-design.md) | [计划](plans/2026-09-10-财务结构可视化.md) | 已实现 | — | 合并 1107509；`python3 -m pytest tests/unit/test_visualizations.py -q`：14 passed in 0.12s | 2026-09-14 |
 | <a id="design-registry"></a>方案设计台账 | [设计](specs/2026-09-14-方案设计台账-design.md) | [计划](plans/2026-09-14-方案设计台账.md) | 已实现 | — | 合并 f27056c；`python3 -m pytest tests/unit/test_design_registry.py -q` → 4 passed in 0.11s | 2026-09-14 |
