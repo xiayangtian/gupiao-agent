@@ -166,10 +166,10 @@ def test_workspace_browser_flow_uses_isolated_deterministic_m4_fixtures():
     assert "fixture-completed-run" in launcher
     assert "_seed_workspace_fixtures" in launcher
     assert "ResearchWorkspaceStore(" in launcher
-    assert "ResearchMemoryStore(" in launcher
+    assert "ResearchMemoryStore" not in launcher
     assert "tempfile.mkdtemp" in launcher
     assert "server.research_workspace = ResearchWorkspaceStore" in launcher
-    assert "server.research_memory = ResearchMemoryStore" in launcher
+    assert "server.research_memory" not in launcher
     assert "IngestionService" not in launcher
     assert "ReportDownloader" not in launcher
     assert "CNINFODatasource" not in launcher

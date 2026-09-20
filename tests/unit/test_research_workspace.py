@@ -12,7 +12,6 @@ from webapp.chat_models import (
     ToolArtifact,
 )
 from webapp.chat_store import ChatStore
-from webapp.research_memory import ResearchMemoryStore
 from webapp.research_workspace import ResearchWorkspaceQuery, ResearchWorkspaceStore
 
 
@@ -72,10 +71,7 @@ def _workspace_with_runs(tmp_path, runs_by_session: list[tuple[str, list[AnswerR
         for run in runs:
             chats.append_turn(session["id"], question=f"{label} 问题", run=run)
     return (
-        ResearchWorkspaceStore(
-            chats, str(tmp_path / "research_workspace.json"),
-            memory_path=str(tmp_path / "research_memory.json"),
-        ),
+        ResearchWorkspaceStore(chats, str(tmp_path / "research_workspace.json")),
         chats,
         session_ids,
     )
@@ -95,24 +91,18 @@ def test_workspace_filters_by_persisted_company_and_status_not_title(tmp_path):
     assert [item.run_id for item in items] == ["bank-completed"]
 
 
-def test_workspace_text_search_matches_title_and_saved_decision_but_not_raw_artifact(tmp_path):
-    decision_run = _run("decision-run", code="601288", name="农业银行")
+def test_workspace_text_search_matches_title_but_not_raw_artifact(tmp_path):
+    title_run = _run("title-run", code="601288", name="农业银行")
     artifact_run = _run("artifact-run", code="600900", name="长江电力")
-    store, _, sessions = _workspace_with_runs(tmp_path, [
-        ("农业银行研究", [decision_run]),
+    store, _, _ = _workspace_with_runs(tmp_path, [
+        ("现金流研究", [title_run]),
         ("长江电力研究", [artifact_run]),
     ])
-    # 真实保存路径写入决策，而不是给 AnswerRun 手写一个没有生产写入方的字段。
-    ResearchMemoryStore(
-        store.memory_path,
-        run_lookup=lambda run_id: decision_run if run_id == decision_run.id else None,
-        owner_session_id=sessions["农业银行研究"],
-    ).save_decision("关注现金流改善", decision_run.id, (PDF_EVIDENCE_ID,))
 
     items = store.list_items(ResearchWorkspaceQuery(text="现金流"))
 
-    assert [item.run_id for item in items] == ["decision-run"]
-    assert all("现金流" in (item.title + item.searchable_summary) for item in items)
+    assert [item.run_id for item in items] == ["title-run"]
+    assert items[0].searchable_summary == ""
     assert store.list_items(ResearchWorkspaceQuery(text="原始 PDF 片段")) == []
 
 
@@ -219,7 +209,7 @@ def test_workspace_favorites_reload_from_sidecar_and_prune_orphan_runs(tmp_path)
     store.set_favorite(sessions["农业银行研究"], "first", True)
     sidecar_path = tmp_path / "research_workspace.json"
 
-    reloaded = ResearchWorkspaceStore(chats, str(sidecar_path), memory_path=str(tmp_path / "research_memory.json"))
+    reloaded = ResearchWorkspaceStore(chats, str(sidecar_path))
 
     assert [item.run_id for item in reloaded.list_items(ResearchWorkspaceQuery(favorite_only=True))] == ["first"]
 
@@ -227,7 +217,7 @@ def test_workspace_favorites_reload_from_sidecar_and_prune_orphan_runs(tmp_path)
     sidecar["favorites"].append({"session_id": sessions["农业银行研究"], "run_id": "removed-run"})
     sidecar_path.write_text(json.dumps(sidecar, ensure_ascii=False), encoding="utf-8")
 
-    orphaned = ResearchWorkspaceStore(chats, str(sidecar_path), memory_path=str(tmp_path / "research_memory.json"))
+    orphaned = ResearchWorkspaceStore(chats, str(sidecar_path))
     items = orphaned.list_items(ResearchWorkspaceQuery(favorite_only=True))
 
     assert [item.run_id for item in items] == ["first"]

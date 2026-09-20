@@ -51,7 +51,6 @@ from webapp.chat_models import (  # noqa: E402
     AnswerRun, EvidenceArtifact, Fact, FactConflict, IntentDecision, Scope, VerificationReport,
 )
 from webapp.chat_store import ChatStore  # noqa: E402
-from webapp.research_memory import ResearchMemoryStore  # noqa: E402
 from webapp.research_models import ResearchPlan, ResearchRun, ResearchStep, ResearchStepRun  # noqa: E402
 from webapp.research_workspace import ResearchWorkspaceStore  # noqa: E402
 
@@ -404,16 +403,8 @@ def _fixture_research_run(scope: Scope, run_id: str, status: str) -> ResearchRun
     )
 
 
-def _fixture_run_lookup(run_id: str):
-    """Resolve a fixture AnswerRun from the launcher's temporary ChatStore only."""
-    for record in server.chat_store.iter_session_runs():
-        if record.run.id == run_id:
-            return record.run
-    return None
-
-
 def _seed_workspace_fixtures(store: ChatStore) -> tuple[str, str, str]:
-    """Persist completed/partial/stopped M4 fixtures and an explicit saved decision.
+    """Persist completed/partial/stopped M4 fixtures.
 
     Fixtures are immutable AnswerRun/Fact/Artifact/ResearchRun records.  They are
     intentionally written through ChatStore into the launcher's temporary directory
@@ -515,24 +506,11 @@ def build_app():
     server.REPORTS_DIR = reports_dir
     server.ANALYSIS_DIR = analysis_dir
     server.chat_store = ChatStore(os.path.join(tmp_dir, "chat_sessions.json"))
-    completed_session, _partial_session, _stopped_session = _seed_workspace_fixtures(server.chat_store)
-    # This is fixture construction for an already explicit decision, not a product
-    # auto-save path.  It verifies session deletion leaves independent memory alone.
-    # The owner is the fixture session that already owns the source run.
-    memory_path = os.path.join(tmp_dir, "research_memory.json")
-    server.research_memory = ResearchMemoryStore(
-        memory_path,
-        run_lookup=_fixture_run_lookup,
-        owner_session_id=completed_session,
-    )
-    server.research_memory.save_decision(
-        "关注现金流变化", "fixture-completed-run", (f"{FIXTURE_REPORT_ID}#p40",)
-    )
-    # server.py's module globals are instantiated at import time; replace these
-    # sidecars as well so browser acceptance cannot read repository/user state, and
-    # point the workspace at the same memory sidecar the save above wrote.
+    _seed_workspace_fixtures(server.chat_store)
+    # server.py's module globals are instantiated at import time; replace the
+    # workspace sidecar so browser acceptance cannot read repository/user state.
     server.research_workspace = ResearchWorkspaceStore(
-        server.chat_store, os.path.join(tmp_dir, "research_workspace.json"), memory_path=memory_path,
+        server.chat_store, os.path.join(tmp_dir, "research_workspace.json"),
     )
     return server.app
 
