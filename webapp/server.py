@@ -2133,7 +2133,12 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         stock_index.wait_ready(timeout=5.0)
         matched_company = stock_index.match_company_name(body.question)
         if matched_company is not None:
-            scope = Scope.company_only(matched_company["code"], matched_company["name"], ())
+            # Scope 合约要求公司范围必须绑定本地报告；若无本地报告则保持全库，
+            # 绝不制造空报告范围。
+            scope = _build_scope_resolver().resolve(
+                body.question,
+                ScopeRequest("company_only", {"code": matched_company["code"]}),
+            )
 
     # Scope 冻结后先用模型生成受限执行计划；计划失败才回退旧规则。
     tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
