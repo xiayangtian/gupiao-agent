@@ -207,8 +207,7 @@ def _workspace_script(company: str = "", status: str = "", favorite_only: bool =
   document.querySelector('#research-filter-favorite').checked = {str(favorite_only).lower()};
   document.querySelector('#research-filter-apply').click();
   const deadline = Date.now() + 10000;
-  while ((!document.querySelector('#research-workspace-status').textContent.includes('已显示')
-      || !document.querySelector('#research-memory-status').textContent.includes('已显示'))
+  while (!document.querySelector('#research-workspace-status').textContent.includes('已显示')
       && Date.now() < deadline) {{
     await new Promise(resolve => setTimeout(resolve, 100));
   }}
@@ -272,54 +271,30 @@ def test_workspace_filter_ignores_stale_unfiltered_response(browser_session, act
     assert _failed_requests(browser_session, actual_app_url) == []
 
 
-def test_verified_fact_can_save_and_revoke_memory(browser_session, actual_app_url):
-    """Only the verified PDF fixture exposes a save action, which remains revocable."""
+def test_workspace_has_no_removed_memory_or_decision_entry(browser_session, actual_app_url):
+    """The live workbench exposes none of the removed persistence entry points."""
     _start_observing(browser_session)
+    _eval(browser_session, _workspace_script())
     rendered = _eval(browser_session, """
-(async () => {
-  const workspace = await fetch('/api/research/workspace');
-  const items = (await workspace.json()).items;
-  const completed = items.find(item => item.run_id === 'fixture-completed-run');
-  const reference = items.find(item => item.run_id === 'fixture-reference-run');
-  await openChatSession(completed.session_id);
-  const deadline = Date.now() + 10000;
-  while (!document.querySelector('[data-research-memory-kind="fact"]') && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const save = document.querySelector('[data-research-memory-kind="fact"]');
-  const referenceSave = [...document.querySelectorAll('[data-research-memory-kind="fact"]')]
-    .some(button => button.dataset.researchRunId === 'fixture-reference-run');
-  if (save) save.click();
-  while (!document.querySelector('.research-memory-entry') && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const revoke = document.querySelector('[data-research-memory-id]');
-  window.confirm = () => true;
-  if (revoke) revoke.click();
-  while (document.body.textContent.indexOf('研究记忆已撤销。') < 0 && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const revokedText = document.body.textContent;
-  await openChatSession(reference.session_id);
-  while (!document.querySelector('#chat-history .chat-run') && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const referenceFactAction = !!document.querySelector('[data-research-memory-kind="fact"]');
-  return JSON.stringify({ hasSave: !!save, referenceSave, referenceFactAction, revokedText });
+(() => {
+  const removedMemory = 'research' + '-memory';
+  const removedDecision = 'save' + '-decision';
+  return JSON.stringify({
+    panel: !!document.querySelector('.' + removedMemory + '-panel'),
+    factAction: !!document.querySelector('[data-' + removedMemory + '-kind]'),
+    decisionAction: !!document.querySelector('[data-research-action="' + removedDecision + '"]'),
+  });
 })()
 """)
 
-    assert rendered["hasSave"] is True
-    assert rendered["referenceSave"] is False
-    assert rendered["referenceFactAction"] is False
-    assert "研究记忆已撤销。" in rendered["revokedText"]
+    assert rendered == {"panel": False, "factAction": False, "decisionAction": False}
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
     assert _failed_requests(browser_session, actual_app_url) == []
 
 
-def test_delete_discloses_retained_memory_and_keeps_fixture_pdf(browser_session, actual_app_url):
-    """Deleting a session discloses its retained explicit memory and leaves the PDF route available."""
+def test_delete_keeps_fixture_pdf_available(browser_session, actual_app_url):
+    """Deleting a session keeps its source PDF available without a persistence sidecar."""
     _start_observing(browser_session)
     rendered = _eval(browser_session, """
 (async () => {
@@ -329,7 +304,7 @@ def test_delete_discloses_retained_memory_and_keeps_fixture_pdf(browser_session,
   window.confirm = () => true;
   await deleteChatSession(completed.session_id);
   const deadline = Date.now() + 10000;
-  while (document.body.textContent.indexOf('条研究记忆仍被保留') < 0 && Date.now() < deadline) {
+  while (document.body.textContent.indexOf('会话已删除') < 0 && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   const pdf = await fetch('/api/history-pdf/' + encodeURIComponent('农业银行_601288_半年报_2026.pdf'));
@@ -337,7 +312,7 @@ def test_delete_discloses_retained_memory_and_keeps_fixture_pdf(browser_session,
 })()
 """)
 
-    assert "1 条研究记忆仍被保留，原始 PDF 不会被删除。" in rendered["text"]
+    assert "会话已删除，原始 PDF 不会被删除。" in rendered["text"]
     assert rendered["pdfStatus"] == 200
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
@@ -377,9 +352,9 @@ def test_export_contains_scope_status_and_pdf_page_link(browser_session, actual_
     assert _failed_requests(browser_session, actual_app_url) == []
 
 
-@pytest.mark.parametrize("viewport", [(1280, 900), (390, 844)])
-def test_decision_refresh_and_quality_status_preserve_workspace_filters(browser_session, actual_app_url, viewport):
-    """保存/撤销决策立即刷新已打开工作台；质量摘要只展示安全状态。"""
+@pytest.mark.parametrize("viewport", [(1280, 900), (768, 1000), (390, 844)])
+def test_quality_status_preserves_workspace_filters(browser_session, actual_app_url, viewport):
+    """Quality status remains safe while the filtered workbench fits every required viewport."""
     _run_browser(browser_session, "set", "viewport", str(viewport[0]), str(viewport[1]))
     _start_observing(browser_session)
     rendered = _eval(browser_session, r"""
@@ -404,43 +379,14 @@ def test_decision_refresh_and_quality_status_preserve_workspace_filters(browser_
   document.querySelector('#research-filter-company').value = '601288';
   document.querySelector('#research-filter-status').value = 'completed';
   document.querySelector('#research-filter-apply').click();
-  let until = deadline();
+  const until = deadline();
   while ((!document.querySelector('#research-workspace-status').textContent.includes('已显示')
       || !document.querySelector('#research-quality-status').textContent.includes('健康评测'))
       && Date.now() < until) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  const workspace = await (await originalFetch('/api/research/workspace')).json();
-  const completed = workspace.items.find(item => item.run_id === 'fixture-completed-run');
-  await openChatSession(completed.session_id);
-  until = deadline();
-  while (!document.querySelector('[data-research-action="save-decision"]') && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  document.querySelector('[data-research-action="save-decision"]').click();
-  document.querySelector('#research-decision-text').value = '即时刷新决策';
-  document.querySelector('#research-decision-form button[type="submit"]').click();
-  until = deadline();
-  while (!document.querySelector('[data-research-run-id="fixture-completed-run"]').textContent.includes('即时刷新决策')
-      && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const saved = document.querySelector('[data-research-run-id="fixture-completed-run"]').textContent;
-  const revoke = [...document.querySelectorAll('#research-memory-list .research-memory-row')]
-    .find(row => row.textContent.includes('即时刷新决策'))
-    .querySelector('[data-research-action="revoke-memory"]');
-  window.confirm = () => true;
-  revoke.click();
-  until = deadline();
-  while (document.querySelector('[data-research-run-id="fixture-completed-run"]').textContent.includes('即时刷新决策')
-      && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const row = document.querySelector('[data-research-run-id="fixture-completed-run"]');
   window.fetch = originalFetch;
   return JSON.stringify({
-    saved,
-    afterRevoke: row.textContent,
     company: document.querySelector('#research-filter-company').value,
     status: document.querySelector('#research-filter-status').value,
     quality: document.querySelector('#research-quality-status').textContent,
@@ -450,9 +396,6 @@ def test_decision_refresh_and_quality_status_preserve_workspace_filters(browser_
 })()
 """)
 
-    assert "已保存决策：" in rendered["saved"]
-    assert "即时刷新决策" in rendered["saved"]
-    assert "即时刷新决策" not in rendered["afterRevoke"]
     assert rendered["company"] == "601288"
     assert rendered["status"] == "completed"
     assert "健康评测：通过" in rendered["quality"]
@@ -476,99 +419,6 @@ def test_workspace_mobile_has_no_horizontal_overflow(browser_session, actual_app
     assert geometry["scrollWidth"] <= geometry["innerWidth"], (
         f"{viewport} 工作台横向溢出：{geometry['scrollWidth']} > {geometry['innerWidth']}"
     )
-    assert _console_errors(browser_session) == []
-    assert _page_errors(browser_session) == []
-    assert _failed_requests(browser_session, actual_app_url) == []
-
-
-def test_workbench_memory_list_persists_across_refresh_and_revokes(browser_session, actual_app_url):
-    """刷新后仍能在工作台管理持久化记忆；已删除会话的记忆单独分组且仍可撤销。"""
-    _start_observing(browser_session)
-    rendered = _eval(browser_session, """
-(async () => {
-  const deadline = () => Date.now() + 10000;
-  const toggle = document.querySelector('#research-workspace-toggle');
-  if (document.querySelector('#research-workspace').classList.contains('hidden')) toggle.click();
-  let until = deadline();
-  while (!document.querySelector('#research-memory-list .research-memory-row') && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const fixtureRows = document.querySelectorAll('#research-memory-list .research-memory-row').length;
-  const items = (await (await fetch('/api/research/workspace')).json()).items;
-  const completed = items.find(item => item.run_id === 'fixture-completed-run');
-  await openChatSession(completed.session_id);
-  until = deadline();
-  while (!document.querySelector('[data-research-memory-kind="fact"]') && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const save = document.querySelector('[data-research-memory-kind="fact"]');
-  if (save) save.click();
-  until = deadline();
-  while (document.querySelectorAll('#research-memory-list .research-memory-row').length < fixtureRows + 1 && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const savedRows = document.querySelectorAll('#research-memory-list .research-memory-row').length;
-  window.confirm = () => true;
-  await deleteChatSession(completed.session_id);
-  until = deadline();
-  while (document.querySelector('#research-memory-list .research-memory-group h4').textContent !== '来自已删除会话' && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const groups = [...document.querySelectorAll('#research-memory-list .research-memory-group')].map(group => ({
-    label: group.querySelector('h4').textContent,
-    rows: group.querySelectorAll('.research-memory-row').length,
-  }));
-  const revoke = document.querySelector('#research-memory-list [data-research-action="revoke-memory"]');
-  if (revoke) revoke.click();
-  until = deadline();
-  while (document.querySelectorAll('#research-memory-list .research-memory-row').length >= savedRows && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const remaining = document.querySelectorAll('#research-memory-list .research-memory-row').length;
-  const persisted = (await (await fetch('/api/research/memory')).json()).entries.length;
-  return JSON.stringify({ fixtureRows, savedRows, groups, remaining, persisted });
-})()
-""")
-
-    assert rendered["fixtureRows"] == 1
-    assert rendered["savedRows"] == 2
-    assert rendered["groups"] == [{"label": "来自已删除会话", "rows": 2}]
-    assert rendered["remaining"] == 1
-    assert rendered["persisted"] == 1
-
-    # 真实重新加载页面：剩下的那条记忆由服务端重建，仍可撤销。
-    _run_browser(browser_session, "open", actual_app_url + "/#/chat")
-    reloaded = _eval(browser_session, """
-(async () => {
-  const deadline = () => Date.now() + 10000;
-  const toggle = document.querySelector('#research-workspace-toggle');
-  if (document.querySelector('#research-workspace').classList.contains('hidden')) toggle.click();
-  let until = deadline();
-  while (!document.querySelector('#research-memory-list .research-memory-row') && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const groups = [...document.querySelectorAll('#research-memory-list .research-memory-group')].map(group => ({
-    label: group.querySelector('h4').textContent,
-    rows: group.querySelectorAll('.research-memory-row').length,
-  }));
-  const rowsAfterReload = document.querySelectorAll('#research-memory-list .research-memory-row').length;
-  window.confirm = () => true;
-  const revoke = document.querySelector('#research-memory-list [data-research-action=\"revoke-memory\"]');
-  if (revoke) revoke.click();
-  until = deadline();
-  while (document.querySelectorAll('#research-memory-list .research-memory-row').length >= rowsAfterReload && Date.now() < until) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const remaining = document.querySelectorAll('#research-memory-list .research-memory-row').length;
-  const persisted = (await (await fetch('/api/research/memory')).json()).entries.length;
-  return JSON.stringify({ rowsAfterReload, groups, remaining, persisted });
-})()
-""")
-
-    assert reloaded["rowsAfterReload"] == 1
-    assert reloaded["groups"] == [{"label": "来自已删除会话", "rows": 1}]
-    assert reloaded["remaining"] == 0
-    assert reloaded["persisted"] == 0
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
     assert _failed_requests(browser_session, actual_app_url) == []

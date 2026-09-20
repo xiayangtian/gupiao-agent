@@ -184,6 +184,16 @@ def test_workspace_browser_flow_uses_isolated_deterministic_m4_fixtures():
     assert "_failed_requests" in source
 
 
+def test_workspace_browser_fixture_does_not_seed_removed_memory_feature():
+    source = WORKSPACE_BROWSER_TEST.read_text(encoding="utf-8")
+    launcher = STRUCTURE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "ResearchMemoryStore" not in launcher
+    assert "save_decision" not in launcher
+    assert "research-memory" not in source
+    assert "save-decision" not in source
+
+
 def test_workspace_export_browser_test_intercepts_native_downloads():
     """浏览器验收可验证导出动作，但不得将 fixture 导出文件写入用户下载目录。"""
     source = WORKSPACE_BROWSER_TEST.read_text(encoding="utf-8")
