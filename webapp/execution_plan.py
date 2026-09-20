@@ -6,11 +6,11 @@ from typing import Any, Literal, Mapping
 
 from webapp.chat_models import Scope
 
-StepKind = Literal["retrieve", "market_quote", "web_search", "answer"]
-SourceMode = Literal["local_evidence", "external_market", "mixed"]
+StepKind = Literal["retrieve", "market_quote", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search", "answer"]
+SourceMode = Literal["local_evidence", "external_market", "market_recap", "general_web", "mixed"]
 
-_STEP_KINDS = frozenset(("retrieve", "market_quote", "web_search", "answer"))
-_SOURCE_MODES = frozenset(("local_evidence", "external_market", "mixed"))
+_STEP_KINDS = frozenset(("retrieve", "market_quote", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search", "answer"))
+_SOURCE_MODES = frozenset(("local_evidence", "external_market", "market_recap", "general_web", "mixed"))
 
 
 @dataclass(frozen=True)
@@ -83,12 +83,16 @@ def validate_execution_plan(plan: ExecutionPlan, scope: Scope, available_kinds: 
         issues.append(PlanIssue("duplicate_step", "计划步骤 ID 不能重复。"))
     if not plan.steps or plan.steps[-1].kind != "answer":
         issues.append(PlanIssue("missing_answer", "计划必须以最终回答步骤结束。"))
+    if plan.source_mode == "general_web" and any(step.kind not in {"web_search", "answer"} for step in plan.steps):
+        issues.append(PlanIssue("general_web_boundary", "非股票问题只允许网页搜索和模型回答。"))
+    if plan.source_mode == "market_recap" and "retrieve" in {step.kind for step in plan.steps}:
+        issues.append(PlanIssue("market_recap_boundary", "A 股复盘默认不得检索财报。"))
     external = 0
     by_id = {step.id: step for step in plan.steps}
     for step in plan.steps:
         if step.kind != "answer" and step.kind not in available_kinds:
             issues.append(PlanIssue("unavailable_step", "计划请求的来源当前不可用。"))
-        if step.kind in {"market_quote", "web_search"}:
+        if step.kind in {"market_quote", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "web_search"}:
             external += 1
         if any(dep not in by_id for dep in step.depends_on):
             issues.append(PlanIssue("unknown_dependency", "计划步骤依赖不存在。"))
