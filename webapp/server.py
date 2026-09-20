@@ -2129,6 +2129,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     # 使计划校验能强制行情快照与 K 线，而非以大盘指数替代。
     trend_words = ("走势", "趋势", "近期", "近来", "最近", "表现", "价格")
     if not scope.companies and any(word in body.question for word in trend_words):
+        stock_index.start()
+        stock_index.wait_ready(timeout=5.0)
         matched_company = stock_index.match_company_name(body.question)
         if matched_company is not None:
             scope = Scope.company_only(matched_company["code"], matched_company["name"], ())
