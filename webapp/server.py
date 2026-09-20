@@ -2148,8 +2148,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     def _plan_json(question, snapshot):
         response = ai_client.chat(
             messages=[{"role": "user", "content": question}], temperature=0,
-            max_tokens=400, response_format={"type": "json_object"},
-            system=("为智能问答选择来源步骤，只返回 JSON。可用步骤为 "
+            max_tokens=400, response_format={"type": "json_object"}, thinking={"type": "disabled"},
+            system=("为智能问答选择来源步骤，只返回一个 JSON 对象："
+                    "{\"objective\":\"简短目标\",\"source_mode\":\"local_evidence|external_market|mixed\","
+                    "\"steps\":[{\"id\":\"retrieve|quote|web|answer\",\"kind\":\"retrieve|market_quote|web_search|answer\",\"required\":true,\"depends_on\":[]}],"
+                    "\"acceptance\":[\"可读验收条件\"]}。步骤必须以 answer 结尾；只可用步骤为 "
                     + ",".join(snapshot["available_steps"]) + "；不得输出工具名、参数、公司代码或推理。"),
         )
         def parse(response):
@@ -2166,8 +2169,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         except json.JSONDecodeError:
             # 部分兼容提供方忽略 response_format；以无该参数的短提示重试一次。
             retry = ai_client.chat(messages=[{"role": "user", "content": question}], temperature=0,
-                                   max_tokens=400,
-                                   system="只输出一个 JSON 对象，不要 Markdown、解释或工具调用。")
+                                   max_tokens=400, thinking={"type": "disabled"},
+                                   system="只输出执行计划 JSON：objective、source_mode、steps、acceptance；不要 Markdown、解释或工具调用。")
             return parse(retry)
     planning = ExecutionPlanner(_plan_json).plan(
         body.question, scope, PlanningCapabilities(available_kinds, 2),
