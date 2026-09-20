@@ -2115,6 +2115,8 @@ if (ragIngestAllBtn) {
 
 var chatSessionId = null;   // 当前会话 id（null = 新会话）
 var chatSessions = [];       // 历史会话列表
+var chatSessionManageMode = false;
+var selectedChatSessionIds = new Set();
 var researchWorkspaceItems = [];
 var researchWorkspaceLoadGeneration = 0;
 var researchRunOwners = {};
@@ -2221,9 +2223,15 @@ async function initChatPage() {
     sendBtn.addEventListener('click', function () { sendChatQA(); });
   }
   var newBtn = $('#chat-new-btn');
-  if (newBtn) {
-    newBtn.addEventListener('click', function () { newChatSession(); });
-  }
+  if (newBtn) newBtn.addEventListener('click', function () { newChatSession(); });
+  var manageBtn = $('#chat-manage-btn');
+  if (manageBtn) manageBtn.addEventListener('click', function () {
+    chatSessionManageMode = !chatSessionManageMode;
+    selectedChatSessionIds.clear();
+    manageBtn.setAttribute('aria-pressed', String(chatSessionManageMode));
+    manageBtn.textContent = chatSessionManageMode ? '完成' : '管理';
+    renderChatSessionList();
+  });
   bindChatSessionList();
   bindChatRunActions();
   bindResearchWorkspace();
@@ -2511,11 +2519,13 @@ function renderChatSessionList() {
     listBox.innerHTML = '<p class="hint">暂无历史会话，点击「新会话」开始提问</p>';
     return;
   }
-  listBox.innerHTML = chatSessions.map(function (s) {
+  var toolbar = chatSessionManageMode ? '<div class="chat-session-bulk"><label><input type="checkbox" class="chat-select-all"' + (selectedChatSessionIds.size === chatSessions.length ? ' checked' : '') + '> 全选</label><button class="chat-session-btn chat-bulk-delete-btn"' + (selectedChatSessionIds.size ? '' : ' disabled') + '>删除所选（' + selectedChatSessionIds.size + '）</button></div>' : '';
+  listBox.innerHTML = toolbar + chatSessions.map(function (s) {
     var active = s.id === chatSessionId ? ' active' : '';
     var title = escapeHtml(s.title || '新会话');
     var time = s.updated_at ? new Date(s.updated_at).toLocaleString() : '';
-    return '<div class="chat-session-item' + active + '" data-sid="' + escapeHtml(s.id) + '" title="' + escapeHtml(time) + '">'
+    var selected = selectedChatSessionIds.has(s.id) ? ' checked' : '';
+    return '<div class="chat-session-item' + active + '" data-sid="' + escapeHtml(s.id) + '" title="' + escapeHtml(time) + '">' + (chatSessionManageMode ? '<input class="chat-session-select" type="checkbox" aria-label="选择会话：' + title + '" data-sid="' + escapeHtml(s.id) + '"' + selected + '>' : '')
       + '<div class="chat-session-main">'
       + '<div class="chat-session-title">' + title + '</div>'
       + '<div class="chat-session-meta">' + s.message_count + ' 条消息</div>'
@@ -2533,6 +2543,12 @@ function bindChatSessionList() {
   if (!listBox || listBox.dataset.bound) return;
   listBox.dataset.bound = '1';
   listBox.addEventListener('click', function (e) {
+    var selectAll = e.target.closest ? e.target.closest('.chat-select-all') : null;
+    if (selectAll) { selectedChatSessionIds = new Set(selectAll.checked ? chatSessions.map(function(s) { return s.id; }) : []); renderChatSessionList(); return; }
+    var select = e.target.closest ? e.target.closest('.chat-session-select') : null;
+    if (select) { select.checked ? selectedChatSessionIds.add(select.dataset.sid) : selectedChatSessionIds.delete(select.dataset.sid); renderChatSessionList(); return; }
+    var bulk = e.target.closest ? e.target.closest('.chat-bulk-delete-btn') : null;
+    if (bulk) { deleteSelectedChatSessions(); return; }
     var renameBtn = e.target.closest ? e.target.closest('.chat-rename-btn') : null;
     if (renameBtn) { renameChatSession(renameBtn.dataset.sid); return; }
     var delBtn = e.target.closest ? e.target.closest('.chat-delete-btn') : null;
@@ -2543,6 +2559,22 @@ function bindChatSessionList() {
 }
 
 // 重命名历史会话（prompt 输入新标题）
+async function deleteSelectedChatSessions() {
+  var ids = Array.from(selectedChatSessionIds);
+  if (!ids.length || !confirm('确定删除所选 ' + ids.length + ' 个历史会话？删除后不可恢复。')) return;
+  try {
+    var res = await fetch('/api/chat/sessions/batch-delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({session_ids: ids}) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var result = await res.json();
+    ids.forEach(function(sid) { var st = chatStreams[sid]; if (st && st.reader) st.reader.cancel().catch(function() {}); delete chatStreams[sid]; });
+    if (ids.indexOf(chatSessionId) >= 0) { chatSessionId = null; var box = $('#chat-history'); if (box) box.innerHTML = ''; }
+    selectedChatSessionIds.clear();
+    await loadChatSessions();
+    refreshResearchMemoryPanel();
+    if (result.deleted_session_ids.length) alert('已删除 ' + result.deleted_session_ids.length + ' 个会话。');
+  } catch (_) { alert('批量删除失败，请稍后重试。'); }
+}
+
 async function renameChatSession(sid) {
   var s = chatSessions.find(function (x) { return x.id === sid; });
   var cur = s ? (s.title || '新会话') : '';

@@ -574,6 +574,10 @@ class RenameSessionRequest(BaseModel):
     title: str
 
 
+class DeleteSessionsRequest(BaseModel):
+    session_ids: List[str] = Field(min_length=1, max_length=100)
+
+
 class StreamChatRequest(BaseModel):
     question: str
     filters: Optional[Dict[str, Any]] = None
@@ -3139,28 +3143,39 @@ def rename_chat_session(sid: str, body: RenameSessionRequest) -> Dict[str, Any]:
     return session
 
 
-@app.delete("/api/chat/sessions/{sid}")
-def delete_chat_session(sid: str) -> Dict[str, Any]:
-    """Delete a session while retaining independent explicit memory records.
-
-    The deletion commits first and the disclosed count is then read while holding
-    the coordination lock.  Any save that resolved its immutable run before the
-    deletion is therefore counted (it wrote inside the same lock), while a save
-    that reaches the lock afterwards re-verifies ownership and is rejected instead
-    of silently dropping out of the count.
-    """
+def _delete_chat_session(sid: str) -> Optional[Dict[str, Any]]:
+    """Delete one session with the same memory-race protection used by all callers."""
     owned_run_ids = {record.run.id for record in chat_store.iter_session_runs() if record.session_id == sid}
     if not chat_store.delete_session(sid):
-        raise HTTPException(404, f"未知会话：{sid}")
+        return None
     with _research_memory_lock:
         retained_memory_count = sum(
             entry.source_run_id in owned_run_ids for entry in ResearchMemoryStore(research_memory.path).list_active()
         )
-    return {
-        "ok": True,
-        "session_id": sid,
-        "retained_memory_count": retained_memory_count,
-    }
+    return {"ok": True, "session_id": sid, "retained_memory_count": retained_memory_count}
+
+
+@app.delete("/api/chat/sessions/{sid}")
+def delete_chat_session(sid: str) -> Dict[str, Any]:
+    result = _delete_chat_session(sid)
+    if result is None:
+        raise HTTPException(404, f"未知会话：{sid}")
+    return result
+
+
+@app.post("/api/chat/sessions/batch-delete")
+def batch_delete_chat_sessions(body: DeleteSessionsRequest) -> Dict[str, Any]:
+    """Delete selected sessions; missing IDs are reported without aborting valid deletions."""
+    deleted, missing, retained = [], [], 0
+    for sid in dict.fromkeys(body.session_ids):
+        result = _delete_chat_session(sid)
+        if result is None:
+            missing.append(sid)
+        else:
+            deleted.append(sid)
+            retained += result["retained_memory_count"]
+    return {"ok": True, "deleted_session_ids": deleted, "missing_session_ids": missing,
+            "retained_memory_count": retained}
 
 
 @app.get("/api/rag/status")
