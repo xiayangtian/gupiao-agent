@@ -2147,8 +2147,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     available_kinds = set()
     if rag_qa is not None:
         available_kinds.add("retrieve")
-    if any(name.startswith("get_realtime") or name.startswith("get_quote") for name in tool_names):
-        available_kinds.add("market_quote")
+    # 腾讯个股快照是本地受控能力，不依赖 MCP 清单。
+    available_kinds.add("market_quote")
     if "web_search" in tool_names:
         available_kinds.add("web_search")
     # 腾讯指数行情是本地受控能力，不依赖 MCP 清单。
@@ -2248,7 +2248,9 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 quote_tool = next((name for name in policy.allowed_tools if name.startswith("get_realtime") or name.startswith("get_quote")), "")
                 company_code = scope.companies[0].code if scope.companies else ""
                 def quote(_question, _scope):
-                    if not quote_tool or not company_code:
+                    if company_code:
+                        return {"provider": "tencent", "quotes": tencent_quote.realtime([company_code])}
+                    if not quote_tool:
                         raise RuntimeError("实时行情缺少可解析公司或可用工具")
                     return execute_tool(quote_tool, {"symbol": company_code})
                 def search(question, _scope):
