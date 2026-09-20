@@ -21,6 +21,8 @@
 - `python3 -m pytest tests/unit/test_server_api.py tests/unit/test_chat_rendering_js.py -q`（199 passed，3 warnings）。
 - `python3 -m pytest -q`（1145 passed，2 skipped，3 warnings）。
 - `git diff --check` 与 `python3 scripts/check_css.py`（通过）。
+- 最终 HEAD 复验：`tests/unit/test_browser_test_safety.py`（13 passed）与 `tests/browser/test_research_workspace_flow.py`（12 passed）。
+- 最终全量首次为 1147 passed、1 skipped、1 个无关 `test_chat_pdf_supplement` agent-browser `open` 超时；清理浏览器会话后该目标单独复跑 1 passed，相关后端/工作台/渲染/安全测试 222 passed。
 
 ## 数据语义与合入后文档动作
 

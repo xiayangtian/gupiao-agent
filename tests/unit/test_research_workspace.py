@@ -227,7 +227,7 @@ def test_workspace_favorites_reload_from_sidecar_and_prune_orphan_runs(tmp_path)
 
 
 def test_workspace_text_search_ignores_raw_tool_and_web_bodies(tmp_path):
-    """Only title and saved decision summaries are searchable, never raw evidence text."""
+    """Only the persisted workspace title is searchable, never raw evidence text."""
     run = _run(
         "raw-bodies", code="601288", name="农业银行",
         artifacts=(

@@ -55,6 +55,32 @@ def test_startup_fails_loudly_when_legacy_research_memory_sidecar_cannot_be_remo
         server._remove_legacy_research_memory_sidecar()
 
 
+def test_startup_lifecycle_removes_legacy_research_memory_sidecar(tmp_path, monkeypatch):
+    memory = tmp_path / "research_memory.json"
+    memory.write_text('{"entries": []}', encoding="utf-8")
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+    with TestClient(server.app):
+        assert not memory.exists()
+
+
+def test_startup_lifecycle_fails_when_legacy_research_memory_sidecar_cannot_be_removed(tmp_path, monkeypatch):
+    memory = tmp_path / "research_memory.json"
+    memory.write_text('{"entries": []}', encoding="utf-8")
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+    def fail_unlink(self, *, missing_ok=False):
+        if self == memory:
+            raise OSError("permission denied")
+        return None
+
+    monkeypatch.setattr(type(memory), "unlink", fail_unlink)
+
+    with pytest.raises(RuntimeError, match="无法清理已移除的研究记忆数据"):
+        with TestClient(server.app):
+            pass
+
+
 @pytest.mark.parametrize(("method", "path"), [
     ("get", "/api/research/memory"),
     ("get", "/api/research/memory/facts?session_id=test"),

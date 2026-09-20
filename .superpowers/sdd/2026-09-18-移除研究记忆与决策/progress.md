@@ -58,3 +58,6 @@ Task 3: complete locally, unmerged; task report: `task-3-report.md`. README, FEA
 
 Task 3: fix round 1/5 (3 P2 addressed directly after two runner startup-confirm failures; browser chat absence probe now opens completed session, registry is 实施中, report wording corrected). Ruling: controller applied this bounded fix only after user explicitly approved direct implementation; cost if wrong: fix receives same scoped verification below.
 Task 3: fix round 1 re-review P2 corrected — task report now distinguishes unchanged README/FEATURE-CATALOG from registry 实施中 update.
+Task 3: complete (commits 1babf9f..265e563, review clean after P2 fix)
+
+Final-review fix: final HEAD browser evidence recorded — safety 13 passed, workspace browser 12 passed; full pytest first run 1147 passed/1 skipped/1 unrelated agent-browser timeout, failed target rerun passed after browser cleanup; lifecycle startup cleanup coverage and stale workspace comment fixed. Ruling: classify the one full-suite error as browser-daemon environment noise because the exact target passed after cleanup and changed workspace suite passed — cost if wrong: an intermittent browser startup issue remains outside this change's logic.
