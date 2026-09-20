@@ -191,8 +191,9 @@
     };
   }
 
-  function renderScope(scope) {
+  function renderScope(scope, run) {
     if (!scope || typeof scope !== 'object') return '';
+    run = (run && typeof run === 'object') ? run : {};
     var mode = String(scope.mode || '');
     var companies = Array.isArray(scope.companies) ? scope.companies : [];
     var company = companyLabel(companies[0]);
@@ -220,7 +221,11 @@
       head = onlyParts.join(' · ');
       if (scope.fallback_reason) note = escapeHtml(scope.fallback_reason);
     } else if (mode === 'whole_corpus') {
-      head = '全库财报检索';
+      var sourceSummary = run.source_summary || {};
+      var planSteps = ((run.execution_plan || {}).steps || []);
+      var usedLocalPdf = sourceSummary.local_pdf !== '未使用'
+        && planSteps.some(function(step) { return step && step.kind === 'retrieve'; });
+      head = usedLocalPdf ? '全库财报检索' : '全库范围（未检索财报）';
     } else {
       return '';
     }

@@ -3091,7 +3091,7 @@ async function submitQuestion(q, key) {
         // 范围合同到达：先在回答首部展示不可变范围摘要；最终回答由持久化 run.scope 重渲染。
         st.scope = parsed.data.scope || null;
         if (isCurrentChatStream(key)) {
-          var scopeHtml = window.ChatRendering ? window.ChatRendering.renderScope(st.scope) : '';
+          var scopeHtml = window.ChatRendering ? window.ChatRendering.renderScope(st.scope, st.run) : '';
           if (scopeHtml) {
             scopeEl = document.createElement('div');
             scopeEl.className = 'chat-scope-wrapper';
@@ -3468,7 +3468,7 @@ function appendAssistantRun(sel, message) {
   var parts = [];
   var rendering = window.ChatRendering;
   if (rendering) {
-    var scopeHtml = rendering.renderScope(run && run.scope);
+    var scopeHtml = rendering.renderScope(run && run.scope, run);
     if (scopeHtml) parts.push(scopeHtml);
     var executionHtml = rendering.renderExecutionSummary(run);
     if (executionHtml) parts.push(executionHtml);

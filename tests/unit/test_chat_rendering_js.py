@@ -124,7 +124,15 @@ def test_scope_renderer_derives_periods_from_report_ids_and_escapes():
           fallback_reason: '<注入>'
         }});
         const whole = rendering.renderScope({{mode: 'whole_corpus', companies: [], report_ids: []}});
-        console.log(JSON.stringify({{multi, whole}}));
+        const noRetrieval = rendering.renderScope(
+          {{mode: 'whole_corpus', companies: [], report_ids: []}},
+          {{source_summary: {{local_pdf: '未使用'}}, execution_plan: {{steps: [{{kind: 'web_search'}}]}}}}
+        );
+        const retrieved = rendering.renderScope(
+          {{mode: 'whole_corpus', companies: [], report_ids: []}},
+          {{source_summary: {{local_pdf: '已使用'}}, execution_plan: {{steps: [{{kind: 'retrieve'}}]}}}}
+        );
+        console.log(JSON.stringify({{multi, whole, noRetrieval, retrieved}}));
         """
     )
 
@@ -132,8 +140,12 @@ def test_scope_renderer_derives_periods_from_report_ids_and_escapes():
     assert "2026 半年报" in result["multi"]
     assert "<农业银行>" not in result["multi"]
     assert "&lt;农业银行&gt;" in result["multi"]
+    # 未执行 retrieve 时，不得把范围选择误描述为财报检索。
+    assert "全库范围（未检索财报）" in result["noRetrieval"]
+    assert "全库财报检索" in result["retrieved"]
     assert "<注入>" not in result["multi"]
-    assert "全库财报检索" in result["whole"]
+    # 旧会话缺少执行记录时也必须避免暗示已检索财报。
+    assert "全库范围（未检索财报）" in result["whole"]
 
 
 def test_pdf_artifact_renders_only_one_collapsed_page_link_or_unavailable_state():
