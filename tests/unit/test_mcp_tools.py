@@ -144,3 +144,21 @@ def test_web_search_tool_has_bounded_query_schema():
     assert fn["name"] == "web_search"
     assert fn["parameters"]["required"] == ["query"]
     assert fn["parameters"]["properties"]["max_results"]["maximum"] == 5
+
+
+def test_market_recap_tools_use_only_server_generated_time_windows():
+    from financial_report_fetcher.rag.mcp_tools import market_recap_tool_calls
+
+    daily = market_recap_tool_calls(weekly=False)
+    weekly = market_recap_tool_calls(weekly=True)
+
+    assert [name for name, _ in daily] == [
+        "index_prices", "stock_zt_pool", "stock_zt_pool",
+        "stock_sector_fund_flow_rank",
+    ]
+    assert daily[1][1]["pool_type"] == "涨停"
+    assert daily[2][1]["pool_type"] == "跌停"
+    assert daily[3][1]["days"] == "今日"
+    assert weekly[0][1]["period"] == "weekly"
+    assert weekly[3][1]["days"] == "5日"
+    assert all("date" not in arguments for _, arguments in daily)
