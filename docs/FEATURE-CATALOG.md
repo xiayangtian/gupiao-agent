@@ -20,7 +20,7 @@
 | [分析阅读、历史与可视化](#analysis-reading) | 渐进式主题阅读、历史报告、财务结构图表 | `analysis_workflow.js`、`analysis_visualizations.js`、`history.py` | `test_progressive_analysis_ui.py`、`test_visualizations.py` | `17e4dab`、`1107509` |
 | [RAG 知识库与检索](#rag) | 摄取 PDF、跨报告或限定范围问答、可选重排序 | `financial_report_fetcher/rag/ingest.py`、`financial_report_fetcher/rag/qa.py`、`financial_report_fetcher/rag/reranker.py` | `test_rag_*.py` | 见设计台账登记证据 |
 | [可信智能问答](#trusted-chat) | 多轮聊天、受限研究计划、研究工作台、研究纪要导出、离线质量观测、冻结范围、受控工具、可核验事实/冲突、证据链接、会话历史与授权补充财报 | `webapp/chat_scope.py`、`chat_policy.py`、`chat_facts.py`、`chat_verifier.py`、`webapp/evidence_identity.py`、`webapp/research_*.py`、`webapp/chat_evaluation.py`、`scripts/run_chat_evaluation.py`、`financial_report_fetcher/rag/qa.py`、`webapp/static/app.js`、`webapp/static/chat_rendering.js` | `test_chat_*.py`、`test_research_*.py`、`test_evidence_identity.py`、`test_rag_policy_m2.py`、`test_chat_trust_flow.py`、`test_research_agent_flow.py`、`test_research_workspace_flow.py` | `e0dcde6`：可信问答 M4 P2 事实身份与质量观测修补 |
-| [行情与 MCP 基本面](#market-mcp) | 实时行情、K 线、基本面/MCP 工具 | `financial_report_fetcher/market/tencent.py`、`financial_report_fetcher/market/mcp_client.py`、`webapp/mcp_guard.py` | `test_market_*.py`、`test_mcp_*.py` | 见设计台账登记证据 |
+| [行情与 MCP 基本面](#market-mcp) | 实时行情、K 线、基本面/MCP 工具与 A 股日/周复盘 | `financial_report_fetcher/market/tencent.py`、`financial_report_fetcher/market/mcp_client.py`、`financial_report_fetcher/rag/mcp_tools.py`、`webapp/execution_executor.py`、`webapp/mcp_guard.py` | `test_market_*.py`、`test_mcp_*.py`、`test_execution_*recap.py` | `61135a2`：受控 A 股复盘市场概览 |
 | [任务与运行可靠性](#runtime) | 分析任务后台执行、取消、恢复和 SSE/轮询 | `webapp/tasks.py`、`task_store.py`、`server.py` | `test_tasks.py`、`test_server_api.py` | 见设计台账登记证据 |
 
 ---
@@ -139,6 +139,7 @@
 **变更记录**
 
 - 历史实现已在设计台账中确认（[问答接入 MCP 工具](superpowers/DESIGN-REGISTRY.md#chat-mcp-tools)）；原始合并记录缺失。
+- `61135a2`：A 股日/周复盘新增 `market_overview`，服务端以固定时间窗口聚合指数、涨跌停池与行业资金流 MCP 产物；模型不能传递工具名、日期或参数，复盘默认不使用 RAG。
 
 <a id="runtime"></a>
 ## 任务与运行可靠性
