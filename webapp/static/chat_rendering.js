@@ -568,7 +568,7 @@
     var plan = run.execution_plan || {};
     var steps = Array.isArray(plan.steps) ? plan.steps : [];
     if (!steps.length) return '';
-    var labels = {retrieve: '本地财报', market_quote: '个股实时行情', market_indices: 'A 股主要指数', market_breadth: '市场广度与成交', sector_performance: '行业与概念板块', market_fund_flow: '市场资金流', web_search: '网页事件解释', answer: '综合分析'};
+    var labels = {retrieve: '本地财报', market_quote: '个股实时行情', market_indices: 'A 股主要指数', market_breadth: '市场广度与成交', sector_performance: '行业与概念板块', market_fund_flow: '市场资金流', market_overview: '市场概览（指数、广度、板块与资金）', web_search: '网页事件解释', answer: '综合分析'};
     var text = steps.map(function (step) { return labels[step.kind] || '来源步骤'; }).join(' → ');
     var source = run.source_summary || {};
     var notes = [];

@@ -5,11 +5,12 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from webapp.chat_models import Scope
+from financial_report_fetcher.rag.mcp_tools import market_recap_tool_calls
 from webapp.execution_plan import ExecutionPlan
 
 _MARKET_KINDS = frozenset((
     "market_quote", "market_kline", "market_indices", "market_breadth",
-    "sector_performance", "market_fund_flow",
+    "sector_performance", "market_fund_flow", "market_overview",
 ))
 _A_SHARE_INDICES = ("sh000001", "sz399001", "sz399006", "sh000688")
 
@@ -56,6 +57,22 @@ def a_share_indices_handler(tencent_quote: Any) -> Callable[[str, Scope], dict[s
         if not rows:
             raise RuntimeError("腾讯行情未返回 A 股指数数据")
         return {"provider": "tencent", "window": "week" if weekly else "day", "indices": rows}
+    return handler
+
+
+def market_overview_handler(mcp_client: Any, *, timeout: int) -> Callable[[str, Scope], dict[str, Any]]:
+    """聚合固定 A 股 MCP 调用；失败产物保留，不能由模型补造市场数据。"""
+    def handler(question: str, _scope: Scope) -> dict[str, Any]:
+        weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
+        artifacts = []
+        for name, arguments in market_recap_tool_calls(weekly=weekly):
+            try:
+                artifacts.append({"tool": name, "value": mcp_client.call_tool(name, arguments, timeout=timeout)})
+            except Exception:
+                artifacts.append({"tool": name, "error": "来源调用失败"})
+        if not any("value" in artifact for artifact in artifacts):
+            raise RuntimeError("市场概览 MCP 均不可用")
+        return {"provider": "stock-data-mcp", "window": "week" if weekly else "day", "artifacts": artifacts}
     return handler
 
 

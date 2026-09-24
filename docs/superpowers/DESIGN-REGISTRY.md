@@ -17,7 +17,7 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
-| A 股行情复盘 MCP | 待实现 | 可直接执行 | [主记录](#a-share-market-recap) |
+| A 股行情复盘 MCP | 实施中 | — | [主记录](#a-share-market-recap) |
 
 ## 全部设计
 
@@ -48,4 +48,4 @@
 | <a id="design-registry"></a>方案设计台账 | [设计](specs/2026-09-14-方案设计台账-design.md) | [计划](plans/2026-09-14-方案设计台账.md) | 已实现 | — | 合并 f27056c；`python3 -m pytest tests/unit/test_design_registry.py -q` → 4 passed in 0.11s | 2026-09-14 |
 | <a id="chat-pdf-supplement"></a>智能问答财报补充下载 | [设计](specs/2026-09-14-智能问答财报补充下载-design.md) | [计划](plans/2026-09-14-问答补报.md) | 已实现 | — | 合并 1132bc6；`python3 -m pytest tests/unit -q`：903 passed，3 warnings；`python3 -m pytest tests/browser -q`：26 passed；用户授权后才下载、仅以 `source="pdf"` 索引成功报告恢复回答 | 2026-09-15 |
 | <a id="model-execution-planner"></a>模型执行计划器 | [设计](specs/2026-09-17-模型执行计划器-design.md) | [计划](plans/2026-09-17-模型执行计划器.md) | 已实现 | — | 合并 0478edd；`python3 -m pytest tests/unit/test_chat_execution_plan.py tests/unit/test_execution_plan_recap.py tests/unit/test_execution_market_recap.py tests/unit/test_execution_executor.py`：7 passed；真实 SSE 验证 market_recap 与 general_web 均返回 execution_plan、步骤完成及 done；完整套件存在既有并发时序阈值波动，未扩大范围修改 | 2026-09-20 |
-| <a id="a-share-market-recap"></a>A 股行情复盘 MCP | [设计](specs/2026-09-20-A股行情复盘MCP设计.md) | [计划](plans/2026-09-20-A股行情复盘MCP.md) | 待实现 | 可直接执行 | 用户确认 2026-09-20：腾讯行情 + 网页搜索；当前基础通路已在模型执行计划器实现，后续扩展板块/资金流 MCP | 2026-09-20 |
+| <a id="a-share-market-recap"></a>A 股行情复盘 MCP | [设计](specs/2026-09-20-A股行情复盘MCP设计.md) | [计划](plans/2026-09-20-A股行情复盘MCP.md) | 实施中 | — | 分支 `feat/a-share-market-recap-mcp`；用户于 2026-09-23 确认以服务端 `market_overview` 聚合步骤保持四步计划上限；待完成 MCP 工具、SSE 与浏览器验证 | 2026-09-23 |

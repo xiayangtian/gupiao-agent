@@ -911,7 +911,7 @@ def test_chat_history_renders_persisted_run_scope_artifacts_and_status():
 
     assert "function appendAssistantRun" in source
     assert "message.run" in source
-    assert "renderScope(run && run.scope)" in source or "renderScope(run.scope)" in source
+    assert "rendering.renderScope(run && run.scope, run)" in source or "renderScope(run.scope)" in source
     assert "renderRunArtifacts(run)" in source
     assert "renderRunStatus(run)" in source
 

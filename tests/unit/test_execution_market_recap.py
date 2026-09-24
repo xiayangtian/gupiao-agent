@@ -39,3 +39,33 @@ def test_market_recap_plan_accepts_available_indices_and_no_rag():
     valid, issues = validate_execution_plan(plan, Scope.whole_corpus(), {"market_indices", "market_breadth"}, 2)
     assert valid == plan
     assert issues == ()
+
+
+class FakeMarketMcp:
+    def __init__(self):
+        self.calls = []
+
+    def call_tool(self, name, arguments, timeout):
+        self.calls.append((name, arguments, timeout))
+        return '{"as_of":"2026-09-23"}'
+
+
+def test_market_overview_aggregates_bounded_mcp_calls_without_model_parameters():
+    from webapp.execution_executor import market_overview_handler
+
+    plan = ExecutionPlan.from_dict({
+        "objective": "上周 A 股复盘", "source_mode": "market_recap",
+        "steps": [{"id": "overview", "kind": "market_overview", "required": True}, {"id": "answer", "kind": "answer"}],
+        "acceptance": ["as_of"],
+    })
+    source = FakeMarketMcp()
+    result = ExecutionExecutor(market_overview=market_overview_handler(source, timeout=12)).execute(
+        plan, "上周 A 股复盘", Scope.whole_corpus(),
+    )
+
+    assert [name for name, _, _ in source.calls] == [
+        "index_prices", "stock_zt_pool", "stock_zt_pool", "stock_sector_fund_flow_rank",
+    ]
+    assert all(timeout == 12 for _, _, timeout in source.calls)
+    assert result.steps[0].status == "completed"
+    assert result.steps[0].value["window"] == "week"
