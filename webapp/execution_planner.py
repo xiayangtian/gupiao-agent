@@ -1,7 +1,7 @@
 """模型驱动的轻量执行计划器；模型输出不携带任何权限。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping
 
 from webapp.chat_models import Scope
@@ -12,6 +12,9 @@ from webapp.execution_plan import ExecutionPlan, ExecutionStep, PlanIssue, valid
 class PlanningCapabilities:
     available_kinds: set[str]
     max_external_calls: int
+    step_costs: Mapping[str, int] = field(default_factory=lambda: {
+        "market_overview": 4, "market_indices": 4,
+    })
 
 
 @dataclass(frozen=True)
@@ -41,7 +44,10 @@ class ExecutionPlanner:
                     ExecutionStep("kline", "market_kline", True),
                     ExecutionStep("answer", "answer", True),
                 ))
-            valid, issues = validate_execution_plan(candidate, scope, capabilities.available_kinds, capabilities.max_external_calls)
+            valid, issues = validate_execution_plan(
+                candidate, scope, capabilities.available_kinds, capabilities.max_external_calls,
+                step_costs=capabilities.step_costs,
+            )
         except Exception as exc:
             # 计划器是可选能力：任何 provider/JSON 失败都必须 fail-closed，不能中断问答。
             return PlanningResult("fallback", issues=(PlanIssue("invalid_plan:" + type(exc).__name__, "执行计划未通过安全校验。"),))

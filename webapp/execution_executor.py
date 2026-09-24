@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from webapp.chat_models import Scope
+from webapp.source_runtime import AnswerContext, SourceResult
 from financial_report_fetcher.rag.mcp_tools import market_recap_tool_calls
 from webapp.execution_plan import ExecutionPlan
 
@@ -28,6 +29,7 @@ class ExecutionStepResult:
 class ExecutionResult:
     steps: tuple[ExecutionStepResult, ...]
     source_summary: dict[str, str]
+    context: AnswerContext = AnswerContext()
 
 
 def company_kline_handler(tencent_quote: Any) -> Callable[[str, Scope], dict[str, Any]]:
@@ -88,27 +90,57 @@ class ExecutionExecutor:
 
     def execute(self, plan: ExecutionPlan, question: str, scope: Scope) -> ExecutionResult:
         rows: list[ExecutionStepResult] = []
-        used = {"retrieve": False, "market": False, "web_search": False}
+        sources: list[SourceResult] = []
+        legacy_used: set[str] = set()
+        required_missing = False
+        had_failure = False
         for step in plan.steps:
             if step.kind == "answer":
-                rows.append(ExecutionStepResult(step.id, step.kind, "completed"))
+                rows.append(ExecutionStepResult(step.id, step.kind,
+                                                "pending" if required_missing else "completed"))
                 continue
-            if step.kind == "retrieve":
-                used["retrieve"] = True
-            elif step.kind == "web_search":
-                used["web_search"] = True
-            elif step.kind in _MARKET_KINDS:
-                used["market"] = True
+            dependencies = [row for row in rows if row.id in step.depends_on]
+            if any(row.status in {"failed", "unavailable", "skipped"} for row in dependencies):
+                rows.append(ExecutionStepResult(step.id, step.kind, "skipped", error="前置来源步骤未完成"))
+                if step.required:
+                    required_missing = True
+                    had_failure = True
+                continue
             handler = self.handlers.get(step.kind)
             if handler is None:
                 rows.append(ExecutionStepResult(step.id, step.kind, "unavailable", error="此阶段数据源尚不可用"))
+                had_failure = True
+                required_missing = required_missing or step.required
                 continue
             try:
-                rows.append(ExecutionStepResult(step.id, step.kind, "completed", handler(question, scope)))
+                value = handler(question, scope)
+                values = value if isinstance(value, tuple) else (value,)
+                source_values = [item for item in values if isinstance(item, SourceResult)]
+                sources.extend(source_values)
+                if not source_values and value is not None:
+                    legacy_used.add("local_pdf" if step.kind == "retrieve" else
+                                    "web" if step.kind == "web_search" else "market_data")
+                source_failed = any(item.status != "success" for item in source_values)
+                has_usable_source = any(item.status in {"success", "partial"} for item in source_values)
+                row_status = ("failed" if source_failed and not has_usable_source else
+                              "partial" if source_failed else "completed")
+                if source_failed:
+                    had_failure = True
+                    required_missing = required_missing or (step.required and not all(
+                        item.status == "success" for item in source_values
+                    ))
+                rows.append(ExecutionStepResult(step.id, step.kind, row_status, value))
             except Exception:
                 rows.append(ExecutionStepResult(step.id, step.kind, "failed", error="来源调用失败"))
-        return ExecutionResult(tuple(rows), {
-            "local_pdf": "已使用" if used["retrieve"] else "未使用",
-            "market_data": "已使用" if used["market"] else "未使用",
-            "web": "已使用" if used["web_search"] else "未使用",
-        })
+                had_failure = True
+                required_missing = required_missing or step.required
+        summary = {"local_pdf": "未使用", "market_data": "未使用", "web": "未使用"}
+        for key in legacy_used:
+            summary[key] = "已使用"
+        for source in sources:
+            key = "local_pdf" if source.category == "local" else ("web" if source.category == "web" else "market_data")
+            summary[key] = ("已使用" if source.status == "success" else
+                            "部分取得" if source.status == "partial" else
+                            "获取失败" if source.status == "failed" else "不可用")
+        return ExecutionResult(tuple(rows), summary,
+                               AnswerContext(tuple(sources), required_missing=required_missing))

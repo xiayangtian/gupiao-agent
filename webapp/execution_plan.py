@@ -72,8 +72,11 @@ class ExecutionPlan:
         return cls(objective.strip(), source_mode, tuple(ExecutionStep.from_dict(item) for item in steps), tuple(acceptance))
 
 
-def validate_execution_plan(plan: ExecutionPlan, scope: Scope, available_kinds: set[str], max_external_calls: int) -> tuple[ExecutionPlan | None, tuple[PlanIssue, ...]]:
-    """校验计划只使用服务端可用来源，且拥有有限、无环的步骤图。"""
+def validate_execution_plan(
+    plan: ExecutionPlan, scope: Scope, available_kinds: set[str], max_external_calls: int,
+    *, step_costs: Mapping[str, int] | None = None,
+) -> tuple[ExecutionPlan | None, tuple[PlanIssue, ...]]:
+    """校验计划只使用服务端可用来源、真实调用成本及有序依赖。"""
     del scope  # Scope 由调用方冻结；本契约不接受模型传入的范围字段。
     issues: list[PlanIssue] = []
     if not 1 <= len(plan.steps) <= 4:
@@ -81,21 +84,30 @@ def validate_execution_plan(plan: ExecutionPlan, scope: Scope, available_kinds: 
     ids = [step.id for step in plan.steps]
     if len(set(ids)) != len(ids):
         issues.append(PlanIssue("duplicate_step", "计划步骤 ID 不能重复。"))
-    if not plan.steps or plan.steps[-1].kind != "answer":
-        issues.append(PlanIssue("missing_answer", "计划必须以最终回答步骤结束。"))
+    answers = [step for step in plan.steps if step.kind == "answer"]
+    if len(answers) != 1 or not plan.steps or plan.steps[-1].kind != "answer":
+        issues.append(PlanIssue("missing_answer", "计划必须且只能以一个最终回答步骤结束。"))
     if plan.source_mode == "general_web" and any(step.kind not in {"web_search", "answer"} for step in plan.steps):
         issues.append(PlanIssue("general_web_boundary", "非股票问题只允许网页搜索和模型回答。"))
     if plan.source_mode == "market_recap" and "retrieve" in {step.kind for step in plan.steps}:
         issues.append(PlanIssue("market_recap_boundary", "A 股复盘默认不得检索财报。"))
     external = 0
+    costs = step_costs or {}
+    if any(isinstance(cost, bool) or not isinstance(cost, int) or cost < 0 for cost in costs.values()):
+        issues.append(PlanIssue("invalid_step_cost", "来源步骤调用成本必须为非负整数。"))
     by_id = {step.id: step for step in plan.steps}
+    seen_ids: set[str] = set()
     for step in plan.steps:
         if step.kind != "answer" and step.kind not in available_kinds:
             issues.append(PlanIssue("unavailable_step", "计划请求的来源当前不可用。"))
         if step.kind in {"market_quote", "market_kline", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "market_overview", "web_search"}:
-            external += 1
-        if any(dep not in by_id for dep in step.depends_on):
-            issues.append(PlanIssue("unknown_dependency", "计划步骤依赖不存在。"))
+            external += costs.get(step.kind, 1)
+        for dep in step.depends_on:
+            if dep not in by_id:
+                issues.append(PlanIssue("unknown_dependency", "计划步骤依赖不存在。"))
+            elif dep not in seen_ids:
+                issues.append(PlanIssue("forward_dependency", "计划步骤只能依赖已完成的前序步骤。"))
+        seen_ids.add(step.id)
     if external > max_external_calls:
         issues.append(PlanIssue("external_budget", "计划超过外部来源调用预算。"))
     visiting: set[str] = set()
