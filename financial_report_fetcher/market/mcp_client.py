@@ -300,7 +300,7 @@ class StockMCPClient:
         return self._submit(_impl(), timeout + 30)
 
     def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None,
-                  timeout: Optional[float] = None) -> str:
+                  timeout: Optional[float] = None, *, retry: bool = True) -> str:
         """
         调用 MCP 工具，返回文本结果。
 
@@ -326,7 +326,8 @@ class StockMCPClient:
         args = dict(arguments or {})
 
         async def _impl():
-            for attempt in (0, 1):
+            attempts = 2 if retry else 1
+            for attempt in range(attempts):
                 session = await self._get_session()
                 try:
                     result = await asyncio.wait_for(
@@ -336,7 +337,7 @@ class StockMCPClient:
                 except Exception as exc:
                     logger.warning("call_tool(%s) 第 %d 次失败：%s", name, attempt + 1, exc)
                     await self._close_session()
-                    if attempt == 1:
+                    if attempt == attempts - 1:
                         raise
             raise RuntimeError(f"call_tool({name}) 失败")
 

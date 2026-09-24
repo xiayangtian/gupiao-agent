@@ -95,6 +95,12 @@ class TestCallTool:
         assert result == "ok"
         assert len(session.calls) == 2
 
+    def test_runtime_can_disable_hidden_retry(self, client):
+        session = _install_fake(client, FakeSession(fail_first=99))
+        with pytest.raises(RuntimeError):
+            client.call_tool("t", {}, retry=False)
+        assert len(session.calls) == 1
+
     def test_raises_after_two_failures(self, client):
         session = _install_fake(client, FakeSession(fail_first=99))
         with pytest.raises(RuntimeError):
