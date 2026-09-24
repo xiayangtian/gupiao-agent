@@ -209,12 +209,12 @@ def test_artifacts_deduplicate_same_pdf_page_and_collapse_many_pages_to_home_lin
     )
 
     html = result["html"]
-    assert '<summary>证据与来源（3）</summary>' in html
+    assert '<summary>证据与来源（4）</summary>' in html
     assert html.count('data-chat-pdf-home="true"') == 1
     assert '#page=1' in html
     assert 'data-chat-pdf-page=' not in html
     assert html.count('https://example.com/news') == 1
-    assert html.count('market') == 1
+    assert html.count('market') == 2
     assert all(value not in html for value in ('duplicate', 'web detail', '参数摘要', '结果摘要'))
 
 

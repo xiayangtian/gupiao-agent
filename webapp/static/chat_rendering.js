@@ -324,12 +324,15 @@
       var provider = String(tool.provider || '');
       var toolName = String(tool.tool_name || '');
       var asOf = String(tool.as_of || '');
+      var fetchedAt = String(tool.fetched_at || '');
+      var sourceId = String(tool.source_id || '');
+      var status = String(tool.status || '');
       if (!provider && !toolName) return;
-      // 工具名不展示时，同一来源、同一数据截至时间只保留一行。
-      var key = provider + '|' + asOf;
+      // 来源身份/工具/状态都参与去重；失败与成功绝不能折叠成同一条。
+      var key = sourceId || (provider + '|' + toolName + '|' + asOf + '|' + status);
       if (seen[key]) return;
       seen[key] = true;
-      entries.push({ provider: provider || '实时数据', asOf: asOf });
+      entries.push({ provider: provider || '实时数据', toolName: toolName, asOf: asOf, fetchedAt: fetchedAt, status: status });
     });
     return entries;
   }
@@ -350,7 +353,11 @@
     });
     toolEntries.forEach(function (entry) {
       var label = '实时数据 · ' + entry.provider;
+      var statusLabel = { partial: '部分取得', failed: '获取失败', unavailable: '不可用' }[entry.status] || '';
+      if (statusLabel) label += ' · ' + statusLabel;
       if (entry.asOf) label += ' · 数据截至 ' + entry.asOf;
+      else if (entry.status !== 'success') label += ' · 数据时间未知';
+      if (entry.fetchedAt) label += ' · 获取于 ' + entry.fetchedAt;
       parts.push('<span class="chat-artifact-tool">' + escapeHtml(label) + '</span>');
     });
     if (!parts.length) return '';

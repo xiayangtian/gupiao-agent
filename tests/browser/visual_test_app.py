@@ -356,10 +356,10 @@ class _FakeRagQA:
                    "retrieval_degraded": False, "model": "browser-acceptance-fake"}
             return
 
-        yield {"type": "delta", "text": "经营活动现金流量净额为 -621.69 亿元"}
+        yield {"type": "delta", "text": "经营活动现金流量净额详见报告披露。"}
         yield {
             "type": "done",
-            "answer": "经营活动现金流量净额为 -621.69 亿元，主要受客户贷款及垫款净增加影响。",
+            "answer": "经营活动现金流量净额详见报告披露。",
             "citations": [
                 {
                     "source": "pdf",
