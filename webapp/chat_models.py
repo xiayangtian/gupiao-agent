@@ -694,6 +694,8 @@ class ToolArtifact:
     status: str = "failed"
     arguments_summary: str = ""
     result_summary: str = ""
+    fetched_at: str = ""
+    source_id: str = ""
 
     def __post_init__(self) -> None:
         _string(self.provider, "tool provider")
@@ -702,6 +704,10 @@ class ToolArtifact:
         _string(self.status, "tool status")
         _string(self.arguments_summary, "arguments_summary", required=False)
         _string(self.result_summary, "result_summary", required=False)
+        _string(self.fetched_at, "fetched_at", required=False)
+        _string(self.source_id, "source_id", required=False)
+        if self.status not in {"success", "partial", "failed", "unavailable"}:
+            raise ValueError("unsupported tool status")
         if self.status == "success" and not self.as_of:
             raise ValueError("successful tool artifact requires as_of")
 
@@ -713,6 +719,8 @@ class ToolArtifact:
             "status": self.status,
             "arguments_summary": self.arguments_summary,
             "result_summary": self.result_summary,
+            "fetched_at": self.fetched_at,
+            "source_id": self.source_id,
         }
 
     @classmethod
@@ -725,6 +733,8 @@ class ToolArtifact:
             status=_string(data.get("status", "failed"), "tool status"),
             arguments_summary=_string(data.get("arguments_summary", ""), "arguments_summary", required=False),
             result_summary=_string(data.get("result_summary", ""), "result_summary", required=False),
+            fetched_at=_string(data.get("fetched_at", ""), "fetched_at", required=False),
+            source_id=_string(data.get("source_id", ""), "source_id", required=False),
         )
 
 
