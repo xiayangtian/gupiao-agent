@@ -55,6 +55,7 @@ from financial_report_fetcher.rag.analysis import RagAnalysis
 from financial_report_fetcher.rag.mcp_tools import (
     DISABLED_MCP_TOOL_NAMES,
     WEB_SEARCH_TOOL,
+    market_recap_tool_calls,
     build_tool_defs,
     to_openai_tools,
 )
@@ -72,6 +73,9 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
+from .chat_execution import build_source_runtime, execute_source, project_sources, resolve_answer_status
+from .source_adapters import SourceAccess
+from .source_runtime import AnswerContext, SourceCall, SourceResult
 from .chat_facts import FactNormalizer, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
@@ -329,7 +333,7 @@ def _realtime_via_tencent(symbol: str) -> str:
     }, ensure_ascii=False)
 
 
-def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]], str]]:
+def _build_mcp_tool_executor(cfg: Any, *, retry: bool = True) -> Optional[Callable[[str, Dict[str, Any]], str]]:
     """构建问答工具执行器：(name, arguments) -> 文本；未启用/关闭时返回 None。
 
     执行前把股票名称解析为 6 位代码，默认 output_format=json；
@@ -379,7 +383,16 @@ def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]
         if schema is None or "output_format" in (schema.get("properties") or {}):
             args.setdefault("output_format", "json")
         try:
-            result = market_data_mcp.call_tool(name, args, timeout=timeout)
+            call_kwargs = {"timeout": timeout}
+            try:
+                parameters = inspect.signature(market_data_mcp.call_tool).parameters.values()
+                if any(parameter.name == "retry" for parameter in parameters) or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+                ):
+                    call_kwargs["retry"] = retry
+            except (TypeError, ValueError):
+                pass
+            result = market_data_mcp.call_tool(name, args, **call_kwargs)
         except Exception as exc:
             mcp_breaker.record_failure(exc)
             _record_mcp_tool_health(name, False, str(exc))
@@ -395,9 +408,27 @@ def _build_mcp_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]
     return _executor
 
 
-def _build_chat_tool_executor(cfg: Any) -> Optional[Callable[[str, Dict[str, Any]], str]]:
+def _source_runtime_for_run(scope: Scope, policy: ToolPolicy, cfg: Any, *, use_mcp: bool,
+                            source_mode: str) -> Any:
+    web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
+    listed = frozenset(item.get("function", {}).get("name", "")
+                       for item in (_mcp_tool_defs_cache or [])
+                       if item.get("function", {}).get("name"))
+    access = SourceAccess(
+        mcp_enabled=bool(use_mcp and getattr(cfg, "mcp_tools", False)),
+        listed_tools=listed,
+        whitelist=frozenset(getattr(cfg, "mcp_tool_whitelist", []) or []),
+        mcp_allow=mcp_breaker.allow,
+        web_enabled=bool(getattr(cfg, "web_search", True) and web.available),
+        tencent_enabled=True,
+    )
+    return build_source_runtime(scope=scope, policy=policy, cfg=cfg, use_mcp=use_mcp,
+                                source_mode=source_mode, access=access)
+
+
+def _build_chat_tool_executor(cfg: Any, *, retry: bool = True) -> Optional[Callable[[str, Dict[str, Any]], str]]:
     """统一调度 MCP 与网页搜索，任一可用即启用工具编排。"""
-    mcp_executor = _build_mcp_tool_executor(cfg)
+    mcp_executor = _build_mcp_tool_executor(cfg, retry=retry)
     web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
     web_enabled = getattr(cfg, "web_search", True) and web.available
     if mcp_executor is None and not web_enabled:
@@ -1719,6 +1750,25 @@ def _resume_history(session: Dict[str, Any]) -> List[Dict[str, Any]]:
     return messages[-8:]
 
 
+def _resume_tool_policy(session: Mapping[str, Any], question: str) -> ToolPolicy:
+    messages = list(session.get("messages", []))
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            continue
+        user_index = _preceding_user_index(messages, index)
+        if user_index is None or str(messages[user_index].get("content") or "") != question:
+            continue
+        run = message.get("run")
+        if isinstance(run, Mapping):
+            try:
+                return ToolPolicy.from_dict(run.get("tool_policy"))
+            except (TypeError, ValueError):
+                break
+    # Old records without a frozen policy fail closed to local-only capability.
+    return ToolPolicy(intent="report_fact", max_calls=0, max_rounds=0)
+
+
 def _resume_chat_tools() -> Optional[List[Dict[str, Any]]]:
     """恢复回答的工具集：去掉补报工具，一个问题的生命周期内只申请一次授权。"""
     try:
@@ -1759,6 +1809,10 @@ class _RagRunState:
     execution_plan: Optional[Dict[str, Any]] = None
     execution_steps: List[Dict[str, Any]] = field(default_factory=list)
     source_summary: Dict[str, str] = field(default_factory=dict)
+    required_sources_missing: bool = False
+    source_results: List[Any] = field(default_factory=list)
+    source_ids: set[str] = field(default_factory=set)
+    source_runtime_tool_names: set[str] = field(default_factory=set)
     plan_status: str = ""
 
 
@@ -1793,11 +1847,39 @@ def _relay_rag_event(
         payload = evt.get("payload")
         if isinstance(payload, dict):
             state.structured_tool_payloads.append({"name": evt.get("name", ""), "payload": payload})
+    elif etype == "source_result":
+        result = evt.get("result")
+        if result is not None:
+            state.source_runtime_tool_names.add(getattr(result, "operation", ""))
+            if getattr(result, "call_id", "") not in state.source_ids:
+                if getattr(result, "call_id", ""):
+                    state.source_ids.add(result.call_id)
+                state.source_results.append(result)
+                projection = project_sources(state.source_results, state.scope or Scope.whole_corpus())
+                current = project_sources([result], state.scope or Scope.whole_corpus())
+                projected_ids = {item.source_id for item in projection.tool_artifacts}
+                state.tool_artifacts = [item for item in state.tool_artifacts
+                                        if not item.source_id or item.source_id not in projected_ids]
+                state.tool_artifacts.extend(projection.tool_artifacts)
+                state.evidence_artifacts.extend(current.artifacts)
+                existing_fact_ids = {item.id for item in state.facts}
+                state.facts.extend(item for item in current.facts if item.id not in existing_fact_ids)
+                state.source_summary = dict(projection.source_summary)
+                state.had_external_failure = state.had_external_failure or projection.had_failure
+                for artifact in current.tool_artifacts:
+                    frames.append(_sse("artifact", {"artifact": artifact.to_dict()}))
+                for artifact in current.artifacts:
+                    frames.append(_sse("artifact", {"artifact": artifact.to_dict()}))
+                for fact in current.facts:
+                    frames.append(_sse("fact", {"fact": fact.to_dict()}))
     elif etype == "tool_result":
         name = evt.get("name", "")
         summary = evt.get("summary", "")
         ok = bool(evt.get("ok", True))
         args = state.pending_tool_args.pop(0) if state.pending_tool_args else {}
+        if name in state.source_runtime_tool_names:
+            frames.append(_sse("tool_result", {"name": name, "summary": summary, "ok": ok}))
+            return frames
         provider = "web_search" if name == "web_search" else "stock-data-mcp"
         as_of = dt.datetime.now().isoformat(timespec="seconds")
         try:
@@ -1966,6 +2048,7 @@ def _research_step_handlers(
     scope: Scope,
     policy: ToolPolicy,
     run_id: str,
+    source_runtime: Any = None,
 ) -> Dict[str, Callable[[Any, ResearchRun], Dict[str, Any]]]:
     """首次研究与恢复共用的受控步骤 handler。
 
@@ -1987,9 +2070,11 @@ def _research_step_handlers(
                               priority_report_id=priority_report_id, scope=scope, run_id=run_id)
                 # M1 兼容的注入式适配器可能还没有 M2 参数；生产 RagQA 总能收到策略。
                 parameters = inspect.signature(rag_qa.answer_stream).parameters.values()
-                if any(parameter.name == "tool_policy" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-                       for parameter in parameters):
+                accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+                if any(parameter.name == "tool_policy" for parameter in parameters) or accepts_kwargs:
                     kwargs["tool_policy"] = policy
+                if (any(parameter.name == "source_runtime" for parameter in parameters) or accepts_kwargs) and source_runtime is not None:
+                    kwargs["source_runtime"] = source_runtime
                 for event in rag_qa.answer_stream(**kwargs):
                     _relay_rag_event(event, state, normalizer)
                 if state.error_text:
@@ -2185,8 +2270,10 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                                    max_tokens=400, thinking={"type": "disabled"},
                                    system="只输出执行计划 JSON：objective、source_mode、steps、acceptance；不要 Markdown、解释或工具调用。")
             return parse(retry)
+    recap_markers = ("复盘", "行情回顾", "收盘总结", "大盘总结")
+    recap_budget = 6 if any(marker in body.question for marker in recap_markers) else 2
     planning = ExecutionPlanner(_plan_json).plan(
-        body.question, scope, PlanningCapabilities(available_kinds, 2),
+        body.question, scope, PlanningCapabilities(available_kinds, recap_budget),
     )
     if planning.plan is not None:
         kinds = {step.kind for step in planning.plan.steps}
@@ -2243,51 +2330,125 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             return run
 
         def _produce() -> Any:
-            # 已验证计划的外部来源由服务端先确定性执行，模型只接收执行产物。
-            plan_history = list(history)
-            if planning.plan is not None and any(step.kind in {"market_quote", "market_kline", "market_indices", "market_overview", "web_search"} for step in planning.plan.steps):
-                cfg = RagConfig.load()
-                execute_tool = _build_chat_tool_executor(cfg) or _unavailable_tool_executor()
-                quote_tool = next((name for name in policy.allowed_tools if name.startswith("get_realtime") or name.startswith("get_quote")), "")
+            cfg = RagConfig.load()
+            runtime = _source_runtime_for_run(
+                scope, policy, cfg, use_mcp=body.use_mcp,
+                source_mode=planning.plan.source_mode if planning.plan else "external_market",
+            )
+            builder_parameters = inspect.signature(_build_chat_tool_executor).parameters
+            execute_tool = (
+                _build_chat_tool_executor(cfg, retry=False)
+                if "retry" in builder_parameters else _build_chat_tool_executor(cfg)
+            ) or _unavailable_tool_executor()
+            if planning.plan is not None and any(step.kind != "answer" for step in planning.plan.steps):
                 company_code = scope.companies[0].code if scope.companies else ""
+                quote_tool = next((name for name in policy.allowed_tools
+                                   if name.startswith("get_realtime") or name.startswith("get_quote")), "")
+                fetched = lambda: dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+                def retrieve(_question, _scope):
+                    call = SourceCall("local", "retrieve", "local", {"top_k": cfg.top_k})
+                    def run_retrieval():
+                        hits = chat_qa.retrieve(body.question, scope=scope,
+                            priority_report_id=priority_report_id, filters=body.filters)
+                        return SourceResult("", "local", "retrieve", "local",
+                            "success" if hits else "failed", retrieval_hits=hits,
+                            error_code="" if hits else "no_retrieval_hits")
+                    return runtime.call(call, run_retrieval)
+
                 def quote(_question, _scope):
                     if company_code:
-                        return {"provider": "tencent", "quotes": tencent_quote.realtime([company_code])}
-                    if not quote_tool:
-                        raise RuntimeError("实时行情缺少可解析公司或可用工具")
-                    return execute_tool(quote_tool, {"symbol": company_code})
+                        call = SourceCall("tencent", "quote", "market", {"symbol": company_code})
+                        return execute_source(runtime, call,
+                            lambda: {"data": tencent_quote.realtime([company_code])}, fetched_at=fetched())
+                    if quote_tool:
+                        call = SourceCall("mcp", quote_tool, "market", {"symbol": company_code})
+                        return execute_source(runtime, call,
+                            lambda: execute_tool(quote_tool, {"symbol": company_code}), fetched_at=fetched())
+                    return runtime.unavailable(SourceCall("mcp", "quote", "market", {}), "not_authorized")
+
+                def kline(question, _scope):
+                    if not company_code:
+                        return runtime.unavailable(SourceCall("tencent", "kline", "market", {}), "scope_missing")
+                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
+                    period = "week" if weekly else "day"
+                    call = SourceCall("tencent", "kline", "market", {"symbol": company_code, "period": period})
+                    return execute_source(runtime, call,
+                        lambda: {"bars": tencent_quote.kline(company_code, period=period,
+                            count=5 if weekly else 10, adjust="none")}, fetched_at=fetched())
+
+                def indices(question, _scope):
+                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
+                    period = "week" if weekly else "day"
+                    results = []
+                    for symbol in ("sh000001", "sz399001", "sz399006", "sh000688"):
+                        call = SourceCall("tencent", "kline", "market", {"symbol": symbol, "period": period})
+                        results.append(execute_source(runtime, call,
+                            lambda symbol=symbol: {"data": tencent_quote.kline(symbol, period=period, count=1, adjust="none")},
+                            fetched_at=fetched()))
+                    return tuple(results)
+
+                def overview(question, _scope):
+                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
+                    results = []
+                    for name, arguments in market_recap_tool_calls(weekly=weekly):
+                        call = SourceCall("mcp", name, "market", arguments)
+                        results.append(execute_source(runtime, call,
+                            lambda name=name, arguments=arguments: market_data_mcp.call_tool(
+                                name, arguments, timeout=cfg.mcp_tool_timeout, retry=False), fetched_at=fetched()))
+                    return tuple(results)
+
                 def search(question, _scope):
-                    return execute_tool("web_search", {"query": question})
+                    call = SourceCall("web", "web_search", "web", {"query": question})
+                    return execute_source(runtime, call,
+                        lambda: execute_tool("web_search", {"query": question}), fetched_at=fetched())
+
                 result = ExecutionExecutor(
-                    market_quote=quote if quote_tool else None,
-                    market_kline=company_kline_handler(tencent_quote),
-                    market_indices=a_share_indices_handler(tencent_quote),
-                    market_overview=market_overview_handler(market_data_mcp, timeout=cfg.mcp_tool_timeout) if body.use_mcp else None,
+                    retrieve=retrieve if "retrieve" in {step.kind for step in planning.plan.steps} else None,
+                    market_quote=quote if "market_quote" in {step.kind for step in planning.plan.steps} else None,
+                    market_kline=kline if "market_kline" in {step.kind for step in planning.plan.steps} else None,
+                    market_indices=indices if "market_indices" in {step.kind for step in planning.plan.steps} else None,
+                    market_overview=overview if body.use_mcp and "market_overview" in {step.kind for step in planning.plan.steps} else None,
                     web_search=search if "web_search" in policy.allowed_tools else None,
                 ).execute(planning.plan, body.question, scope)
                 state.source_summary = result.source_summary
+                state.required_sources_missing = result.context.required_missing
+                state.had_external_failure = any(item.status != "success" for item in result.context.sources
+                                                 if item.category != "local")
                 state.execution_steps = [{"id": step.id, "kind": step.kind, "status": step.status,
                                           "error": step.error} for step in result.steps]
                 for step in result.steps:
                     if step.kind != "answer":
                         yield {"type": "execution_step", "id": step.id, "kind": step.kind,
                                "status": step.status, "error": step.error}
-                context = "\\n".join(str(step.value) for step in result.steps if step.value is not None)
-                if context:
-                    plan_history.append({"role": "system", "content": "已由服务端按受限计划获取的来源结果：\\n" + context})
-            # 补报上下文必须落在生产线程（模型调用所在线程）：RagQA 的补报处理器
-            # 由该线程回调，只能提交需求，不能决定候选或触发下载。
+                for source in result.context.sources:
+                    yield {"type": "source_result", "result": source}
+                _supplement_context.current = {"session_id": sid, "payload": None}
+                try:
+                    yield from chat_qa.answer_from_context(
+                        body.question, context=result.context, history=history, scope=scope,
+                        run_id=run_id, allow_supplement=(
+                            result.context.required_missing
+                            and any(step.kind == "retrieve" and step.required for step in planning.plan.steps)
+                            and all(source.category == "local" or source.status == "success"
+                                    for source in result.context.sources)
+                        ),
+                    )
+                finally:
+                    _supplement_context.current = None
+                return
+
             _supplement_context.current = {"session_id": sid, "payload": None}
             try:
-                kwargs = dict(question=body.question, history=plan_history, filters=body.filters, tools=tools,
+                kwargs = dict(question=body.question, history=history, filters=body.filters, tools=tools,
                               priority_report_id=priority_report_id, scope=scope, run_id=run_id,
                               skip_retrieval=bool(planning.plan and planning.plan.source_mode in {"market_recap", "general_web", "external_market"}))
-                # M1-compatible injected test adapters may not yet expose the M2
-                # argument; production RagQA always receives the policy.
                 parameters = inspect.signature(chat_qa.answer_stream).parameters.values()
                 accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
                 if any(parameter.name == "tool_policy" for parameter in parameters) or accepts_kwargs:
                     kwargs["tool_policy"] = policy
+                if any(parameter.name == "source_runtime" for parameter in parameters) or accepts_kwargs:
+                    kwargs["source_runtime"] = runtime
                 if not accepts_kwargs and not any(parameter.name == "skip_retrieval" for parameter in parameters):
                     kwargs.pop("skip_retrieval", None)
                 yield from chat_qa.answer_stream(**kwargs)
@@ -2337,9 +2498,13 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 # Scope and ToolPolicy are passed unchanged, and its citations,
                 # tool artifacts and normalized facts become the durable step data.
                 research_state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
+                research_runtime = _source_runtime_for_run(
+                    scope, policy, RagConfig.load(), use_mcp=body.use_mcp, source_mode="external_market",
+                )
                 handlers = _research_step_handlers(
                     research_state, question=body.question, history=history, filters=body.filters, tools=tools,
                     priority_report_id=priority_report_id, scope=scope, policy=policy, run_id=run_id,
+                    source_runtime=research_runtime,
                 )
                 def persist_research(research_run):
                     nonlocal research_run_id
@@ -2473,9 +2638,12 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         answer = ClaimVerifier().degrade_blocked(answer, scope, state.facts)
                     elif state.verification_report.status == "partial":
                         answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
-                    status = (
-                        "partial" if (state.had_external_failure or state.retrieval_degraded or state.verification_report.status == "partial")
-                        else "completed"
+                    status = resolve_answer_status(
+                        stopped=False, failed=False, waiting_consent=False,
+                        required_missing=state.required_sources_missing,
+                        had_source_failure=state.had_external_failure,
+                        retrieval_degraded=state.retrieval_degraded,
+                        verification=state.verification_report.status,
                     )
                     run = _persist(status, answer)
                     yield _sse("done", {
@@ -2543,9 +2711,14 @@ async def resume_research_run(run_id: str, body: ResumeResearchRequest, request:
     async def gen():
         # 恢复使用与首次研究流同一组受控 handler，且只用已完成步骤之外要重跑的步骤。
         state = _RagRunState(scope=research_run.plan.scope, intent_decision=origin.intent, tool_policy=origin.policy)
+        research_runtime = _source_runtime_for_run(
+            research_run.plan.scope, origin.policy, RagConfig.load(), use_mcp=bool(origin.policy.allowed_tools),
+            source_mode="external_market",
+        )
         handlers = _research_step_handlers(
             state, question=origin.question, history=origin.history, filters={}, tools=None,
             priority_report_id=None, scope=research_run.plan.scope, policy=origin.policy, run_id=run_id,
+            source_runtime=research_runtime,
         )
         agent = ResearchAgent(executor=ResearchExecutor(handlers),
                               persist=lambda saved: chat_store.save_research_run(body.session_id, saved))
@@ -2644,7 +2817,8 @@ async def resolve_chat_supplement(
     history = _resume_history(session)
     run_id = uuid.uuid4().hex
     created_at = dt.datetime.now().isoformat(timespec="seconds")
-    state = _RagRunState(scope=pending.scope)
+    resume_policy = _resume_tool_policy(session, question)
+    state = _RagRunState(scope=pending.scope, tool_policy=resume_policy)
     ingested: List[str] = []
     skipped: List[str] = []
     failed: List[Dict[str, str]] = []
@@ -2748,10 +2922,22 @@ async def resolve_chat_supplement(
             yield _sse("run_started", {"run_id": run_id})
 
             resume_scope = state.scope
-            pump.start(lambda: rag_qa.answer_stream(
-                question, history=history, filters=None, tools=_resume_chat_tools(),
-                priority_report_id=None, scope=resume_scope, run_id=run_id,
-            ))
+            resume_runtime = _source_runtime_for_run(
+                resume_scope, resume_policy, RagConfig.load(), use_mcp=bool(resume_policy.allowed_tools),
+                source_mode="external_market",
+            )
+            def resume_answer():
+                kwargs = dict(question=question, history=history, filters=None,
+                              tools=_resume_chat_tools() if resume_policy.allowed_tools else None,
+                              priority_report_id=None, scope=resume_scope, run_id=run_id)
+                parameters = inspect.signature(rag_qa.answer_stream).parameters.values()
+                accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+                if any(parameter.name == "tool_policy" for parameter in parameters) or accepts_kwargs:
+                    kwargs["tool_policy"] = resume_policy
+                if any(parameter.name == "source_runtime" for parameter in parameters) or accepts_kwargs:
+                    kwargs["source_runtime"] = resume_runtime
+                yield from rag_qa.answer_stream(**kwargs)
+            pump.start(resume_answer)
             while True:
                 evt = await pump.queue.get()
                 if evt is pump.sentinel:

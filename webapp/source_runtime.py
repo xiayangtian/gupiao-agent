@@ -133,9 +133,9 @@ class SourceRuntime:
             self._sequence += 1
             return f"source-{self._sequence}"
 
-    @staticmethod
-    def unavailable(call: SourceCall, code: str) -> SourceResult:
-        return SourceResult("", call.provider, call.operation, call.category, "unavailable", error_code=code)
+    def unavailable(self, call: SourceCall, code: str) -> SourceResult:
+        return SourceResult(self._next_id(), call.provider, call.operation, call.category,
+                            "unavailable", error_code=code)
 
     def call(self, call: SourceCall, invoke: Callable[[], SourceResult]) -> SourceResult:
         if not isinstance(call, SourceCall) or not callable(invoke):

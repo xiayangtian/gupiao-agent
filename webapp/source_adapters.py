@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Mapping
@@ -76,10 +77,22 @@ def _extract_rows(value: Any) -> tuple[list[dict[str, Any]], str]:
                 except ValueError:
                     continue
         rows = None
-        for key in ("data", "results", "rows"):
+        for key in ("data", "results", "rows", "quotes", "bars"):
             if isinstance(value.get(key), list):
                 rows = value[key]
                 break
+        if rows is None and isinstance(value.get("indices"), Mapping):
+            rows = list(value["indices"].values())
+        if not as_of and rows:
+            row_times = [row.get("as_of") or row.get("date") or row.get("trade_date") or row.get("time")
+                         for row in rows if isinstance(row, Mapping)]
+            known_times = [value for value in row_times if isinstance(value, str) and value.strip()]
+            if known_times and len(set(known_times)) == 1:
+                try:
+                    datetime.fromisoformat(known_times[0].replace("Z", "+00:00"))
+                    as_of = known_times[0]
+                except ValueError:
+                    pass
         if rows is None and value and all(_safe_cell(v) for v in value.values()):
             rows = [dict(value)]
     elif isinstance(value, list):
@@ -94,7 +107,8 @@ def _extract_rows(value: Any) -> tuple[list[dict[str, Any]], str]:
             isinstance(key, str) and _safe_cell(cell) for key, cell in row.items()
         ):
             raise ValueError("unsupported_payload")
-        normalized.append(dict(row))
+        normalized.append({key: value[:2000] if isinstance(value, str) else value
+                           for key, value in row.items()})
     if not any(cell is not None and cell != "" for row in normalized for cell in row.values()):
         raise ValueError("empty_payload")
     return normalized, as_of
@@ -121,6 +135,12 @@ def normalize_source(call: SourceCall, raw: Any, *, fetched_at: str = "") -> Sou
                             content=content, as_of=as_of, fetched_at=fetched_at,
                             payload=payload)
     except ValueError as exc:
+        raw_text = raw if isinstance(raw, str) else ""
+        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        if len(lines) >= 3 and "|" in lines[0] and re.fullmatch(r"\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?", lines[1]):
+            return SourceResult("", call.provider, call.operation, call.category, "partial",
+                                content=raw_text[:MAX_SOURCE_CHARS], fetched_at=fetched_at,
+                                error_code="structured_reference_only")
         code = str(exc) if str(exc) in {"provider_error", "empty_payload", "unsupported_payload"} else "unsupported_payload"
         state = "failed" if code in {"provider_error", "empty_payload"} else "unavailable"
         return SourceResult("", call.provider, call.operation, call.category, state,

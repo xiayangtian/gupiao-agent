@@ -91,6 +91,7 @@ class ExecutionExecutor:
     def execute(self, plan: ExecutionPlan, question: str, scope: Scope) -> ExecutionResult:
         rows: list[ExecutionStepResult] = []
         sources: list[SourceResult] = []
+        retrieval_hits: list[dict[str, Any]] = []
         legacy_used: set[str] = set()
         required_missing = False
         had_failure = False
@@ -117,6 +118,8 @@ class ExecutionExecutor:
                 values = value if isinstance(value, tuple) else (value,)
                 source_values = [item for item in values if isinstance(item, SourceResult)]
                 sources.extend(source_values)
+                for source in source_values:
+                    retrieval_hits.extend(dict(hit) for hit in source.retrieval_hits)
                 if not source_values and value is not None:
                     legacy_used.add("local_pdf" if step.kind == "retrieve" else
                                     "web" if step.kind == "web_search" else "market_data")
@@ -137,10 +140,18 @@ class ExecutionExecutor:
         summary = {"local_pdf": "未使用", "market_data": "未使用", "web": "未使用"}
         for key in legacy_used:
             summary[key] = "已使用"
+        grouped: dict[str, list[str]] = {}
         for source in sources:
             key = "local_pdf" if source.category == "local" else ("web" if source.category == "web" else "market_data")
-            summary[key] = ("已使用" if source.status == "success" else
-                            "部分取得" if source.status == "partial" else
-                            "获取失败" if source.status == "failed" else "不可用")
+            grouped.setdefault(key, []).append(source.status)
+        for key, statuses in grouped.items():
+            if all(status == "success" for status in statuses):
+                summary[key] = "已使用"
+            elif any(status in {"success", "partial"} for status in statuses):
+                summary[key] = "部分取得"
+            elif all(status == "unavailable" for status in statuses):
+                summary[key] = "不可用"
+            else:
+                summary[key] = "获取失败"
         return ExecutionResult(tuple(rows), summary,
-                               AnswerContext(tuple(sources), required_missing=required_missing))
+                               AnswerContext(tuple(sources), tuple(retrieval_hits), required_missing))

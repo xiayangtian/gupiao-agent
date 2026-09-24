@@ -42,6 +42,17 @@ def test_unknown_time_source_is_partial_and_keeps_acquisition_time():
     assert projection.facts == ()
 
 
+def test_local_retrieval_is_not_fabricated_as_external_tool_artifact():
+    from webapp.chat_execution import project_sources
+    from webapp.chat_models import Scope
+    from webapp.source_runtime import SourceResult
+
+    projection = project_sources([SourceResult("local-1", "local", "retrieve", "local", "success",
+        retrieval_hits=({"source": "pdf", "snippet": "evidence"},))], Scope.whole_corpus())
+    assert projection.tool_artifacts == ()
+    assert projection.source_summary["local_pdf"] == "已使用"
+
+
 def test_same_source_id_is_projected_once_but_distinct_sources_do_not_overwrite():
     from webapp.chat_execution import project_sources
     from webapp.chat_models import Scope

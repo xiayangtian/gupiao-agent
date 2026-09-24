@@ -7,7 +7,8 @@ from typing import Mapping, Sequence
 
 from webapp.chat_evidence import EvidenceNormalizer
 from webapp.chat_models import EvidenceArtifact, Fact, Scope, ToolArtifact
-from webapp.source_runtime import SourceResult
+from webapp.source_adapters import SourceAccess, normalize_source
+from webapp.source_runtime import AnswerContext, CallBudget, SourceCall, SourceResult, SourceRuntime
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,31 @@ class SourceProjection:
     facts: tuple[Fact, ...]
     source_summary: Mapping[str, str]
     had_failure: bool
+
+
+def build_source_runtime(*, scope: Scope, policy: object, cfg: object, use_mcp: bool,
+                         source_mode: str, access: SourceAccess) -> SourceRuntime:
+    configured = getattr(cfg, "mcp_max_tool_calls", 1)
+    if isinstance(configured, bool) or not isinstance(configured, int):
+        configured = 1
+    policy_limit = getattr(policy, "max_calls", configured)
+    if isinstance(policy_limit, bool) or not isinstance(policy_limit, int):
+        policy_limit = configured
+    if source_mode == "market_recap":
+        total = min(max(0, configured), 6)
+        market, web = min(total, 4), min(total, 2)
+    else:
+        total = min(max(0, configured), max(0, policy_limit))
+        market, web = total, total
+    def authorize(call):
+        if call.provider == "mcp" and not use_mcp:
+            return False
+        return access.permits(call)
+    return SourceRuntime(scope, CallBudget(total, market, web), authorize)
+
+
+def execute_source(runtime: SourceRuntime, call: SourceCall, invoke, *, fetched_at: str) -> SourceResult:
+    return runtime.call(call, lambda: normalize_source(call, invoke(), fetched_at=fetched_at))
 
 
 def resolve_answer_status(*, stopped: bool, failed: bool, waiting_consent: bool,
@@ -62,6 +88,8 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
         evidence.extend(result.artifacts)
         evidence.extend(normalizer.normalize_web_sources(result.payload or (), result.fetched_at)
                         if result.category == "web" and result.fetched_at else ())
+        if result.category == "local":
+            continue
         provider = result.provider if result.provider in {"mcp", "tencent", "web", "local"} else "other"
         artifact = ToolArtifact(
             provider=provider,

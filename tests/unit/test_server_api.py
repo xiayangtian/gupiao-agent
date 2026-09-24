@@ -1483,6 +1483,52 @@ class TestChatSessionsApi:
         messages = [record.getMessage() for record in caplog.records]
         assert any("chat_scope_resolution_failed" in message and run_id in message and "RuntimeError" in message for message in messages)
 
+    def test_source_runtime_plan_persists_the_same_four_market_results_without_refetch(
+        self, client, env, monkeypatch, tmp_path,
+    ):
+        from webapp.chat_store import ChatStore
+        from webapp.execution_plan import ExecutionPlan
+        from webapp.execution_planner import PlanningResult
+        from financial_report_fetcher.rag.qa import RagQA
+
+        store = ChatStore(str(tmp_path / "runtime-sessions.json"))
+        monkeypatch.setattr(server, "chat_store", store)
+        calls = []
+        def fake_kline(symbol, *, period, count, adjust):
+            calls.append((symbol, period, count, adjust))
+            return [{"date": "2026-09-24", "close": 10.0}]
+        monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+
+        class FixedPlanner:
+            def __init__(self, _planner):
+                pass
+            def plan(self, *_args):
+                plan = ExecutionPlan.from_dict({"objective": "复盘", "source_mode": "market_recap",
+                    "steps": [{"id": "indices", "kind": "market_indices", "required": True},
+                              {"id": "answer", "kind": "answer", "depends_on": ["indices"]}],
+                    "acceptance": ["覆盖四个指数"]})
+                return PlanningResult("validated", plan)
+
+        class AnswerAI:
+            def chat_stream(self, **_kwargs):
+                yield {"type": "done", "answer": "本次行情来源已取得。", "model": "fixture", "usage": {}}
+
+        class NoStore:
+            def query(self, *_args, **_kwargs):
+                raise AssertionError("plan path must not retrieve again")
+        monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+        monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+
+        response = client.post("/api/chat/stream", json={"question": "今日复盘", "use_mcp": False,
+                                                         "scope_mode": "whole_corpus"})
+        assert response.status_code == 200
+        events = _read_sse(response)
+        run = _event(events, "done")["run"]
+        assert len(calls) == 4
+        assert len(run["tool_artifacts"]) == 4
+        assert all(item["as_of"] == "2026-09-24" for item in run["tool_artifacts"])
+        assert run["source_summary"]["market_data"] == "已使用"
+
     def test_chat_stream_sse_and_session_persist(self, client, env, monkeypatch, tmp_path, caplog):
         """流式端点：SSE 事件含 session/delta/done；会话消息持久化"""
         from webapp.chat_store import ChatStore
