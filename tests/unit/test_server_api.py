@@ -3381,6 +3381,51 @@ class TestChatSupplementApi:
         assert captured["company_code_resolver"] is server._resolve_symbol_code
 
 
+def test_general_knowledge_skips_planner_and_sources_and_persists_unretrieved_label(client, env, monkeypatch):
+    from financial_report_fetcher.rag.qa import RagQA
+
+    calls = []
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("knowledge path must not retrieve")
+    class AnswerAI:
+        def chat_stream(self, **kwargs):
+            calls.append(kwargs)
+            yield {"type": "done", "answer": "市盈率是价格与每股收益的比值。", "model": "fixture", "usage": {}}
+    class NoPlanner:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("knowledge path must not plan with model")
+    monkeypatch.setattr(server, "ExecutionPlanner", NoPlanner)
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+    monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not build tools")))
+
+    events = _read_sse(client.post("/api/chat/stream", json={"question": "什么是市盈率？", "scope_mode": "whole_corpus"}))
+    run = _event(events, "done")["run"]
+    assert run["knowledge_basis"] == "model_knowledge_unretrieved"
+    assert run["facts"] == run["artifacts"] == run["tool_artifacts"] == []
+    assert run["execution_plan"]["source_mode"] == "general_knowledge"
+    assert len(calls) == 1 and calls[0].get("tools") is None
+
+
+def test_current_policy_without_authorized_web_does_not_claim_latest_knowledge(client, env, monkeypatch):
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: [])
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "当前政策是什么？", "use_mcp": False,
+    }))
+    assert "无法核实" in _event(events, "clarification")["message"]
+    assert not any(name == "execution_plan" for name, _ in events)
+
+
+def test_company_specific_definition_does_not_use_unretrieved_knowledge(client, env, monkeypatch):
+    monkeypatch.setattr(server, "rag_qa", object())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "什么是市盈率？",
+        "focus_report": {"code": "601288", "period": "2026-06-30"},
+    }))
+    assert _event(events, "clarification")["message"]
+    assert not any(name == "execution_plan" for name, _ in events)
+
+
 def test_m2_raw_tool_json_does_not_bypass_fact_normalization(client, env, monkeypatch):
     class RawToolRag:
         def answer_stream(self, question, **kwargs):

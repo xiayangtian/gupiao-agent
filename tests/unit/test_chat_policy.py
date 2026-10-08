@@ -154,3 +154,14 @@ def test_realtime_policy_without_provider_quote_tools_falls_back_to_local_only()
     assert policy.source_policy.market_data is False
     assert policy.source_policy.web is True
     assert policy.fallback_message
+
+
+def test_only_standalone_stable_definition_is_eligible_for_unretrieved_knowledge():
+    from webapp.chat_policy import QuestionRouter
+
+    assert QuestionRouter.is_knowledge_question("什么是市盈率？")
+    assert QuestionRouter.is_knowledge_question("如何理解现金流")
+    assert not QuestionRouter.is_knowledge_question("什么是农业银行的市盈率？")
+    assert not QuestionRouter.is_knowledge_question("600519今天的市盈率是多少")
+    assert not QuestionRouter.is_knowledge_question("当前政策是什么？")
+    assert QuestionRouter().classify("什么是农业银行的市盈率？").intent == "clarification"

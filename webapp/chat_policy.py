@@ -46,12 +46,21 @@ class QuestionRouter:
     _DEFINITION = ("什么是", "如何理解", "怎么理解", "解释", "定义", "含义")
     _CONCEPTS = ("市盈率", "市净率", "市销率", "毛利率", "净利润", "现金流", "资产负债率", "ROE")
 
+    @classmethod
+    def is_knowledge_question(cls, question: str) -> bool:
+        """Only stand-alone stable concept definitions may skip retrieval and numeric fact checks."""
+        terms = "|".join(re.escape(term) for term in cls._CONCEPTS)
+        starts = "|".join(re.escape(term) for term in cls._DEFINITION)
+        return bool(re.fullmatch(rf"(?:{starts})\s*(?:{terms})\s*[？?。]?", (question or "").strip(), re.IGNORECASE))
+
     def classify(self, question: str) -> QuestionRoute:
         text = question or ""
         if any(word in text for word in self._RECAP) and any(word in text for word in ("A股", "大盘", "市场", "行情", "指数", "复盘")):
             return QuestionRoute("market_recap", False, True)
         if any(word in text for word in self._DEFINITION) and any(word in text for word in self._CONCEPTS):
-            return QuestionRoute("general_knowledge", False, False)
+            if self.is_knowledge_question(text):
+                return QuestionRoute("general_knowledge", False, False)
+            return QuestionRoute("clarification", False, False)
         market = any(word in text for word in self._MARKET)
         if market:
             if any(word in text for word in self._MARKET_TREND):

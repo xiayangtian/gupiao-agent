@@ -4,6 +4,21 @@ from webapp.chat_models import Scope
 from webapp.execution_plan import ExecutionPlan, validate_execution_plan
 
 
+def test_general_knowledge_accepts_only_one_answer_with_server_intent():
+    answer = ExecutionPlan.from_dict({"objective": "解释市盈率", "source_mode": "general_knowledge",
+                                    "steps": [{"id": "answer", "kind": "answer"}], "acceptance": ["常识标记"]})
+    valid, issues = validate_execution_plan(answer, Scope.whole_corpus(), set(), 0,
+                                             authoritative_intent="general_knowledge")
+    assert valid == answer and not issues
+    for kind in ("retrieve", "market_quote", "web_search"):
+        plan = ExecutionPlan.from_dict({"objective": "解释市盈率", "source_mode": "general_knowledge",
+                                        "steps": [{"id": "source", "kind": kind}, {"id": "answer", "kind": "answer"}],
+                                        "acceptance": ["常识标记"]})
+        rejected, issues = validate_execution_plan(plan, Scope.whole_corpus(), {kind}, 9,
+                                                    authoritative_intent="general_knowledge")
+        assert rejected is None and issues
+
+
 def test_general_web_rejects_rag_and_market_steps():
     plan = ExecutionPlan.from_dict({"objective":"天气", "source_mode":"general_web", "steps":[{"id":"r","kind":"retrieve"},{"id":"a","kind":"answer"}], "acceptance":["来源"]})
     _, issues = validate_execution_plan(plan, Scope.whole_corpus(), {"retrieve"}, 0)

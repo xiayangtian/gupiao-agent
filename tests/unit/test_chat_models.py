@@ -334,6 +334,16 @@ def test_all_contracts_are_json_round_trippable_and_frozen():
         fact.metric = "profit"
 
 
+def test_knowledge_basis_round_trips_without_marking_legacy_runs_as_sourced():
+    legacy = AnswerRun.from_dict({"content": "旧回答", "status": "completed"})
+    assert legacy.knowledge_basis == ""
+    run = AnswerRun(content="市盈率是估值指标。", status="completed",
+                    knowledge_basis="model_knowledge_unretrieved")
+    assert AnswerRun.from_dict(run.to_dict()) == run
+    with pytest.raises(ValueError, match="knowledge_basis"):
+        AnswerRun(content="x", status="completed", knowledge_basis="untrusted")
+
+
 def test_legacy_fact_defaults_to_unknown_source_and_round_trips_new_lineage_fields():
     payload = {
         "metric": "revenue", "value": 100, "unit": "亿元", "period": "2025-12-31",

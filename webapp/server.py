@@ -79,7 +79,8 @@ from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceRes
 from .chat_facts import FactNormalizer, derive_available_facts, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, QuestionRouter, ToolAvailability, ToolPolicyResolver
-from .execution_planner import ExecutionPlanner, PlanningCapabilities
+from .execution_plan import ExecutionPlan
+from .execution_planner import ExecutionPlanner, PlanningCapabilities, PlanningResult
 from .execution_executor import ExecutionExecutor, market_kline_request_count
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolution, ScopeResolver
@@ -2070,6 +2071,8 @@ def _make_answer_run(
         execution_steps=tuple(state.execution_steps),
         source_summary=state.source_summary,
         plan_status=state.plan_status,
+        knowledge_basis=("model_knowledge_unretrieved" if state.execution_plan
+                         and state.execution_plan.get("source_mode") == "general_knowledge" else ""),
         id=run_id,
         research_run_id=research_run_id,
         research_summary=research_summary,
@@ -2301,6 +2304,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     run_id = uuid.uuid4().hex
 
     route = QuestionRouter().classify(body.question)
+    knowledge_mode = route.intent == "general_knowledge" and QuestionRouter.is_knowledge_question(body.question)
     if route.intent == "clarification":
         return _chat_preflight_response(
             sid, body.question, "请说明你希望分析财报经营指标，还是证券价格走势。", started_at,
@@ -2312,6 +2316,10 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     if resolution.scope is None:
         return _chat_preflight_response(sid, body.question, resolution.clarification, started_at)
     scope = resolution.scope
+    if knowledge_mode and scope.companies:
+        return _chat_preflight_response(
+            sid, body.question, "该问题含公司范围；请明确需要解释通用概念，还是查询有来源支持的公司事实。", started_at,
+        )
 
     financial_period = resolve_financial_period(body.question)
     financial_period_bounds = resolve_financial_period_range(financial_period) if financial_period else None
@@ -2334,8 +2342,12 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     chat_qa = _chat_qa_or_degraded()
 
     # Scope 冻结后先用模型生成受限执行计划；计划失败才回退旧规则。
-    tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
+    tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp and not knowledge_mode else None
     tool_names = [str(item.get("function", {}).get("name") or "") for item in (tools or [])]
+    if route.intent == "general_web" and "web_search" not in tool_names:
+        return _chat_preflight_response(
+            sid, body.question, "当前网页来源未获授权或不可用，无法核实最新事实。", started_at,
+        )
     availability = ToolAvailability.available(*tool_names)
     available_kinds = set()
     if rag_qa is not None:
@@ -2351,7 +2363,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         available_kinds.add("market_overview")
     # 腾讯 K 线是冻结公司 Scope 的本地受控能力。
     available_kinds.add("market_kline")
-    authoritative_intent = route.intent if route.intent != "general_knowledge" else None
+    authoritative_intent = route.intent if route.intent != "general_knowledge" or knowledge_mode else None
     authoritative_window: Dict[str, Any] | None = None
     if financial_period:
         authoritative_window = {"kind": "financial_period", "expression": financial_period}
@@ -2402,11 +2414,21 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         recap_budget = min(9, max(0, configured_recap_budget))
     else:
         recap_budget = 2
-    planning = ExecutionPlanner(_plan_json).plan(
-        body.question, scope, PlanningCapabilities(available_kinds, recap_budget),
-        authoritative_intent=authoritative_intent,
-        authoritative_window=authoritative_window,
-    )
+    if knowledge_mode:
+        # Server-owned answer-only plan; no second model call can choose a source.
+        knowledge_plan = ExecutionPlan.from_dict({
+            "objective": "解释通用概念", "source_mode": "general_knowledge",
+            "steps": [{"id": "answer", "kind": "answer"}],
+            "acceptance": ["依据模型常识，未检索外部来源"],
+        })
+        planning = PlanningResult("validated", knowledge_plan)
+        tools = None
+    else:
+        planning = ExecutionPlanner(_plan_json).plan(
+            body.question, scope, PlanningCapabilities(available_kinds, recap_budget),
+            authoritative_intent=authoritative_intent,
+            authoritative_window=authoritative_window,
+        )
     if authoritative_intent is not None and planning.plan is None and route.intent not in {
         "report_fact", "financial_trend", "market_quote",
     }:
@@ -2422,6 +2444,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             )
         elif route.intent in {"market_quote", "market_trend", "market_recap"}:
             decision = IntentDecision("realtime_market", "high", False, True, "web_search" in kinds)
+        elif knowledge_mode:
+            decision = IntentDecision("report_fact", "low", False)
         else:
             decision = IntentDecision("event_attribution", "high", False, False, "web_search" in kinds)
     elif planning.plan is not None:
@@ -2456,6 +2480,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         # 流式请求真正并行，一个会话的模型调用不会阻塞其他会话的响应。
         state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
         state.plan_status = planning.status
+        if knowledge_mode:
+            state.source_summary = {"local_pdf": "未使用", "market_data": "未使用", "web": "未使用"}
         if planning.plan is not None:
             state.execution_plan = {"objective": planning.plan.objective, "source_mode": planning.plan.source_mode,
                                     "steps": [{"id": step.id, "kind": step.kind, "required": step.required} for step in planning.plan.steps],
@@ -2479,6 +2505,12 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             return run
 
         def _produce() -> Any:
+            if knowledge_mode:
+                yield from chat_qa.answer_from_context(
+                    body.question, context=AnswerContext(), history=history,
+                    scope=scope, run_id=run_id, knowledge_mode=True,
+                )
+                return
             cfg = RagConfig.load()
             runtime = _source_runtime_for_run(
                 scope, policy, cfg, use_mcp=body.use_mcp,
@@ -2667,7 +2699,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             yield _sse("policy_resolved", {"intent": policy.intent, "allowed_tools": list(policy.allowed_tools),
                                              "max_calls": policy.max_calls, "max_rounds": policy.max_rounds})
             # 策略降级说明进入生产事件流：无外部工具或研究任务时用户能知道本次能力的边界。
-            if policy.fallback_message and (not policy.allowed_tools or is_research):
+            if not knowledge_mode and policy.fallback_message and (not policy.allowed_tools or is_research):
                 yield _sse("policy_fallback", {
                     "intent": policy.intent,
                     "message": policy.fallback_message,
@@ -2825,26 +2857,28 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     state.conflicts = list(detect_conflicts(state.facts))
                     for conflict in state.conflicts:
                         yield _sse("conflict", {"conflict": conflict.to_dict()})
-                    state.verification_report = ClaimVerifier().verify(
-                        answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
-                        requested_period=verification_period, window=market_window,
-                        answer_intent=route.intent,
-                    )
-                    yield _sse("verification", {"verification": state.verification_report.to_dict()})
-                    if state.verification_report.status == "blocked":
+                    if not knowledge_mode:
+                        state.verification_report = ClaimVerifier().verify(
+                            answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
+                            requested_period=verification_period, window=market_window,
+                            answer_intent=route.intent,
+                        )
+                        yield _sse("verification", {"verification": state.verification_report.to_dict()})
+                    if state.verification_report is not None and state.verification_report.status == "blocked":
                         # 只替换不受支持的数值论断；受支持内容与上下文保留。
                         answer = ClaimVerifier().degrade_blocked(
                             answer, scope, state.facts, requested_period=verification_period,
                             window=market_window, answer_intent=route.intent,
                         )
-                    elif state.verification_report.status == "partial":
+                    elif state.verification_report is not None and state.verification_report.status == "partial":
                         answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
                     status = resolve_answer_status(
                         stopped=False, failed=False, waiting_consent=False,
                         required_missing=state.required_sources_missing,
                         had_source_failure=state.had_external_failure,
                         retrieval_degraded=state.retrieval_degraded,
-                        verification=state.verification_report.status,
+                        verification=(state.verification_report.status if state.verification_report
+                                      else "passed" if knowledge_mode else None),
                     )
                     run = _persist(status, answer)
                     yield _sse("done", {

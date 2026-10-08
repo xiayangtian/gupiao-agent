@@ -120,6 +120,38 @@ class FakeAIStream:
                "model": "test-model", "usage": {"total_tokens": 10}}
 
 
+def test_knowledge_mode_answers_without_retrieval_or_tools():
+    from webapp.source_runtime import AnswerContext
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("knowledge mode must not retrieve")
+
+    ai = FakeAIStream(deltas=("市盈率",), answer="市盈率衡量价格与盈利的关系。")
+    events = list(RagQA(NoStore(), ai).answer_from_context(
+        "什么是市盈率？", context=AnswerContext(), knowledge_mode=True,
+    ))
+
+    assert events[-1]["type"] == "done"
+    assert events[-1]["citations"] == []
+    assert "未检索" in ai.last_system
+    assert "已查" not in ai.last_system
+    assert ai.last_messages[-1]["content"] == "什么是市盈率？"
+
+
+def test_knowledge_mode_rejects_company_and_current_market_questions():
+    from webapp.source_runtime import AnswerContext
+    ai = FakeAIStream()
+    qa = RagQA(object(), ai)
+
+    company = list(qa.answer_from_context("什么是市盈率？", context=AnswerContext(),
+        knowledge_mode=True, scope=Scope.company_only("601288", "农业银行")))
+    market = list(qa.answer_from_context("今天股价是多少？", context=AnswerContext(), knowledge_mode=True))
+
+    assert company[0]["type"] == market[0]["type"] == "error"
+    assert ai.last_messages is None
+
+
 def test_answer_stream_yields_deltas_and_done_with_citations(tmp_path, fake_embedder):
     """流式回答：增量逐条 yield，done 携带完整答案与有效引用"""
     store = RagStore(str(tmp_path), fake_embedder)

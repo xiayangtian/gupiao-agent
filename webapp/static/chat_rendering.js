@@ -556,6 +556,9 @@
     var html = '<div class="chat-run-status chat-run-status-' + escapeHtml(status)
       + '" role="status" aria-live="polite">'
       + '<span class="chat-run-status-label">' + label + '</span>';
+    if (run.knowledge_basis === 'model_knowledge_unretrieved') {
+      html += '<span class="chat-run-status-note">依据模型常识，未检索外部来源</span>';
+    }
     if (status === 'stopped' || status === 'partial' || status === 'failed') {
       html += '<button type="button" class="chat-run-action chat-run-regenerate"'
         + ' data-chat-action="regenerate">重新生成</button>';
@@ -581,6 +584,7 @@
     var notes = [];
     if (source.local_pdf === '未使用') notes.push('未使用本地财报');
     if (plan.source_mode === 'general_web') notes.push('非股票问题：仅模型与网页搜索');
+    if (plan.source_mode === 'general_knowledge') notes.push('依据模型常识，未检索外部来源');
     if (plan.source_mode === 'market_recap') notes.push('A 股日/周复盘');
     return '<div class="chat-execution-summary" aria-label="执行来源">已按计划：'
       + escapeHtml(text) + (notes.length ? ' · ' + escapeHtml(notes.join('；')) : '') + '</div>';

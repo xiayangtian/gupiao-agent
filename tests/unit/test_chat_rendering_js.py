@@ -23,6 +23,16 @@ def _run_node(source: str) -> dict:
     return json.loads(completed.stdout)
 
 
+def test_knowledge_basis_shows_unretrieved_notice_only_for_explicit_flag():
+    result = _run_node(
+        f"""const r=require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify({{knowledge:r.renderRunStatus({{status:'completed',knowledge_basis:'model_knowledge_unretrieved'}}),
+          legacy:r.renderRunStatus({{status:'completed'}})}}));"""
+    )
+    assert "依据模型常识，未检索外部来源" in result["knowledge"]
+    assert "未检索外部来源" not in result["legacy"]
+
+
 def test_chat_renderer_normalizes_html_sup_citations_to_markdown_labels():
     """模型返回 HTML/转义 HTML 上标时，聊天内容应显示为可读的 [n]。"""
     result = _run_node(

@@ -886,6 +886,7 @@ class AnswerRun:
     execution_steps: tuple[Mapping[str, Any], ...] = field(default_factory=tuple, hash=False)
     source_summary: Mapping[str, str] = field(default_factory=dict, hash=False)
     plan_status: str = ""
+    knowledge_basis: str = ""
 
     def __post_init__(self) -> None:
         _string(self.content, "content", required=False)
@@ -943,6 +944,10 @@ class AnswerRun:
         object.__setattr__(self, "source_summary", dict(self.source_summary))
         if not isinstance(self.plan_status, str):
             raise ValueError("plan_status must be a string")
+        if self.knowledge_basis not in {"", "model_knowledge_unretrieved"}:
+            raise ValueError("knowledge_basis is unsupported")
+        if self.knowledge_basis and (self.facts or self.artifacts or self.tool_artifacts):
+            raise ValueError("knowledge_basis must not claim retrieved sources")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -970,6 +975,7 @@ class AnswerRun:
             "execution_steps": [dict(item) for item in self.execution_steps],
             "source_summary": dict(self.source_summary),
             "plan_status": self.plan_status,
+            "knowledge_basis": self.knowledge_basis,
         }
 
     @classmethod
@@ -1013,6 +1019,7 @@ class AnswerRun:
             execution_steps=tuple(_mapping(item, "execution_steps") for item in data.get("execution_steps", [])),
             source_summary=_mapping(data.get("source_summary", {}), "source_summary"),
             plan_status=_string(data.get("plan_status", ""), "plan_status", required=False),
+            knowledge_basis=_string(data.get("knowledge_basis", ""), "knowledge_basis", required=False),
         )
 
 
