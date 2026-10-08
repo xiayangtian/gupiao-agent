@@ -145,7 +145,7 @@ class CallBudget:
 class SourceRuntime:
     """One answer's frozen scope, authorization gate, attempt budget, and result cache."""
 
-    def __init__(self, scope: Scope, budget: CallBudget, authorize: Callable[[SourceCall], bool]) -> None:
+    def __init__(self, scope: Scope, budget: CallBudget, authorize: Callable[[SourceCall], bool], *, control: Any = None) -> None:
         if not isinstance(scope, Scope):
             raise ValueError("scope must be a Scope")
         if not isinstance(budget, CallBudget):
@@ -155,6 +155,7 @@ class SourceRuntime:
         self.scope = scope
         self.budget = budget
         self.authorize = authorize
+        self.control = control
         self._guard = Lock()
         self._locks: dict[str, Lock] = {}
         self._cache: dict[str, SourceResult] = {}
@@ -179,6 +180,8 @@ class SourceRuntime:
                             "unavailable", error_code=code)
 
     def call(self, call: SourceCall, invoke: Callable[[], SourceResult]) -> SourceResult:
+        if self.control is not None:
+            self.control.check_active()
         if not isinstance(call, SourceCall) or not callable(invoke):
             raise ValueError("call must be SourceCall and invoke must be callable")
         try:

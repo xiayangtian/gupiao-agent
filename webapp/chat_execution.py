@@ -22,7 +22,7 @@ class SourceProjection:
 
 
 def build_source_runtime(*, scope: Scope, policy: object, cfg: object, use_mcp: bool,
-                         source_mode: str, access: SourceAccess) -> SourceRuntime:
+                         source_mode: str, access: SourceAccess, control: object | None = None) -> SourceRuntime:
     configured = getattr(cfg, "mcp_max_tool_calls", 1)
     if isinstance(configured, bool) or not isinstance(configured, int):
         configured = 1
@@ -39,7 +39,7 @@ def build_source_runtime(*, scope: Scope, policy: object, cfg: object, use_mcp: 
         if call.provider == "mcp" and not use_mcp:
             return False
         return access.permits(call)
-    return SourceRuntime(scope, CallBudget(total, market, web), authorize)
+    return SourceRuntime(scope, CallBudget(total, market, web), authorize, control=control)
 
 
 def execute_source(runtime: SourceRuntime, call: SourceCall, invoke, *, fetched_at: str) -> SourceResult:

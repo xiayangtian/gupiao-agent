@@ -77,7 +77,7 @@ class ChatEventChannel:
     def __init__(self, maxsize: int = 64) -> None:
         if maxsize < 1:
             raise ValueError("maxsize must be positive")
-        self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=maxsize)
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
         self._closed = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -92,7 +92,7 @@ class ChatEventChannel:
             except RuntimeError:
                 pass
 
-    def publish(self, event: dict[str, Any], control: ChatRunControl) -> bool:
+    def publish(self, event: Any, control: ChatRunControl, *, terminal: bool = False) -> bool:
         while True:
             with self._lock:
                 if self._closed:
@@ -100,10 +100,11 @@ class ChatEventChannel:
             try:
                 self._queue.put(event, timeout=min(0.05, max(0.001, control.remaining_seconds())))
             except queue.Full:
-                try:
-                    control.check_active()
-                except (ChatRunCancelled, ChatRunDeadlineExceeded):
-                    return False
+                if not terminal:
+                    try:
+                        control.check_active()
+                    except (ChatRunCancelled, ChatRunDeadlineExceeded):
+                        return False
                 continue
             self._notify_consumer()
             return True
@@ -202,7 +203,7 @@ class ChatRunRegistry:
             entry = self._runs.get(run_id)
             if entry is None or entry.control.session_id != session_id or entry.future.done():
                 return False
-            return entry.control.cancel("user")
+            return entry.control.cancel("user") or entry.control.cancelled
 
     def finish(self, run_id: str) -> None:
         with self._lock:

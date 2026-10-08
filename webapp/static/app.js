@@ -2801,6 +2801,12 @@ function stopChatStream() {
   var st = chatStreams[chatStreamKey()];
   if (st) {
     st.stopped = true;
+    if (st.runId && chatSessionId) {
+      fetch('/api/chat/runs/' + encodeURIComponent(st.runId) + '/cancel', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: chatSessionId }), keepalive: true,
+      }).catch(function () { /* 流断开仍会触发服务端协作式取消 */ });
+    }
     if (st.reader) {
       try { st.reader.cancel(); } catch (_) { /* 忽略取消异常 */ }
     }
@@ -2954,7 +2960,8 @@ async function submitQuestion(q, key) {
 
   // 思考状态：模型首个内容前提示「正在处理中」；工具调用展示可解释中间态。
   var st = { reader: null, stopped: false, answerText: '', hasContent: false,
-             finishedNormally: false, draftsTaken: false, toolStepCount: 0 };
+             finishedNormally: false, draftsTaken: false, toolStepCount: 0,
+             executionStepEls: Object.create(null) };
   chatStreams[key] = st;
   var thinkingEl = appendThinkingBubble('#chat-history');
   var toolStepsEl = null;   // 工具调用步骤区块（⏳ 调用中 → ✅ 已获取）
@@ -3095,6 +3102,31 @@ async function submitQuestion(q, key) {
           stageEl.textContent = '分析进度：' + stageMessage;
           scrollChatToBottom();
         }
+      } else if (/^execution_step_(started|completed|failed)$/.test(parsed.event)) {
+        if (isCurrentChatStream(key)) {
+          if (!toolStepsEl) {
+            toolStepsEl = document.createElement('div');
+            toolStepsEl.className = 'chat-tool-steps';
+            toolStepsEl.setAttribute('role', 'status');
+            toolStepsEl.setAttribute('aria-live', 'polite');
+            if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.insertBefore(toolStepsEl, thinkingEl.nextSibling);
+            else $('#chat-history').appendChild(toolStepsEl);
+          }
+          var executionId = String(parsed.data.id || 'step');
+          var executionRow = st.executionStepEls[executionId];
+          if (!executionRow) {
+            executionRow = document.createElement('div');
+            executionRow.className = 'chat-tool-step';
+            st.executionStepEls[executionId] = executionRow;
+            toolStepsEl.appendChild(executionRow);
+          }
+          var phase = parsed.event.slice('execution_step_'.length);
+          executionRow.className = 'chat-tool-step ' + (phase === 'started' ? 'running' : phase === 'failed' ? 'failed' : 'done');
+          executionRow.textContent = (phase === 'started' ? '⏳ ' : phase === 'failed' ? '❌ ' : '✅ ')
+            + String(parsed.data.kind || '来源') + '：'
+            + (phase === 'started' ? '执行中' : phase === 'failed' ? '未完成' : '已完成');
+          scrollChatToBottom();
+        }
       } else if (parsed.event === 'tool_call') {
         // MCP 工具调用：更新思考文案 + 添加工具步骤（⏳ 调用中）
         var toolName = parsed.data.name || '';
@@ -3191,9 +3223,9 @@ async function submitQuestion(q, key) {
       } else if (parsed.event === 'research_done') {
         st.researchRun = parsed.data.run || st.researchRun;
         renderResearchProgress();
-      } else if (parsed.event === 'done') {
+      } else if (parsed.event === 'done' || parsed.event === 'stopped') {
         done = true;
-        st.finishedNormally = true;
+        st.finishedNormally = parsed.event === 'done';
         st.answerText = parsed.data.answer || st.answerText;
         if (parsed.data.session_id) chatSessionId = parsed.data.session_id;
         if (isCurrentChatStream(key)) {

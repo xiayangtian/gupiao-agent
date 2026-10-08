@@ -82,6 +82,26 @@ def test_runtime_instances_do_not_share_results_or_budget():
     assert len(invocations) == 2
 
 
+def test_cancelled_runtime_rejects_next_source_before_authorization_or_provider_call():
+    from webapp.chat_models import Scope
+    from webapp.chat_runs import ChatRunCancelled, ChatRunControl
+    from webapp.source_runtime import CallBudget, SourceCall, SourceRuntime
+
+    control = ChatRunControl("session", "run", timeout_seconds=10)
+    authorizations = []
+    invocations = []
+    runtime = SourceRuntime(Scope.whole_corpus(), CallBudget(2, 2, 2),
+                           lambda call: authorizations.append(call.operation) or True,
+                           control=control)
+    control.cancel("user")
+
+    with pytest.raises(ChatRunCancelled):
+        runtime.call(SourceCall("fixture", "next", "market", {}),
+                     lambda: invocations.append("called"))
+    assert authorizations == []
+    assert invocations == []
+
+
 def test_concurrent_duplicate_calls_invoke_provider_once():
     from webapp.chat_models import Scope
     from webapp.source_runtime import CallBudget, SourceCall, SourceResult, SourceRuntime

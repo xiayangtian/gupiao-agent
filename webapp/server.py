@@ -15,6 +15,7 @@
 
 import asyncio
 import datetime as dt
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import json
 import inspect
 import logging
@@ -74,6 +75,7 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
 from .chat_execution import build_source_runtime, execute_source, project_sources, resolve_answer_status
+from .chat_runs import ChatEventChannel, ChatRunCancelled, ChatRunControl, ChatRunDeadlineExceeded, ChatRunRegistry
 from .source_adapters import SourceAccess
 from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceResult
 from .chat_facts import FactNormalizer, derive_available_facts, detect_conflicts
@@ -118,6 +120,18 @@ ANALYSIS_DIR = os.path.join(REPORTS_DIR, "analysis")
 DATA_DIR = Path(BASE_DIR) / "data"
 
 app = FastAPI(title="财报分析工具")
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+CHAT_RUN_MAX_WORKERS = _positive_int_env("CHAT_RUN_MAX_WORKERS", 4)
+CHAT_RUN_EVENT_BUFFER = _positive_int_env("CHAT_RUN_EVENT_BUFFER", 64)
+CHAT_RUN_TIMEOUT_SECONDS = _positive_int_env("CHAT_RUN_TIMEOUT_SECONDS", 120)
+CHAT_RESEARCH_TIMEOUT_SECONDS = _positive_int_env("CHAT_RESEARCH_TIMEOUT_SECONDS", 300)
+chat_run_registry = ChatRunRegistry(max_workers=CHAT_RUN_MAX_WORKERS)
 
 # 服务进程启动时间（用于判断服务是否加载了最新代码）
 SERVER_STARTED_AT = dt.datetime.now()
@@ -411,7 +425,7 @@ def _build_mcp_tool_executor(cfg: Any, *, retry: bool = True) -> Optional[Callab
 
 
 def _source_runtime_for_run(scope: Scope, policy: ToolPolicy, cfg: Any, *, use_mcp: bool,
-                            source_mode: str) -> Any:
+                            source_mode: str, control: ChatRunControl | None = None) -> Any:
     web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
     listed = frozenset(item.get("function", {}).get("name", "")
                        for item in (_mcp_tool_defs_cache or [])
@@ -425,7 +439,7 @@ def _source_runtime_for_run(scope: Scope, policy: ToolPolicy, cfg: Any, *, use_m
         tencent_enabled=True,
     )
     return build_source_runtime(scope=scope, policy=policy, cfg=cfg, use_mcp=use_mcp,
-                                source_mode=source_mode, access=access)
+                                source_mode=source_mode, access=access, control=control)
 
 
 def _build_chat_tool_executor(cfg: Any, *, retry: bool = True) -> Optional[Callable[[str, Dict[str, Any]], str]]:
@@ -625,6 +639,10 @@ class StreamChatRequest(BaseModel):
 
 
 class ResumeResearchRequest(BaseModel):
+    session_id: str
+
+
+class CancelChatRunRequest(BaseModel):
     session_id: str
 
 
@@ -1534,9 +1552,18 @@ class _SseEventPump:
 
     def put(self, item: Any) -> None:
         try:
-            asyncio.run_coroutine_threadsafe(self.queue.put(item), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self.queue.put(item), self._loop)
         except RuntimeError:
-            pass
+            return
+        while not self._stop.is_set():
+            try:
+                future.result(timeout=0.05)
+                return
+            except FutureTimeoutError:
+                continue
+            except Exception:
+                return
+        future.cancel()
 
     def start(self, source: Callable[[], Any]) -> None:
         def _run() -> None:
@@ -2271,9 +2298,126 @@ def _mark_research_stopped(sid: str, run_id: str) -> Optional[ResearchRun]:
     return run
 
 
+class _ChatRunRequestProxy:
+    """Worker-local view: outer disconnect/cancel is represented by the shared run control."""
+
+    def __init__(self, control: ChatRunControl) -> None:
+        self.control = control
+
+    async def is_disconnected(self) -> bool:
+        return self.control.cancelled
+
+
+def _inner_sse_frames(buffer: str, chunk: Any) -> tuple[list[str], str]:
+    text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+    buffer += text
+    frames: list[str] = []
+    while "\n\n" in buffer:
+        frame, buffer = buffer.split("\n\n", 1)
+        event = next((line[7:].strip() for line in frame.splitlines() if line.startswith("event: ")), "")
+        if event not in {"session", "run_started"}:
+            frames.append(frame + "\n\n")
+    return frames, buffer
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingResponse:
-    """流式全局问答（SSE）。
+    """Return a stream immediately; blocking planning and orchestration run in a bounded worker."""
+    if not body.question.strip():
+        raise HTTPException(400, "问题不能为空")
+    session = chat_store.get_or_create(body.session_id)
+    sid = session["id"]
+    run_id = uuid.uuid4().hex
+    question_router = IntentRouter()
+    timeout_seconds = (CHAT_RESEARCH_TIMEOUT_SECONDS
+                       if question_router.classify(body.question, Scope.whole_corpus()).intent == "research_task"
+                       else CHAT_RUN_TIMEOUT_SECONDS)
+    control = ChatRunControl(sid, run_id, timeout_seconds)
+    channel = ChatEventChannel(maxsize=CHAT_RUN_EVENT_BUFFER)
+    started_at = time.perf_counter()
+
+    def run_worker(run_control: ChatRunControl) -> None:
+        async def forward_inner_response() -> None:
+            inner_body = body.model_copy(update={"session_id": sid})
+            response = await _chat_stream_impl(
+                inner_body, _ChatRunRequestProxy(run_control), run_id_override=run_id,
+                started_at_override=started_at, run_control=run_control,
+            )
+            buffer = ""
+            saw_terminal = False
+            async for chunk in response.body_iterator:
+                frames, buffer = _inner_sse_frames(buffer, chunk)
+                for frame in frames:
+                    event = next((line[7:].strip() for line in frame.splitlines()
+                                  if line.startswith("event: ")), "")
+                    saw_terminal = saw_terminal or event in {"done", "error", "stopped"}
+                    if not channel.publish(frame, run_control, terminal=event in {"done", "error", "stopped"}):
+                        return
+            if buffer.strip():
+                event = next((line[7:].strip() for line in buffer.splitlines() if line.startswith("event: ")), "")
+                if event not in {"session", "run_started"}:
+                    saw_terminal = saw_terminal or event in {"done", "error", "stopped"}
+                    channel.publish(buffer, run_control, terminal=event in {"done", "error", "stopped"})
+            if run_control.cancelled and not saw_terminal:
+                session_data = chat_store.get_session(sid) or {}
+                saved_run = next((item.get("run") for item in reversed(session_data.get("messages", []))
+                                  if isinstance(item, Mapping) and isinstance(item.get("run"), Mapping)
+                                  and item["run"].get("id") == run_id), None)
+                if saved_run is not None:
+                    timed_out = run_control.cancel_reason == "deadline"
+                    channel.publish(_sse("done" if timed_out else "stopped", {
+                        "session_id": sid, "run_id": run_id, "answer": saved_run.get("content", ""),
+                        "run": saved_run, "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                    }), run_control, terminal=True)
+
+        try:
+            asyncio.run(forward_inner_response())
+        except Exception as exc:
+            logger.error("chat_run_worker_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
+            safe = "问答运行失败，请重试。"
+            channel.publish(_sse("error", {"error": safe, "run_id": run_id}), run_control)
+        finally:
+            channel.close()
+
+    async def events():
+        yield _sse("session", {"session_id": sid})
+        yield _sse("run_started", {"run_id": run_id})
+        yield _sse("reasoning_stage", {"stage": "planning", "message": "正在制定受限执行计划…"})
+        if not chat_run_registry.start(control, run_worker):
+            channel.close()
+            yield _sse("error", {"error": "当前问答任务较多，请稍后重试。", "run_id": run_id})
+            return
+        try:
+            while True:
+                if control.expired and not control.cancelled:
+                    control.cancel("deadline")
+                item = await channel.receive(timeout=0.05)
+                if item is not None:
+                    yield item
+                elif channel.closed and channel.qsize == 0:
+                    break
+        finally:
+            if not channel.closed:
+                control.cancel("disconnect")
+            channel.close()
+            chat_run_registry.finish(run_id)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.post("/api/chat/runs/{run_id}/cancel")
+def cancel_chat_run(run_id: str, body: CancelChatRunRequest) -> Dict[str, Any]:
+    if chat_run_registry.cancel(body.session_id, run_id):
+        return {"cancelled": True, "status": "stopping"}
+    raise HTTPException(404, "问答运行不存在或已结束")
+
+
+async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_override: str | None = None,
+                            started_at_override: float | None = None,
+                            run_control: ChatRunControl | None = None) -> StreamingResponse:
+    """Internal legacy orchestration, executed only inside the bounded chat worker.
+
+    流式全局问答（SSE）。
 
     事件：session / scope_resolved / run_started / delta / artifact /
     tool_call / tool_result / reasoning_stage / supplement_needed / done / error。
@@ -2294,14 +2438,14 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     所有 completed/partial/stopped/failed 运行都经 chat_store.append_turn()
     原子持久化；停止（断开/取消）保存 stopped，生产异常保存 failed。
     """
-    started_at = time.perf_counter()
+    started_at = started_at_override if started_at_override is not None else time.perf_counter()
     if not body.question.strip():
         raise HTTPException(400, "问题不能为空")
 
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
     history = session.get("messages", [])[-8:]  # 传给模型的最近 4 轮
-    run_id = uuid.uuid4().hex
+    run_id = run_id_override or uuid.uuid4().hex
 
     route = QuestionRouter().classify(body.question)
     knowledge_mode = route.intent == "general_knowledge" and QuestionRouter.is_knowledge_question(body.question)
@@ -2526,6 +2670,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             runtime = _source_runtime_for_run(
                 scope, policy, cfg, use_mcp=body.use_mcp,
                 source_mode=planning.plan.source_mode if planning.plan else "external_market",
+                control=run_control,
             )
             builder_parameters = inspect.signature(_build_chat_tool_executor).parameters
             execute_tool = (
@@ -2629,6 +2774,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     return execute_source(runtime, call,
                         lambda: execute_tool("web_search", {"query": question}), fetched_at=fetched())
 
+                def report_execution_step(phase, step):
+                    pump.put({"type": f"execution_step_{phase}", "id": step.id,
+                              "kind": step.kind, "status": step.status,
+                              "error": step.error if phase == "failed" else ""})
+
                 result = ExecutionExecutor(
                     retrieve=retrieve if "retrieve" in {step.kind for step in planning.plan.steps} else None,
                     market_quote=quote if "market_quote" in {step.kind for step in planning.plan.steps} else None,
@@ -2636,19 +2786,18 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     market_indices=indices if "market_indices" in {step.kind for step in planning.plan.steps} else None,
                     market_overview=overview if body.use_mcp and "market_overview" in {step.kind for step in planning.plan.steps} else None,
                     web_search=search if "web_search" in policy.allowed_tools else None,
-                ).execute(planning.plan, body.question, scope)
+                ).execute(planning.plan, body.question, scope, on_step=report_execution_step,
+                           control=run_control)
                 state.source_summary = result.source_summary
                 state.required_sources_missing = result.context.required_missing
                 state.had_external_failure = any(item.status != "success" for item in result.context.sources
                                                  if item.category != "local")
                 state.execution_steps = [{"id": step.id, "kind": step.kind, "status": step.status,
                                           "error": step.error} for step in result.steps]
-                for step in result.steps:
-                    if step.kind != "answer":
-                        yield {"type": "execution_step", "id": step.id, "kind": step.kind,
-                               "status": step.status, "error": step.error}
                 for source in result.context.sources:
                     yield {"type": "source_result", "result": source}
+                if run_control is not None:
+                    run_control.check_active()
                 _supplement_context.current = {"session_id": sid, "payload": None}
                 try:
                     yield from chat_qa.answer_from_context(
@@ -2685,10 +2834,20 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         # chat, but exposes its durable steps through ResearchAgent instead of
         # pretending an empty deterministic plan is evidence.
         is_research = policy.intent == "research_task"
-        if not is_research:
+        cancelled_before_execution = bool(run_control and run_control.cancelled)
+        if not is_research and not cancelled_before_execution:
             pump.start(_produce)
 
         try:
+            if cancelled_before_execution:
+                timed_out = run_control is not None and run_control.cancel_reason == "deadline"
+                message = "问答已达到整轮时限，未取得可用结果。" if timed_out else "问答已停止。"
+                run = _persist("failed" if timed_out else "stopped", message)
+                if timed_out:
+                    yield _sse("done", {"answer": message, "session_id": sid, "run": run.to_dict()})
+                else:
+                    yield _sse("stopped", {"answer": message, "session_id": sid, "run": run.to_dict()})
+                return
             logger.info("chat_run_started run_id=%s", run_id)
             yield _sse("session", {"session_id": sid})
             yield _sse("scope_resolved", {"scope": scope.to_dict()})
@@ -2726,6 +2885,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 research_state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
                 research_runtime = _source_runtime_for_run(
                     scope, policy, RagConfig.load(), use_mcp=body.use_mcp, source_mode="external_market",
+                    control=run_control,
                 )
                 handlers = _research_step_handlers(
                     research_state, question=body.question, history=history, filters=body.filters, tools=tools,
@@ -2768,14 +2928,22 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     # letting a later completion masquerade as the user's run.
                     if research_task is not None and not research_task.done():
                         stop_event.set()
+                research_status = research_answer.status
+                if run_control is not None and run_control.cancel_reason == "deadline":
+                    completed_steps = (agent.last_run.step_runs if agent.last_run is not None else ())
+                    has_research_evidence = any(
+                        step.status == "completed" and (step.artifacts or step.facts)
+                        for step in completed_steps
+                    )
+                    research_status = "partial" if has_research_evidence else "failed"
                 run = replace(
-                    research_answer, id=run_id, created_at=created_at,
+                    research_answer, id=run_id, status=research_status, created_at=created_at,
                     completed_at=dt.datetime.now().isoformat(timespec="seconds"),
                     elapsed_seconds=round(time.perf_counter() - started_at, 3),
                 )
                 chat_store.append_turn(sid, question=body.question, run=run)
                 saved = True
-                yield _sse("done", {
+                yield _sse("stopped" if run.status == "stopped" else "done", {
                     "answer": run.content, "citations": [], "session_id": sid,
                     "tools_used": [], "web_sources": [], "retrieval_degraded": False,
                     "run": run.to_dict(), "research_run": agent.last_run.to_dict() if agent.last_run else None,
@@ -2789,11 +2957,9 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                 # 客户端已断开（点击「停止」）：终止生成，保留已产出部分
                 if await request.is_disconnected():
                     break
-                if evt.get("type") == "execution_step":
-                    yield _sse("execution_step_completed", {
-                        "id": evt["id"], "kind": evt["kind"],
-                        "status": evt["status"], "error": evt["error"],
-                    })
+                if str(evt.get("type", "")).startswith("execution_step_"):
+                    yield _sse(evt["type"], {key: evt[key] for key in ("id", "kind", "status", "error")
+                                                   if key in evt})
                     continue
                 for frame in _relay_rag_event(evt, state, normalizer):
                     yield frame
@@ -2904,10 +3070,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     })
                     return
         except Exception as exc:
-            logger.error("chat_run_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
-            if not saved:
-                _persist("failed", "".join(state.answer_parts).strip())
-            yield _sse("error", {
+            if run_control is None or not run_control.cancelled:
+                logger.error("chat_run_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
+                if not saved:
+                    _persist("failed", "".join(state.answer_parts).strip())
+                yield _sse("error", {
                 "error": f"流式问答失败，请重试（诊断 ID：{run_id}）",
                 "elapsed_seconds": round(time.perf_counter() - started_at, 3),
             })
@@ -2924,7 +3091,14 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                         stopped_summary = {"status": stopped_run.status,
                                            "resume_from_step_id": stopped_run.resume_from_step_id}
                     stopped_content = stopped_content or "研究已停止；已完成步骤已保存，可继续研究。"
-                _persist("stopped", stopped_content,
+                timed_out = run_control is not None and run_control.cancel_reason == "deadline"
+                has_partial = bool(stopped_content or state.evidence_artifacts or state.facts or state.tool_artifacts
+                                   or any(step.get("status") in {"completed", "partial"}
+                                          for step in state.execution_steps))
+                terminal_status = ("partial" if has_partial else "failed") if timed_out else "stopped"
+                if timed_out and not stopped_content:
+                    stopped_content = "问答已达到整轮时限；仅保留已取得的来源。"
+                _persist(terminal_status, stopped_content,
                          research_run_id=research_run_id, research_summary=stopped_summary)
 
     return StreamingResponse(gen(), media_type="text/event-stream")

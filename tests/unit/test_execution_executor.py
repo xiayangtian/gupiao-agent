@@ -4,6 +4,42 @@ from webapp.execution_plan import ExecutionPlan
 from webapp.source_runtime import SourceResult
 
 
+def test_executor_preserves_finished_step_and_skips_following_steps_after_cancel():
+    from webapp.chat_runs import ChatRunControl
+
+    control = ChatRunControl("session", "run", timeout_seconds=10)
+    calls = []
+    plan = ExecutionPlan.from_dict({"objective": "行情", "source_mode": "external_market",
+        "steps": [{"id": "quote", "kind": "market_quote", "required": True},
+                  {"id": "web", "kind": "web_search", "required": False},
+                  {"id": "answer", "kind": "answer"}], "acceptance": ["来源"]})
+
+    def quote(*_args):
+        calls.append("quote")
+        control.cancel("user")
+        return {"price": 10}
+
+    result = ExecutionExecutor(market_quote=quote,
+        web_search=lambda *_: calls.append("web")).execute(
+            plan, "行情", Scope.whole_corpus(), control=control)
+    assert calls == ["quote"]
+    assert [(step.id, step.status) for step in result.steps] == [("quote", "completed")]
+
+
+def test_executor_emits_sanitized_step_lifecycle_callbacks():
+    plan = ExecutionPlan.from_dict({"objective": "行情", "source_mode": "external_market",
+        "steps": [{"id": "quote", "kind": "market_quote", "required": True},
+                  {"id": "answer", "kind": "answer"}], "acceptance": ["来源"]})
+    events = []
+    result = ExecutionExecutor(market_quote=lambda *_: {"price": 10}).execute(
+        plan, "行情", Scope.whole_corpus(),
+        on_step=lambda phase, step: events.append((phase, step.id, step.kind, step.status)),
+    )
+    assert result.steps[0].status == "completed"
+    assert events == [("started", "quote", "market_quote", "running"),
+                      ("completed", "quote", "market_quote", "completed")]
+
+
 def test_market_plan_never_calls_retrieve():
     calls = []
     plan = ExecutionPlan.from_dict({"objective": "今日行情", "source_mode": "external_market",

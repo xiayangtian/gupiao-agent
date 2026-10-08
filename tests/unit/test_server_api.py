@@ -1829,7 +1829,9 @@ class TestChatSessionsApi:
 
         assert response.status_code == 200
         assert "公开回答" in response.text
-        assert "reasoning" not in response.text
+        assert "这是不应暴露的私有推理" not in response.text
+        assert "另一个私有片段" not in response.text
+        assert "完整私有推理" not in response.text
         assert "私有推理" not in response.text
 
     def test_chat_stream_empty_retrieval_default_answer(self, client, env, monkeypatch, tmp_path):
@@ -2857,8 +2859,10 @@ class TestChatSupplementApi:
         assert needed["candidates"][0]["label"] == "2025 半年报"
         assert supplement_env["downloader"].calls == []
         assert supplement_env["ingestion"].calls == []
-        assert [name for name, _ in events] == ["session", "scope_resolved", "plan_fallback", "policy_resolved", "policy_fallback",
-                                                "run_started", "supplement_needed"]
+        names = [name for name, _ in events]
+        assert names[:3] == ["session", "run_started", "reasoning_stage"]
+        assert names[3:] == ["scope_resolved", "plan_fallback", "policy_resolved", "policy_fallback",
+                             "supplement_needed"]
 
     def test_supplement_handler_is_reachable_from_the_streaming_producer_thread(
         self, client, supplement_env,
@@ -3516,6 +3520,162 @@ def test_m2_mcp_financial_reference_cannot_support_report_fact_claims(client, en
     assert "100 亿元" not in run["content"]
     assert "621" not in run["content"]
     assert run["content"].count("未找到可核验的披露") == 1
+
+
+def test_sse_event_pump_producer_waits_for_bounded_async_queue_capacity():
+    import asyncio
+    from threading import Thread
+
+    async def scenario():
+        pump = server._SseEventPump(asyncio.get_running_loop(), "fixture")
+        pump.queue = asyncio.Queue(maxsize=1)
+        first = Thread(target=pump.put, args=({"n": 1},))
+        first.start()
+        for _ in range(50):
+            if pump.queue.qsize() == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert pump.queue.qsize() == 1
+        second = Thread(target=pump.put, args=({"n": 2},))
+        second.start()
+        await asyncio.sleep(0.05)
+        assert second.is_alive(), "producer must wait instead of queueing an unbounded put coroutine"
+        assert await pump.queue.get() == {"n": 1}
+        await asyncio.to_thread(second.join, 1)
+        assert not second.is_alive()
+        assert await pump.queue.get() == {"n": 2}
+        pump.stop()
+
+    asyncio.run(scenario())
+
+
+def test_cancel_chat_run_requires_matching_session_and_stops_active_worker(client, env, monkeypatch):
+    from threading import Event
+
+    from webapp.chat_runs import ChatRunControl, ChatRunRegistry
+
+    registry = ChatRunRegistry(max_workers=1)
+    started = Event()
+    release = Event()
+    control = ChatRunControl("session-a", "run-a", timeout_seconds=10)
+
+    def blocking(_control):
+        started.set()
+        release.wait(2)
+
+    monkeypatch.setattr(server, "chat_run_registry", registry)
+    assert registry.start(control, blocking)
+    assert started.wait(1)
+    try:
+        denied = client.post("/api/chat/runs/run-a/cancel", json={"session_id": "session-b"})
+        assert denied.status_code == 404
+        assert control.cancelled is False
+
+        accepted = client.post("/api/chat/runs/run-a/cancel", json={"session_id": "session-a"})
+        assert accepted.status_code == 200
+        assert accepted.json() == {"cancelled": True, "status": "stopping"}
+        assert control.cancelled is True
+    finally:
+        release.set()
+        registry.wait("run-a", timeout=1)
+        registry.finish("run-a")
+        registry.shutdown()
+
+
+def test_slow_chat_planning_does_not_block_health_or_sse_run_identity(client, env, monkeypatch):
+    from queue import Queue
+    from threading import Event, Thread
+
+    from webapp.execution_plan import PlanIssue
+    from webapp.execution_planner import PlanningResult
+
+    planner_started = Event()
+    release_planner = Event()
+    health_done = Event()
+    observed = Queue()
+    sse_events = Queue()
+
+    class SlowPlanner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def plan(self, *_args, **_kwargs):
+            planner_started.set()
+            release_planner.wait(2)
+            return PlanningResult("fallback", issues=(PlanIssue("fixture", "fixture"),))
+
+    monkeypatch.setattr(server, "ExecutionPlanner", SlowPlanner)
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: object())
+
+    def request_stream():
+        try:
+            with client.stream("POST", "/api/chat/stream", json={"question": "一个慢规划的普通问题"}) as response:
+                current_event = ""
+                for line in response.iter_lines():
+                    text = line.decode() if isinstance(line, bytes) else line
+                    if text.startswith("event: "):
+                        current_event = text.removeprefix("event: ")
+                    elif text.startswith("data: "):
+                        sse_events.put((current_event, text.removeprefix("data: ")))
+                        if current_event == "run_started":
+                            return
+        except Exception as exc:
+            sse_events.put(("exception", repr(exc)))
+
+    request_thread = Thread(target=request_stream, daemon=True)
+    request_thread.start()
+    try:
+        assert planner_started.wait(1)
+
+        def health_request():
+            try:
+                observed.put(client.get("/api/health").status_code)
+            finally:
+                health_done.set()
+
+        health_thread = Thread(target=health_request, daemon=True)
+        health_thread.start()
+        assert health_done.wait(0.25), "a blocking planner must not block the ASGI event loop"
+    finally:
+        release_planner.set()
+        request_thread.join(timeout=3)
+    events = [sse_events.get_nowait(), sse_events.get_nowait()]
+    assert [item[0] for item in events] == ["session", "run_started"]
+    import json
+    assert json.loads(events[0][1])["session_id"]
+    assert json.loads(events[1][1])["run_id"]
+
+
+def test_chat_run_deadline_persists_failed_run_after_planning_timeout(client, env, monkeypatch, tmp_path):
+    import time
+
+    from webapp.chat_store import ChatStore
+    from webapp.execution_plan import PlanIssue
+    from webapp.execution_planner import PlanningResult
+
+    store = ChatStore(str(tmp_path / "deadline-sessions.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    monkeypatch.setattr(server, "CHAT_RUN_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: object())
+
+    class SlowPlanner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def plan(self, *_args, **_kwargs):
+            time.sleep(1.1)
+            return PlanningResult("fallback", issues=(PlanIssue("fixture", "fixture"),))
+
+    monkeypatch.setattr(server, "ExecutionPlanner", SlowPlanner)
+    response = client.post("/api/chat/stream", json={"question": "一个慢规划的普通问题"})
+    events = _read_sse(response)
+    terminal = _event(events, "done")
+    assert terminal["run"]["status"] == "failed"
+    stored = store.get_session(terminal["session_id"])
+    assert stored["messages"][-1]["run"]["status"] == "failed"
+    assert terminal["run"]["content"]
 
 
 def test_explicit_research_route_survives_successful_ordinary_plan(client, env, monkeypatch):

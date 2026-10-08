@@ -125,28 +125,40 @@ class ExecutionExecutor:
     ) -> None:
         self.handlers = {"retrieve": retrieve, "web_search": web_search, **handlers}
 
-    def execute(self, plan: ExecutionPlan, question: str, scope: Scope) -> ExecutionResult:
+    def execute(self, plan: ExecutionPlan, question: str, scope: Scope,
+                on_step: Callable[[str, ExecutionStepResult], None] | None = None,
+                control: Any = None) -> ExecutionResult:
         rows: list[ExecutionStepResult] = []
+
+        def record(row: ExecutionStepResult) -> None:
+            rows.append(row)
+            if on_step is not None:
+                phase = "failed" if row.status in {"failed", "unavailable", "skipped"} else "completed"
+                on_step(phase, row)
         sources: list[SourceResult] = []
         retrieval_hits: list[dict[str, Any]] = []
         legacy_used: set[str] = set()
         required_missing = False
         had_failure = False
         for step in plan.steps:
+            if control is not None and control.cancelled:
+                break
             if step.kind == "answer":
                 rows.append(ExecutionStepResult(step.id, step.kind,
                                                 "pending" if required_missing else "completed"))
                 continue
+            if on_step is not None:
+                on_step("started", ExecutionStepResult(step.id, step.kind, "running"))
             dependencies = [row for row in rows if row.id in step.depends_on]
             if any(row.status in {"failed", "unavailable", "skipped"} for row in dependencies):
-                rows.append(ExecutionStepResult(step.id, step.kind, "skipped", error="前置来源步骤未完成"))
+                record(ExecutionStepResult(step.id, step.kind, "skipped", error="前置来源步骤未完成"))
                 if step.required:
                     required_missing = True
                     had_failure = True
                 continue
             handler = self.handlers.get(step.kind)
             if handler is None:
-                rows.append(ExecutionStepResult(step.id, step.kind, "unavailable", error="此阶段数据源尚不可用"))
+                record(ExecutionStepResult(step.id, step.kind, "unavailable", error="此阶段数据源尚不可用"))
                 had_failure = True
                 required_missing = required_missing or step.required
                 continue
@@ -169,9 +181,9 @@ class ExecutionExecutor:
                     # Optional holes remain visible, but a required aggregate can still
                     # answer with explicit limits when at least one source is usable.
                     required_missing = required_missing or (step.required and not has_usable_source)
-                rows.append(ExecutionStepResult(step.id, step.kind, row_status, value))
+                record(ExecutionStepResult(step.id, step.kind, row_status, value))
             except Exception:
-                rows.append(ExecutionStepResult(step.id, step.kind, "failed", error="来源调用失败"))
+                record(ExecutionStepResult(step.id, step.kind, "failed", error="来源调用失败"))
                 had_failure = True
                 required_missing = required_missing or step.required
         summary = {"local_pdf": "未使用", "market_data": "未使用", "web": "未使用"}
