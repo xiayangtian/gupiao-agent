@@ -20,7 +20,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-HARNESS_VERSION = "chat-runtime-offline-v1"
 _SANITIZED_KEYS = ("suite_id", "corpus_version", "code_revision", "harness_version", "generated_at", "totals", "cases")
 
 
@@ -58,7 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     from webapp.chat_runtime_eval_cases import RuntimeSuite
-    from webapp.chat_runtime_eval_runner import OfflineChatHarness
+    from webapp.chat_runtime_eval_report import build_report, score, write_report
+    from webapp.chat_runtime_eval_runner import FROZEN_NOW, HARNESS_VERSION, OfflineChatHarness
 
     cases_path = Path(args.cases).expanduser().resolve()
     output_path = Path(args.output).expanduser().resolve()
@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     from webapp import server
 
     started = time.perf_counter()
+    scores = []
     results = []
     for case in selected:
         workspace = Path(tempfile.mkdtemp(prefix=f"chat-eval-{case.id}-"))
@@ -85,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
             results.append({"id": case.id, "category": case.category, "status": "harness_error",
                             "error": str(exc)[:200], "calls": dict(harness.fixture.calls)})
             continue
+        case_score = score(case, observation)
+        scores.append(case_score)
         results.append({
             "id": case.id, "category": case.category, "status": observation.persisted_status,
             "expected_status": case.expected_status,
@@ -93,27 +96,26 @@ def main(argv: list[str] | None = None) -> int:
             "calls": dict(observation.call_attempts),
             "total_seconds": round(observation.total_seconds or 0.0, 4),
             "answer_present": bool(observation.answer),
-            "usage_reported": observation.usage is not None,
+            "blocking_codes": list(case_score.blocking_codes),
+            "citation_support_found": case_score.citation_support_found,
+            "citation_support_expected": case_score.citation_support_expected,
+            "usage_reported": case_score.usage_reported,
         })
 
-    matched = sum(1 for item in results if item.get("status_matches_expectation"))
+    report = build_report(suite.suite_id, suite.corpus_version, _code_revision(), scores,
+                          elapsed_seconds=time.perf_counter() - started,
+                          clock=FROZEN_NOW.isoformat())
+    harness_errors = sum(1 for item in results if item["status"] == "harness_error")
     payload = {
-        "suite_id": suite.suite_id,
-        "corpus_version": suite.corpus_version,
-        "code_revision": _code_revision(),
-        "harness_version": HARNESS_VERSION,
+        **report,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "totals": {
-            "cases": len(results),
-            "statuses_matching_expectation": matched,
-            "harness_errors": sum(1 for item in results if item["status"] == "harness_error"),
-            "elapsed_seconds": round(time.perf_counter() - started, 4),
-        },
-        "cases": results,
+        "runs": results,
+        "totals": {**report["totals"], "harness_errors": harness_errors,
+                   "statuses_matching_expectation": sum(1 for item in scores if item.terminal_matches)},
     }
-    _write_atomic(output_path, payload)
+    write_report(output_path, payload)
     print(json.dumps(payload["totals"], ensure_ascii=False))
-    return 0 if payload["totals"]["harness_errors"] == 0 else 1
+    return 0 if harness_errors == 0 else 1
 
 
 if __name__ == "__main__":

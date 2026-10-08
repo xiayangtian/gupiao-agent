@@ -27,6 +27,8 @@ from fastapi.testclient import TestClient
 from webapp.chat_models import CompanyRef, Scope
 from webapp.chat_runtime_eval_cases import RuntimeCase
 
+HARNESS_VERSION = "chat-runtime-offline-v1"
+
 # Frozen evaluation clock: the baseline must not change with the wall clock.
 FROZEN_NOW = dt.datetime(2026, 10, 8, 15, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
 CORPUS_PATH = Path(__file__).resolve().parents[1] / "tests/fixtures/chat_runtime_eval_corpus.json"
@@ -91,6 +93,8 @@ class RuntimeObservation:
     first_content_seconds: float | None
     total_seconds: float | None
     usage: Mapping[str, Any] | None
+    facts: tuple[Mapping[str, Any], ...]
+    artifacts: tuple[Mapping[str, Any], ...]
     terminal: Mapping[str, Any]
 
 
@@ -464,6 +468,8 @@ def _drive(case: RuntimeCase, app: FastAPI, fixture: ProviderFixture) -> Runtime
         call_attempts=dict(fixture.calls), first_frame_seconds=None,
         first_content_seconds=None, total_seconds=elapsed,
         usage=run.get("usage") if isinstance(run.get("usage"), dict) else None,
+        facts=tuple(item for item in durable_run.get("facts", []) if isinstance(item, Mapping)),
+        artifacts=tuple(item for item in durable_run.get("artifacts", []) if isinstance(item, Mapping)),
         terminal=terminal,
     )
 

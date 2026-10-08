@@ -1,0 +1,339 @@
+{
+  "cases": [
+    {
+      "blocking_codes": [],
+      "calls": {
+        "model": 2,
+        "retrieval": 1
+      },
+      "case_id": "report-number-after-300",
+      "category": "report",
+      "citation_support": 1.0,
+      "citation_support_expected": 1,
+      "citation_support_found": 1,
+      "cost": "unknown",
+      "expected_status": "completed",
+      "quality_codes": [
+        "usage_unknown"
+      ],
+      "review_items": [],
+      "status": "completed",
+      "terminal_matches": true,
+      "usage_reported": false
+    },
+    {
+      "blocking_codes": [],
+      "calls": {
+        "market": 1,
+        "model": 2
+      },
+      "case_id": "market-kline",
+      "category": "market",
+      "citation_support": 1.0,
+      "citation_support_expected": 1,
+      "citation_support_found": 1,
+      "cost": "unknown",
+      "expected_status": "completed",
+      "quality_codes": [
+        "usage_unknown"
+      ],
+      "review_items": [],
+      "status": "completed",
+      "terminal_matches": true,
+      "usage_reported": false
+    },
+    {
+      "blocking_codes": [],
+      "calls": {
+        "mcp": 3,
+        "model": 2
+      },
+      "case_id": "market-recap-window",
+      "category": "recap",
+      "citation_support": null,
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "cost": "unknown",
+      "expected_status": "completed",
+      "quality_codes": [
+        "usage_unknown"
+      ],
+      "review_items": [
+        "将50条涨跌停池表述为市场总量"
+      ],
+      "status": "completed",
+      "terminal_matches": true,
+      "usage_reported": false
+    },
+    {
+      "blocking_codes": [],
+      "calls": {
+        "model": 1
+      },
+      "case_id": "general-knowledge",
+      "category": "knowledge",
+      "citation_support": null,
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "cost": "unknown",
+      "expected_status": "completed",
+      "quality_codes": [
+        "usage_unknown"
+      ],
+      "review_items": [],
+      "status": "completed",
+      "terminal_matches": true,
+      "usage_reported": false
+    },
+    {
+      "blocking_codes": [],
+      "calls": {
+        "model": 2,
+        "retrieval": 1
+      },
+      "case_id": "explicit-research",
+      "category": "research",
+      "citation_support": null,
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "cost": "unknown",
+      "expected_status": "completed",
+      "quality_codes": [
+        "usage_unknown"
+      ],
+      "review_items": [],
+      "status": "completed",
+      "terminal_matches": true,
+      "usage_reported": false
+    },
+    {
+      "blocking_codes": [],
+      "calls": {
+        "model": 4,
+        "retrieval": 2
+      },
+      "case_id": "followup-scope",
+      "category": "followup",
+      "citation_support": null,
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "cost": "unknown",
+      "expected_status": "completed",
+      "quality_codes": [
+        "usage_unknown"
+      ],
+      "review_items": [
+        "从历史回答推导未确认期间"
+      ],
+      "status": "completed",
+      "terminal_matches": true,
+      "usage_reported": false
+    },
+    {
+      "blocking_codes": [],
+      "calls": {
+        "model": 2,
+        "retrieval": 1
+      },
+      "case_id": "source-failure",
+      "category": "failure",
+      "citation_support": null,
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "cost": "unknown",
+      "expected_status": "partial",
+      "quality_codes": [
+        "usage_unknown"
+      ],
+      "review_items": [
+        "来源失败时编造确定性数字"
+      ],
+      "status": "partial",
+      "terminal_matches": true,
+      "usage_reported": false
+    },
+    {
+      "blocking_codes": [],
+      "calls": {
+        "model": 2,
+        "retrieval": 1
+      },
+      "case_id": "research-recovery",
+      "category": "recovery",
+      "citation_support": null,
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "cost": "unknown",
+      "expected_status": "completed",
+      "quality_codes": [
+        "usage_unknown"
+      ],
+      "review_items": [
+        "恢复后重复调用已完成来源"
+      ],
+      "status": "completed",
+      "terminal_matches": true,
+      "usage_reported": false
+    }
+  ],
+  "clock": "2026-10-08T15:00:00+08:00",
+  "code_revision": "536c40d",
+  "corpus_version": "chat-eval-fixture-v2",
+  "generated_at": "2026-10-08T20:00:56+0800",
+  "harness_version": "chat-runtime-offline-v1",
+  "runs": [
+    {
+      "answer_present": true,
+      "blocking_codes": [],
+      "calls": {
+        "model": 2,
+        "retrieval": 1
+      },
+      "category": "report",
+      "citation_support_expected": 1,
+      "citation_support_found": 1,
+      "event_count": 14,
+      "expected_status": "completed",
+      "id": "report-number-after-300",
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0093,
+      "usage_reported": false
+    },
+    {
+      "answer_present": true,
+      "blocking_codes": [],
+      "calls": {
+        "market": 1,
+        "model": 2
+      },
+      "category": "market",
+      "citation_support_expected": 1,
+      "citation_support_found": 1,
+      "event_count": 14,
+      "expected_status": "completed",
+      "id": "market-kline",
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0048,
+      "usage_reported": false
+    },
+    {
+      "answer_present": true,
+      "blocking_codes": [],
+      "calls": {
+        "mcp": 3,
+        "model": 2
+      },
+      "category": "recap",
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "event_count": 15,
+      "expected_status": "completed",
+      "id": "market-recap-window",
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0048,
+      "usage_reported": false
+    },
+    {
+      "answer_present": true,
+      "blocking_codes": [],
+      "calls": {
+        "model": 1
+      },
+      "category": "knowledge",
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "event_count": 8,
+      "expected_status": "completed",
+      "id": "general-knowledge",
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0037,
+      "usage_reported": false
+    },
+    {
+      "answer_present": true,
+      "blocking_codes": [],
+      "calls": {
+        "model": 2,
+        "retrieval": 1
+      },
+      "category": "research",
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "event_count": 12,
+      "expected_status": "completed",
+      "id": "explicit-research",
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0043,
+      "usage_reported": false
+    },
+    {
+      "answer_present": true,
+      "blocking_codes": [],
+      "calls": {
+        "model": 4,
+        "retrieval": 2
+      },
+      "category": "followup",
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "event_count": 28,
+      "expected_status": "completed",
+      "id": "followup-scope",
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0081,
+      "usage_reported": false
+    },
+    {
+      "answer_present": true,
+      "blocking_codes": [],
+      "calls": {
+        "model": 2,
+        "retrieval": 1
+      },
+      "category": "failure",
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "event_count": 12,
+      "expected_status": "partial",
+      "id": "source-failure",
+      "status": "partial",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0039,
+      "usage_reported": false
+    },
+    {
+      "answer_present": true,
+      "blocking_codes": [],
+      "calls": {
+        "model": 2,
+        "retrieval": 1
+      },
+      "category": "recovery",
+      "citation_support_expected": 0,
+      "citation_support_found": 0,
+      "event_count": 12,
+      "expected_status": "completed",
+      "id": "research-recovery",
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0039,
+      "usage_reported": false
+    }
+  ],
+  "suite_id": "chat-runtime-offline-v1",
+  "totals": {
+    "blocking": 0,
+    "cases": 8,
+    "elapsed_seconds": 0.0628,
+    "harness_errors": 0,
+    "review_required": 4,
+    "status_matches": 8,
+    "statuses_matching_expectation": 8
+  }
+}

@@ -22,7 +22,7 @@
       "expected_intent": "report_fact",
       "expected_status": "completed",
       "allowed_sources": [
-        "local_pdf"
+        "retrieval"
       ],
       "expected_claims": [
         {
@@ -77,7 +77,7 @@
       "expected_intent": "market_trend",
       "expected_status": "completed",
       "allowed_sources": [
-        "tencent"
+        "market"
       ],
       "expected_claims": [
         {
@@ -201,7 +201,7 @@
       "expected_intent": "research",
       "expected_status": "completed",
       "allowed_sources": [
-        "local_pdf"
+        "retrieval"
       ],
       "expected_claims": [],
       "forbidden_claims": [],
@@ -251,7 +251,7 @@
       "expected_intent": "report_fact",
       "expected_status": "completed",
       "allowed_sources": [
-        "local_pdf"
+        "retrieval"
       ],
       "expected_claims": [],
       "forbidden_claims": [
@@ -302,7 +302,7 @@
       "expected_intent": "report_fact",
       "expected_status": "partial",
       "allowed_sources": [
-        "local_pdf"
+        "retrieval"
       ],
       "expected_claims": [],
       "forbidden_claims": [
@@ -347,7 +347,7 @@
       "expected_intent": "research",
       "expected_status": "completed",
       "allowed_sources": [
-        "local_pdf"
+        "retrieval"
       ],
       "expected_claims": [],
       "forbidden_claims": [
