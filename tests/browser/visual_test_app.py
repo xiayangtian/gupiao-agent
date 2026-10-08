@@ -53,6 +53,7 @@ from webapp.chat_models import (  # noqa: E402
 from webapp.chat_store import ChatStore  # noqa: E402
 from webapp.research_models import ResearchPlan, ResearchRun, ResearchStep, ResearchStepRun  # noqa: E402
 from webapp.research_workspace import ResearchWorkspaceStore  # noqa: E402
+from webapp.execution_planner import PlanningResult  # noqa: E402
 
 
 FIXTURE_REPORT_ID = "601288:2026-06-30:semi_annual"
@@ -207,6 +208,16 @@ class _SupplementIngestion:
 
     def list_files(self):
         return []
+
+
+class _FallbackExecutionPlanner:
+    """Keep legacy visual fixtures offline; source-runtime fixture installs its own plan."""
+
+    def __init__(self, _json_planner):
+        pass
+
+    def plan(self, *_args):
+        return PlanningResult("fallback")
 
 
 class _FakeRagQA:
@@ -493,6 +504,9 @@ def build_app():
         handle.write(_MINIMAL_PDF)
 
     request_log = _FixtureRequestLog()
+    server.ExecutionPlanner = _FallbackExecutionPlanner
+    server._mcp_tool_defs = lambda: None
+    server._mcp_tool_defs_cache = None
     server.rag_store = _FakeRagStore()              # 固定本地报告身份
     server.rag_qa = _FakeRagQA()                    # 可控 answer_stream
     server.stock_index = _FakeStockIndex()          # 固定公司名
