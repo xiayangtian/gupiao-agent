@@ -296,6 +296,8 @@ class SourcePolicy:
 
 @dataclass(frozen=True)
 class Scope:
+    """冻结问答范围。company_only 可保留已知公司身份而没有本地报告。"""
+
     mode: ScopeMode
     companies: tuple[CompanyRef, ...]
     report_ids: tuple[str, ...]
@@ -319,8 +321,8 @@ class Scope:
         _string(self.fallback_reason, "fallback_reason", required=False)
 
         if self.mode == "company_only":
-            if len(self.companies) != 1 or not self.report_ids:
-                raise ValueError("company_only requires exactly one company and at least one report_id")
+            if len(self.companies) != 1:
+                raise ValueError("company_only requires exactly one company")
             if self.industry is not None:
                 raise ValueError("company_only must not include industry")
         elif self.mode == "company_industry":
@@ -336,7 +338,7 @@ class Scope:
                 raise ValueError("whole_corpus must not include companies or industry")
 
     @classmethod
-    def company_only(cls, code: str, name: str, report_ids: Sequence[str]) -> "Scope":
+    def company_only(cls, code: str, name: str, report_ids: Sequence[str] = ()) -> "Scope":
         return cls("company_only", (CompanyRef(code, name),), tuple(report_ids))
 
     @classmethod

@@ -20,7 +20,16 @@ _ABSOLUTE_TEST_PDF_PATH = "/" + "Users/x/reports/a.pdf"
 _ABSOLUTE_TEST_REPORT_PATH = "/" + "Users/x/reports/农业银行_601288_年报_2024.pdf"
 
 
-def test_scope_company_only_requires_one_company_and_report_ids():
+def test_scope_company_only_allows_known_company_with_no_local_reports():
+    scope = Scope.company_only("600519", "贵州茅台")
+
+    assert scope.mode == "company_only"
+    assert scope.companies[0].code == "600519"
+    assert scope.report_ids == ()
+    assert Scope.from_dict(scope.to_dict()) == scope
+
+
+def test_scope_company_only_still_requires_exactly_one_company():
     with pytest.raises(ValueError, match="company_only"):
         Scope(mode="company_only", companies=(), report_ids=())
 

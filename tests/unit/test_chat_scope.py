@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from webapp.chat_models import IndustryRef
+from webapp.chat_models import CompanyRef, IndustryRef
 from webapp.chat_scope import ScopeRequest, ScopeResolver
 
 
@@ -27,13 +27,17 @@ INDUSTRIES = {
 NAMES = {"601288": "农业银行", "600000": "浦发银行", "600900": "长江电力"}
 
 
-def _resolver(report_ids, industries, *, names=None, cache_path=None, now=None):
+def _resolver(report_ids, industries, *, names=None, cache_path=None, now=None, company_code_resolver=None):
+    kwargs = {}
+    if company_code_resolver is not None:
+        kwargs["company_code_resolver"] = company_code_resolver
     return ScopeResolver(
         lambda: list(report_ids),
         lambda code: (names or {}).get(code),
         lambda code: industries.get(code),
         cache_path=cache_path,
         now=now,
+        **kwargs,
     )
 
 
@@ -130,6 +134,32 @@ def test_auto_without_company_resolves_whole_corpus():
 
     assert scope.mode == "whole_corpus"
     assert scope.report_ids == ()
+
+
+def test_chat_scope_keeps_known_company_when_no_local_report_exists():
+    resolver = _resolver(
+        [],
+        {},
+        names={"600519": "贵州茅台"},
+        company_code_resolver=lambda question: "600519" if "茅台" in question else None,
+    )
+
+    result = resolver.resolve_for_chat("贵州茅台今天的股价", ScopeRequest.auto(), requires_company=True)
+
+    assert result.scope is not None
+    assert result.scope.mode == "company_only"
+    assert result.scope.companies == (CompanyRef("600519", "贵州茅台"),)
+    assert result.scope.report_ids == ()
+    assert result.clarification == ""
+
+
+def test_chat_scope_returns_none_when_company_identity_is_missing_or_ambiguous():
+    resolver = _resolver([], {}, company_code_resolver=lambda question: None)
+
+    result = resolver.resolve_for_chat("不明确的公司股价", ScopeRequest.auto(), requires_company=True)
+
+    assert result.scope is None
+    assert "公司" in result.clarification
 
 
 def test_industry_with_no_local_peers_falls_back_to_company_only():

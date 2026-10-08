@@ -53,6 +53,25 @@ def test_answer_empty_retrieval_returns_none(tmp_path, fake_embedder):
     assert qa.answer("随便问问") is None
 
 
+def test_empty_company_report_scope_keeps_empty_hard_filter():
+    class RecordingStore:
+        def __init__(self):
+            self.where = None
+
+        def query(self, question, *, top_k, where):
+            self.where = where
+            return []
+
+    store = RecordingStore()
+    ai = FakeAI()
+    qa = RagQA(store, ai, top_k=4)
+    scope = Scope.company_only("600519", "贵州茅台", ())
+
+    assert qa.answer("贵州茅台的财报说了什么", scope=scope) is None
+    assert store.where == {"report_id": {"$in": []}}
+    assert ai.last_messages is None
+
+
 def test_try_answer_report_filters_by_report_id(tmp_path, fake_embedder):
     store = RagStore(str(tmp_path), fake_embedder)
     store.upsert([_chunk("A公司内容", rid="600900:2025-12-31:annual")])

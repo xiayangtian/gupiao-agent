@@ -52,6 +52,22 @@ def _report_code(report_id: str) -> str:
 
 
 @dataclass(frozen=True)
+class ScopeResolution:
+    scope: Scope | None
+    clarification: str = ""
+
+    def __post_init__(self) -> None:
+        if self.scope is not None and not isinstance(self.scope, Scope):
+            raise ValueError("scope must be a Scope or null")
+        if not isinstance(self.clarification, str):
+            raise ValueError("clarification must be a string")
+        if self.scope is None and not self.clarification.strip():
+            raise ValueError("missing scope requires a clarification message")
+        if self.scope is not None and self.clarification:
+            raise ValueError("resolved scope must not include a clarification")
+
+
+@dataclass(frozen=True)
 class ScopeRequest:
     """请求方声明的范围意图；``focus_report`` 为 ``{code, period}`` 跳转上下文。"""
 
@@ -93,9 +109,11 @@ class ScopeResolver:
         cache_path: str | os.PathLike[str] | None = DEFAULT_CACHE_PATH,
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
         now: Callable[[], datetime] | None = None,
+        company_code_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         self._report_ids = report_ids_provider
         self._company_name = company_name_provider
+        self._company_code_resolver = company_code_resolver
         self._industry = industry_provider
         # cache_path=None 表示仅内存缓存、不落盘（测试/临时场景）
         self._cache_path = os.fspath(cache_path) if cache_path is not None else None
@@ -104,6 +122,45 @@ class ScopeResolver:
         self._cache = self._load_cache()
 
     # ── 入口 ──────────────────────────────────────────────────
+
+    def resolve_for_chat(
+        self, question: str, request: ScopeRequest, *, requires_company: bool = False
+    ) -> ScopeResolution:
+        """Resolve a chat Scope without broadening an unresolved company request.
+
+        A required but unknown/ambiguous company returns a ScopeResolution with no Scope
+        and a clarification message. A known company with no indexed reports remains
+        company-scoped with an empty report_ids tuple, preserving the RAG hard-filter boundary.
+        """
+        if not isinstance(request, ScopeRequest):
+            raise ValueError("request must be a ScopeRequest")
+        if not isinstance(requires_company, bool):
+            raise ValueError("requires_company must be a boolean")
+        if not requires_company:
+            return ScopeResolution(self.resolve(question, request))
+
+        report_ids = self._local_report_ids()
+        code, focus_report_id = self._resolve_company(question, request.focus_report, report_ids)
+        if code is None and self._company_code_resolver is not None:
+            try:
+                candidate = self._company_code_resolver(question)
+            except Exception:
+                candidate = None
+            if isinstance(candidate, str) and re.fullmatch(r"\d{6}", candidate):
+                code = candidate
+        if code is None:
+            return ScopeResolution(None, "请明确公司名称或 6 位股票代码后再查询。")
+
+        name = self._company_name(code) or code
+        mode = request.mode
+        if mode == "auto":
+            mode = "company_industry" if self._wants_industry(question) else "company_only"
+        target_report_ids = self._target_report_ids(code, focus_report_id, report_ids)
+        if mode == "company_industry":
+            if not target_report_ids:
+                return ScopeResolution(Scope.company_only(code, name, ()))
+            return ScopeResolution(self._resolve_industry_scope(code, name, target_report_ids, report_ids))
+        return ScopeResolution(Scope.company_only(code, name, target_report_ids))
 
     def resolve(self, question: str, request: ScopeRequest) -> Scope:
         if not isinstance(request, ScopeRequest):
