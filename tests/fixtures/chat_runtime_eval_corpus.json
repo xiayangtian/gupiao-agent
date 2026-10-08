@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "corpus_version": "chat-eval-fixture-v2",
+  "provenance": "derived from existing repository chat evaluation fixture identities; passage bodies are synthetic and contain no actual issuer disclosure",
+  "documents": [
+    {
+      "evidence_id": "601288:2026-06-30:semi_annual#p40",
+      "report_id": "601288:2026-06-30:semi_annual",
+      "page": 40,
+      "section": "经营情况讨论",
+      "text": "经营情况说明（固定样本填充文本，不含真实公司披露内容）。营业收入见固定问答合同；该文档为合成内容，不能用于投资判断。"
+    },
+    {
+      "evidence_id": "601288:2025-12-31:annual#p120",
+      "report_id": "601288:2025-12-31:annual",
+      "page": 120,
+      "section": "经营情况讨论",
+      "text": "上一期间的合成对照片段，仅用于公司和期间隔离测试。"
+    },
+    {
+      "evidence_id": "600900:2026-06-30:semi_annual#p30",
+      "report_id": "600900:2026-06-30:semi_annual",
+      "page": 30,
+      "section": "经营情况讨论",
+      "text": "跨公司负向探针合成片段，不得用于农业银行结论。"
+    }
+  ]
+}
