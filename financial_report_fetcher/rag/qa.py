@@ -433,7 +433,17 @@ class RagQA:
                    "model": None, "usage": {}, "tools_used": [], "retrieval_report_ids": [],
                    "retrieval_degraded": False, "tool_timings": []}
             return
-        source_parts = [source.content[:2000] for source in context.sources if source.content]
+        source_parts = []
+        for source in context.sources:
+            details = [f"来源={source.provider}/{source.operation}", f"状态={source.status}"]
+            if source.as_of:
+                details.append(f"截至={source.as_of}")
+            if source.error_code:
+                details.append(f"错误类别={source.error_code}")
+            coverage = source.coverage.summary()
+            if coverage:
+                details.append(f"覆盖={coverage}")
+            source_parts.append("[来源状态；" + "；".join(details) + "]\n" + source.content[:2000])
         if context.retrieval_hits:
             source_parts.append("\n".join(self._context_lines(list(context.retrieval_hits))))
         source_text = "\n".join(source_parts)[:12000]

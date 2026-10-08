@@ -753,3 +753,32 @@ def test_rejected_supplement_request_keeps_tool_call_budget_usable(tmp_path, fak
     assert not any(event["type"] == "supplement_request" for event in events)
     assert executed == ["stock_prices"]
     assert events[-1]["type"] == "done"
+
+
+def test_answer_from_context_exposes_source_coverage_and_failed_optional_sources():
+    from webapp.source_runtime import AnswerContext, SourceCoverage, SourceResult
+
+    class CapturingAI:
+        def __init__(self):
+            self.messages = None
+
+        def chat_stream(self, messages, *, system=None, **_kwargs):
+            self.messages = messages
+            yield {"type": "done", "answer": "仅按已返回数据描述。", "model": "fixture", "usage": {}}
+
+    ai = CapturingAI()
+    qa = RagQA(object(), ai)
+    context = AnswerContext(sources=(
+        SourceResult("s1", "mcp", "stock_zt_pool", "market", "partial", content='[{"date":"2026-10-05"}]',
+                     as_of="2026-10-05", coverage=SourceCoverage(
+                         returned_rows=50, limit=50, query_window=None, data_window="2026-10-05",
+                     )),
+        SourceResult("s2", "mcp", "fund_flow", "market", "failed", error_code="timeout"),
+    ))
+
+    list(qa.answer_from_context("上周A股复盘", context=context))
+
+    prompt = "\n".join(message["content"] for message in ai.messages)
+    assert "已达到返回上限，总量未知" in prompt
+    assert "状态=failed" in prompt
+    assert "错误类别=timeout" in prompt

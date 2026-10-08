@@ -29,8 +29,8 @@ def build_source_runtime(*, scope: Scope, policy: object, cfg: object, use_mcp: 
     if isinstance(policy_limit, bool) or not isinstance(policy_limit, int):
         policy_limit = configured
     if source_mode == "market_recap":
-        total = min(max(0, configured), 6)
-        market, web = min(total, 4), min(total, 2)
+        total = min(max(0, configured), 9)
+        market, web = min(total, 7), min(total, 2)
     else:
         total = min(max(0, configured), max(0, policy_limit))
         market, web = total, total
@@ -91,12 +91,16 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
         if result.category == "local":
             continue
         provider = result.provider if result.provider in {"mcp", "tencent", "web", "local"} else "other"
+        coverage_summary = result.coverage.summary()
+        artifact_summary = result.content[:400] if status in {"success", "partial"} else result.error_code[:120]
+        if coverage_summary:
+            artifact_summary = ("覆盖：" + coverage_summary + ("；" + artifact_summary if artifact_summary else ""))[:500]
         artifact = ToolArtifact(
             provider=provider,
             tool_name=result.operation[:120] or "source",
             as_of=result.as_of if status == "success" else "",
             status=status,
-            result_summary=result.content[:500] if status in {"success", "partial"} else result.error_code[:120],
+            result_summary=artifact_summary,
             fetched_at=result.fetched_at,
             source_id=result.call_id,
         )

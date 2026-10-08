@@ -77,3 +77,59 @@ def test_old_tool_artifact_fields_round_trip_and_partial_can_omit_as_of():
     assert ToolArtifact.from_dict(old.to_dict()) == old
     partial = ToolArtifact("fixture", "quote", status="partial", fetched_at="2026-09-24T10:00:00+08:00")
     assert partial.as_of == ""
+
+
+def test_market_recap_runtime_budget_is_9_total_7_market_2_web_and_config_capped():
+    from types import SimpleNamespace
+
+    from webapp.chat_execution import build_source_runtime
+    from webapp.chat_models import Scope
+    from webapp.source_adapters import SourceAccess
+
+    access = SourceAccess(
+        mcp_enabled=True, listed_tools=frozenset({"stock_zt_pool", "stock_sector_fund_flow_rank"}),
+        whitelist=frozenset(), mcp_allow=lambda: True,
+        web_enabled=True, tencent_enabled=True,
+    )
+    policy = SimpleNamespace(max_calls=2)
+    runtime = build_source_runtime(
+        scope=Scope.whole_corpus(), policy=policy,
+        cfg=SimpleNamespace(mcp_max_tool_calls=20), use_mcp=True,
+        source_mode="market_recap", access=access,
+    )
+
+    assert all(runtime.budget.reserve("market") for _ in range(7))
+    assert not runtime.budget.reserve("market")
+    assert all(runtime.budget.reserve("web") for _ in range(2))
+    assert not runtime.budget.reserve("web")
+    assert runtime.budget.snapshot() == {"total": 9, "market": 7, "web": 2}
+
+    capped = build_source_runtime(
+        scope=Scope.whole_corpus(), policy=policy,
+        cfg=SimpleNamespace(mcp_max_tool_calls=6), use_mcp=True,
+        source_mode="market_recap", access=access,
+    )
+    assert all(capped.budget.reserve("market") for _ in range(6))
+    assert not capped.budget.reserve("market")
+    assert capped.budget.snapshot() == {"total": 6, "market": 6, "web": 0}
+
+
+def test_source_coverage_is_projected_into_bounded_tool_artifact_summary():
+    from webapp.chat_execution import project_sources
+    from webapp.chat_models import Scope
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    source = SourceResult(
+        "s1", "mcp", "stock_zt_pool", "market", "partial", content="x" * 1000,
+        as_of="2026-10-05", coverage=SourceCoverage(
+            returned_rows=50, limit=50, query_window=None, data_window="2026-10-05",
+        ),
+    )
+
+    projection = project_sources([source], Scope.whole_corpus())
+
+    summary = projection.tool_artifacts[0].result_summary
+    assert len(summary) <= 500
+    assert "50 条" in summary
+    assert "总量未知" in summary
+    assert "2026-10-05" in summary

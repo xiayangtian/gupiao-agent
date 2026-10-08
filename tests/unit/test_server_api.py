@@ -409,6 +409,35 @@ def test_chat_scope_preserves_known_company_when_no_reports_are_indexed(env, mon
     assert resolution.scope.report_ids == ()
 
 
+def test_recap_coverage_marks_fixed_provider_window_mismatch_and_single_day_pool():
+    from datetime import date
+
+    from webapp.chat_time import MarketWindow
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    window = MarketWindow("上周", "calendar_week", date(2026, 9, 28), date(2026, 10, 4), None)
+    fund = SourceResult("f", "mcp", "stock_sector_fund_flow_rank", "market", "partial",
+                        coverage=SourceCoverage(query_window="5日", data_window="2026-10-05"))
+    pool = SourceResult("p", "mcp", "stock_zt_pool", "market", "partial",
+                        coverage=SourceCoverage(returned_rows=50, limit=50, data_window="2026-10-02"))
+    outside = SourceResult("p2", "mcp", "stock_zt_pool", "market", "partial",
+                           coverage=SourceCoverage(returned_rows=5, limit=50, data_window="2026-10-05"))
+
+    fund_coverage = server._recap_coverage_for_window(fund, window).coverage
+    pool_coverage = server._recap_coverage_for_window(pool, window).coverage
+    outside_coverage = server._recap_coverage_for_window(outside, window).coverage
+
+    assert "与请求窗口上周不匹配" in fund_coverage.query_window
+    assert "仅2026-10-02单日补充" in pool_coverage.query_window
+    assert "与请求窗口上周不匹配" in outside_coverage.query_window
+
+    today = MarketWindow("今日", "explicit", date(2026, 10, 5), date(2026, 10, 5), None)
+    stale_fund = SourceResult("f2", "mcp", "stock_sector_fund_flow_rank", "market", "partial",
+                              coverage=SourceCoverage(query_window="今日", data_window="2026-10-04"))
+    stale_coverage = server._recap_coverage_for_window(stale_fund, today).coverage
+    assert "与请求窗口今日不匹配" in stale_coverage.query_window
+
+
 def test_task_manager_startup_waits_for_inflight_shutdown(monkeypatch):
     shutdown_entered = threading.Event()
     release_shutdown = threading.Event()
@@ -1598,15 +1627,90 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
         monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
 
-        response = client.post("/api/chat/stream", json={"question": "今日复盘", "use_mcp": False,
+        response = client.post("/api/chat/stream", json={"question": "2026-09-24复盘", "use_mcp": False,
                                                          "scope_mode": "whole_corpus"})
         assert response.status_code == 200
         events = _read_sse(response)
         run = _event(events, "done")["run"]
         assert len(calls) == 4
+        assert all(period == "day" and count >= 5 for _, period, count, _ in calls)
         assert len(run["tool_artifacts"]) == 4
         assert all(item["as_of"] == "2026-09-24" for item in run["tool_artifacts"])
+        assert all("实际数据期 2026-09-24" in item["result_summary"] for item in run["tool_artifacts"])
         assert run["source_summary"]["market_data"] == "已使用"
+
+    def test_recap_asgi_executes_four_tencent_and_three_fixed_mcp_calls_with_one_window(
+        self, client, env, monkeypatch, tmp_path,
+    ):
+        from webapp.chat_store import ChatStore
+        from webapp.execution_plan import ExecutionPlan
+        from webapp.execution_planner import PlanningResult
+        from financial_report_fetcher.rag.qa import RagQA
+
+        monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "recap-sessions.json")))
+        tencent_calls = []
+        mcp_calls = []
+        def fake_kline(symbol, *, period, count, adjust):
+            tencent_calls.append((symbol, period, count, adjust))
+            return [{"date": "2026-09-24", "close": 10.0}]
+        def fake_mcp(name, arguments, *, timeout, retry):
+            mcp_calls.append((name, dict(arguments), timeout, retry))
+            return {"as_of": "2026-09-24", "data": [{"date": "2026-09-24", "symbol": "600001"}], "total_rows": 1}
+        monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+        monkeypatch.setattr(server.market_data_mcp, "call_tool", fake_mcp)
+        monkeypatch.setattr(server, "mcp_breaker", type("Breaker", (), {"allow": lambda self: True})())
+        monkeypatch.setattr(server, "_mcp_tool_defs_cache", [
+            {"function": {"name": "stock_zt_pool"}},
+            {"function": {"name": "stock_sector_fund_flow_rank"}},
+        ])
+        monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: [
+            {"type": "function", "function": {"name": "stock_zt_pool"}},
+            {"type": "function", "function": {"name": "stock_sector_fund_flow_rank"}},
+        ])
+        monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: lambda *_a: "")
+        runtimes = []
+        original_runtime = server._source_runtime_for_run
+        def capture_runtime(*args, **kwargs):
+            runtime = original_runtime(*args, **kwargs)
+            runtimes.append(runtime)
+            return runtime
+        monkeypatch.setattr(server, "_source_runtime_for_run", capture_runtime)
+
+        class FixedPlanner:
+            def __init__(self, _planner):
+                pass
+            def plan(self, *_args, **_kwargs):
+                plan = ExecutionPlan.from_dict({"objective": "2026-09-24 A股复盘", "source_mode": "market_recap",
+                    "steps": [{"id": "indices", "kind": "market_indices"},
+                              {"id": "overview", "kind": "market_overview"},
+                              {"id": "answer", "kind": "answer", "depends_on": ["indices", "overview"]}],
+                    "acceptance": ["披露实际数据覆盖"]})
+                return PlanningResult("validated", plan)
+
+        class AnswerAI:
+            def chat_stream(self, **_kwargs):
+                yield {"type": "done", "answer": "仅依据请求窗口内的实际返回数据。", "model": "fixture", "usage": {}}
+
+        class NoStore:
+            def query(self, *_args, **_kwargs):
+                raise AssertionError("recap plan must not retrieve")
+        monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+        monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+
+        response = client.post("/api/chat/stream", json={
+            "question": "2026-09-24 A股复盘", "use_mcp": True, "scope_mode": "whole_corpus",
+        })
+        events = _read_sse(response)
+        run = _event(events, "done")["run"]
+
+        assert len(tencent_calls) == 4 and all(item[1] == "day" for item in tencent_calls)
+        assert [call[0] for call in mcp_calls] == [
+            "stock_zt_pool", "stock_zt_pool", "stock_sector_fund_flow_rank",
+        ]
+        assert len(run["tool_artifacts"]) == 7
+        assert all(item["as_of"] == "2026-09-24" for item in run["tool_artifacts"])
+        assert all("实际数据期 2026-09-24" in item["result_summary"] for item in run["tool_artifacts"])
+        assert runtimes[0].budget.snapshot() == {"total": 7, "market": 7, "web": 0}
 
     def test_chat_stream_sse_and_session_persist(self, client, env, monkeypatch, tmp_path, caplog):
         """流式端点：SSE 事件含 session/delta/done；会话消息持久化"""

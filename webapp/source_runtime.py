@@ -31,6 +31,44 @@ class SourceCall:
 
 
 @dataclass(frozen=True)
+class SourceCoverage:
+    returned_rows: int | None = None
+    limit: int | None = None
+    total_rows: int | None = None
+    query_window: str | None = None
+    data_window: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("returned_rows", "limit", "total_rows"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer or null")
+        for name in ("query_window", "data_window"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or len(value) > 120):
+                raise ValueError(f"{name} must be a bounded string or null")
+
+    def summary(self) -> str:
+        parts = []
+        if self.returned_rows is not None:
+            parts.append(f"返回 {self.returned_rows} 条")
+        if self.limit is not None:
+            parts.append(f"请求上限 {self.limit} 条")
+        if self.total_rows is not None:
+            parts.append(f"来源总量 {self.total_rows} 条")
+        elif self.limit is not None:
+            if self.returned_rows is not None and self.returned_rows >= self.limit:
+                parts.append("已达到返回上限，总量未知")
+            else:
+                parts.append("来源总量未知")
+        if self.query_window is not None:
+            parts.append(f"来源查询期 {self.query_window}")
+        if self.data_window is not None:
+            parts.append(f"实际数据期 {self.data_window}")
+        return "；".join(parts)[:500]
+
+
+@dataclass(frozen=True)
 class SourceResult:
     call_id: str
     provider: str
@@ -46,12 +84,15 @@ class SourceResult:
     facts: tuple[Fact, ...] = ()
     artifacts: tuple[EvidenceArtifact, ...] = ()
     tool_artifacts: tuple[ToolArtifact, ...] = ()
+    coverage: SourceCoverage = SourceCoverage()
 
     def __post_init__(self) -> None:
         if self.status not in {"success", "partial", "failed", "unavailable"}:
             raise ValueError("unsupported source status")
         if self.category not in {"market", "web", "local"}:
             raise ValueError("unsupported source category")
+        if not isinstance(self.coverage, SourceCoverage):
+            raise ValueError("coverage must be SourceCoverage")
         if not all(isinstance(value, str) for value in (self.content, self.as_of, self.fetched_at, self.error_code)):
             raise ValueError("source text fields must be strings")
         object.__setattr__(self, "payload", copy.deepcopy(self.payload))

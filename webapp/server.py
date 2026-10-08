@@ -75,15 +75,15 @@ from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
 from .chat_execution import build_source_runtime, execute_source, project_sources, resolve_answer_status
 from .source_adapters import SourceAccess
-from .source_runtime import AnswerContext, SourceCall, SourceResult
+from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceResult
 from .chat_facts import FactNormalizer, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, QuestionRouter, ToolAvailability, ToolPolicyResolver
 from .execution_planner import ExecutionPlanner, PlanningCapabilities
-from .execution_executor import ExecutionExecutor, a_share_indices_handler, company_kline_handler, market_overview_handler
+from .execution_executor import ExecutionExecutor, market_kline_request_count
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolution, ScopeResolver
-from .chat_time import resolve_financial_period, resolve_market_window
+from .chat_time import MarketWindow, resolve_financial_period, resolve_market_window, select_market_bars
 from .chat_store import ChatStore
 from .chat_evaluation import FAILURE_CODES
 from .research_export import ExportValidationError, ResearchExporter
@@ -1435,6 +1435,34 @@ def _sse(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _recap_coverage_for_window(result: SourceResult, window: MarketWindow) -> SourceResult:
+    """Annotate fixed MCP query periods against the user's requested recap window."""
+    coverage = result.coverage
+    query = coverage.query_window
+    if result.operation == "stock_zt_pool":
+        actual_day = coverage.data_window if coverage.data_window and "至" not in coverage.data_window else None
+        try:
+            parsed_day = dt.date.fromisoformat(actual_day) if actual_day else None
+        except ValueError:
+            parsed_day = None
+        if parsed_day and window.start_date and window.end_date and window.start_date <= parsed_day <= window.end_date:
+            query = f"未指定（仅{actual_day}单日补充，不代表{window.label}区间总量）"
+        else:
+            query = f"未指定（与请求窗口{window.label}不匹配）"
+    elif result.operation == "stock_sector_fund_flow_rank":
+        matches = (
+            (window.kind == "rolling_trading_days" and query == f"{window.trading_days}日")
+            or (window.kind == "explicit" and window.start_date is not None
+                and window.start_date == window.end_date and query == "今日"
+                and coverage.data_window == window.start_date.isoformat())
+        )
+        if not matches:
+            query = f"{query or '未指定'}（与请求窗口{window.label}不匹配）"
+    if query == coverage.query_window:
+        return result
+    return replace(result, coverage=replace(coverage, query_window=query))
+
+
 def _chat_preflight_response(
     session_id: str, question: str, message: str, started_at: float,
 ) -> StreamingResponse:
@@ -2353,8 +2381,14 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                                    max_tokens=400, thinking={"type": "disabled"},
                                    system="只输出执行计划 JSON：objective、source_mode、steps、acceptance；不要 Markdown、解释或工具调用。")
             return parse(retry)
-    recap_markers = ("复盘", "行情回顾", "收盘总结", "大盘总结")
-    recap_budget = 6 if any(marker in body.question for marker in recap_markers) else 2
+    if route.intent == "market_recap":
+        try:
+            configured_recap_budget = int(RagConfig.load().mcp_max_tool_calls)
+        except Exception:
+            configured_recap_budget = 1
+        recap_budget = min(9, max(0, configured_recap_budget))
+    else:
+        recap_budget = 2
     planning = ExecutionPlanner(_plan_json).plan(
         body.question, scope, PlanningCapabilities(available_kinds, recap_budget),
         authoritative_intent=authoritative_intent,
@@ -2469,35 +2503,68 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                             lambda: execute_tool(quote_tool, {"symbol": company_code}), fetched_at=fetched())
                     return runtime.unavailable(SourceCall("mcp", "quote", "market", {}), "not_authorized")
 
-                def kline(question, _scope):
+                def _kline_source(symbol):
+                    if market_window is None:
+                        return {"error": "market_window_unavailable"}, None
+                    rows = tencent_quote.kline(
+                        symbol, period="day", count=market_kline_request_count(market_window), adjust="none",
+                    )
+                    selection = select_market_bars(rows or (), market_window)
+                    if not selection.bars:
+                        return {"error": "market_window_data_unavailable"}, selection
+                    return {
+                        "as_of": selection.covered_dates[-1], "bars": list(selection.bars),
+                        "coverage_status": selection.status,
+                    }, selection
+
+                def kline(_question, _scope):
                     if not company_code:
                         return runtime.unavailable(SourceCall("tencent", "kline", "market", {}), "scope_missing")
-                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
-                    period = "week" if weekly else "day"
-                    call = SourceCall("tencent", "kline", "market", {"symbol": company_code, "period": period})
-                    return execute_source(runtime, call,
-                        lambda: {"bars": tencent_quote.kline(company_code, period=period,
-                            count=5 if weekly else 10, adjust="none")}, fetched_at=fetched())
+                    count = market_kline_request_count(market_window) if market_window else 0
+                    call = SourceCall("tencent", "kline", "market", {
+                        "symbol": company_code, "period": "day", "count": count, "adjust": "none",
+                        "window": market_window.label if market_window else "unknown",
+                    })
+                    selected = {}
+                    def invoke():
+                        source, selection = _kline_source(company_code)
+                        selected["selection"] = selection
+                        return source
+                    result = execute_source(runtime, call, invoke, fetched_at=fetched())
+                    selection = selected.get("selection")
+                    return replace(result, status="partial") if selection and selection.status == "partial" and result.status == "success" else result
 
-                def indices(question, _scope):
-                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
-                    period = "week" if weekly else "day"
+                def indices(_question, _scope):
                     results = []
                     for symbol in ("sh000001", "sz399001", "sz399006", "sh000688"):
-                        call = SourceCall("tencent", "kline", "market", {"symbol": symbol, "period": period})
-                        results.append(execute_source(runtime, call,
-                            lambda symbol=symbol: {"data": tencent_quote.kline(symbol, period=period, count=1, adjust="none")},
-                            fetched_at=fetched()))
+                        count = market_kline_request_count(market_window) if market_window else 0
+                        call = SourceCall("tencent", "kline", "market", {
+                            "symbol": symbol, "period": "day", "count": count, "adjust": "none",
+                            "window": market_window.label if market_window else "unknown",
+                        })
+                        selected = {}
+                        def invoke(symbol=symbol):
+                            source, selection = _kline_source(symbol)
+                            selected["selection"] = selection
+                            return source
+                        result = execute_source(runtime, call, invoke, fetched_at=fetched())
+                        selection = selected.get("selection")
+                        if selection and selection.status == "partial" and result.status == "success":
+                            result = replace(result, status="partial")
+                        results.append(result)
                     return tuple(results)
 
-                def overview(question, _scope):
-                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
+                def overview(_question, _scope):
+                    weekly = market_window is not None and market_window.kind in {"calendar_week", "rolling_trading_days"}
                     results = []
                     for name, arguments in market_recap_tool_calls(weekly=weekly):
                         call = SourceCall("mcp", name, "market", arguments)
-                        results.append(execute_source(runtime, call,
+                        result = execute_source(runtime, call,
                             lambda name=name, arguments=arguments: market_data_mcp.call_tool(
-                                name, arguments, timeout=cfg.mcp_tool_timeout, retry=False), fetched_at=fetched()))
+                                name, arguments, timeout=cfg.mcp_tool_timeout, retry=False), fetched_at=fetched())
+                        if market_window is not None:
+                            result = _recap_coverage_for_window(result, market_window)
+                        results.append(result)
                     return tuple(results)
 
                 def search(question, _scope):

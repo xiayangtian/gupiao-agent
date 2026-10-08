@@ -65,3 +65,20 @@ def test_market_recap_accepts_server_controlled_market_overview_within_step_limi
     plan = ExecutionPlan.from_dict({"objective":"今日A股复盘", "source_mode":"market_recap", "steps":[{"id":"overview","kind":"market_overview","required":True},{"id":"answer","kind":"answer","depends_on":["overview"]}], "acceptance":["as_of"]})
     valid, issues = validate_execution_plan(plan, Scope.whole_corpus(), {"market_overview"}, 1)
     assert valid == plan and not issues
+
+
+def test_recap_plan_cost_matches_indices_mcp_aggregate_and_web_step_budget():
+    plan = ExecutionPlan.from_dict({"objective": "上周 A 股复盘", "source_mode": "market_recap", "steps": [
+        {"id": "indices", "kind": "market_indices"},
+        {"id": "overview", "kind": "market_overview"},
+        {"id": "web", "kind": "web_search"},
+        {"id": "answer", "kind": "answer", "depends_on": ["indices", "overview", "web"]},
+    ], "acceptance": ["披露覆盖"]})
+    costs = {"market_indices": 4, "market_overview": 3, "web_search": 1}
+    available = {"market_indices", "market_overview", "web_search"}
+
+    valid, issues = validate_execution_plan(plan, Scope.whole_corpus(), available, 8, step_costs=costs)
+    assert valid == plan and not issues
+    limited, issues = validate_execution_plan(plan, Scope.whole_corpus(), available, 7, step_costs=costs)
+    assert limited is None
+    assert any(issue.code == "external_budget" for issue in issues)

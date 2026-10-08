@@ -35,7 +35,6 @@ def is_web_search_tool(name: str) -> bool:
 def market_recap_tool_calls(*, weekly: bool) -> list[tuple[str, dict[str, Any]]]:
     """返回 A 股复盘的固定 MCP 调用序列，不接受模型提供的日期或参数。"""
     return [
-        ("index_prices", {"symbol": "000001", "period": "weekly" if weekly else "daily", "limit": 5 if weekly else 1}),
         ("stock_zt_pool", {"pool_type": "涨停", "limit": 50}),
         ("stock_zt_pool", {"pool_type": "跌停", "limit": 50}),
         ("stock_sector_fund_flow_rank", {"days": "5日" if weekly else "今日", "cate": "行业资金流"}),

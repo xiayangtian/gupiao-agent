@@ -153,12 +153,11 @@ def test_market_recap_tools_use_only_server_generated_time_windows():
     weekly = market_recap_tool_calls(weekly=True)
 
     assert [name for name, _ in daily] == [
-        "index_prices", "stock_zt_pool", "stock_zt_pool",
-        "stock_sector_fund_flow_rank",
+        "stock_zt_pool", "stock_zt_pool", "stock_sector_fund_flow_rank",
     ]
-    assert daily[1][1]["pool_type"] == "涨停"
-    assert daily[2][1]["pool_type"] == "跌停"
-    assert daily[3][1]["days"] == "今日"
-    assert weekly[0][1]["period"] == "weekly"
-    assert weekly[3][1]["days"] == "5日"
+    assert daily[0][1]["pool_type"] == "涨停"
+    assert daily[1][1]["pool_type"] == "跌停"
+    assert daily[2][1]["days"] == "今日"
+    assert weekly[2][1]["days"] == "5日"
     assert all("date" not in arguments for _, arguments in daily)
+    assert "index_prices" not in [name for name, _ in weekly]

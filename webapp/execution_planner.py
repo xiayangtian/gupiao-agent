@@ -13,7 +13,7 @@ class PlanningCapabilities:
     available_kinds: set[str]
     max_external_calls: int
     step_costs: Mapping[str, int] = field(default_factory=lambda: {
-        "market_overview": 4, "market_indices": 4,
+        "market_overview": 3, "market_indices": 4,
     })
 
 
