@@ -29,16 +29,24 @@ class ExecutionPlanner:
     def __init__(self, json_planner: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None) -> None:
         self._json_planner = json_planner
 
-    def plan(self, question: str, scope: Scope, capabilities: PlanningCapabilities) -> PlanningResult:
+    def plan(
+        self, question: str, scope: Scope, capabilities: PlanningCapabilities,
+        *, authoritative_intent: str | None = None,
+        authoritative_window: Mapping[str, Any] | None = None,
+    ) -> PlanningResult:
         if self._json_planner is None:
             return PlanningResult("fallback", issues=(PlanIssue("planner_unavailable", "执行计划模型当前不可用。"),))
         snapshot = {"scope": scope.to_dict(), "available_steps": sorted(capabilities.available_kinds), "max_external_calls": capabilities.max_external_calls}
+        if authoritative_intent is not None:
+            snapshot["authoritative_intent"] = authoritative_intent
+        if authoritative_window is not None:
+            snapshot["authoritative_window"] = dict(authoritative_window)
         try:
             raw = self._json_planner(question, snapshot)
             candidate = ExecutionPlan.from_dict(raw)
             # 明确公司 + 近期走势必须由服务端补足个股快照与 K 线；模型不能以大盘指数替代。
             trend_words = ("走势", "趋势", "近期", "近来", "最近", "表现")
-            if scope.companies and any(word in question for word in trend_words):
+            if authoritative_intent is None and scope.companies and any(word in question for word in trend_words):
                 candidate = replace(candidate, source_mode="external_market", steps=(
                     ExecutionStep("quote", "market_quote", True),
                     ExecutionStep("kline", "market_kline", True),
@@ -47,6 +55,7 @@ class ExecutionPlanner:
             valid, issues = validate_execution_plan(
                 candidate, scope, capabilities.available_kinds, capabilities.max_external_calls,
                 step_costs=capabilities.step_costs,
+                authoritative_intent=authoritative_intent,
             )
         except Exception as exc:
             # 计划器是可选能力：任何 provider/JSON 失败都必须 fail-closed，不能中断问答。

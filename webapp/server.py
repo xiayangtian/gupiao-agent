@@ -78,11 +78,12 @@ from .source_adapters import SourceAccess
 from .source_runtime import AnswerContext, SourceCall, SourceResult
 from .chat_facts import FactNormalizer, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
-from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
+from .chat_policy import IntentRouter, QuestionRouter, ToolAvailability, ToolPolicyResolver
 from .execution_planner import ExecutionPlanner, PlanningCapabilities
 from .execution_executor import ExecutionExecutor, a_share_indices_handler, company_kline_handler, market_overview_handler
 from .chat_verifier import ClaimVerifier
-from .chat_scope import ScopeRequest, ScopeResolver
+from .chat_scope import ScopeRequest, ScopeResolution, ScopeResolver
+from .chat_time import resolve_financial_period, resolve_market_window
 from .chat_store import ChatStore
 from .chat_evaluation import FAILURE_CODES
 from .research_export import ExportValidationError, ResearchExporter
@@ -1359,8 +1360,38 @@ def _resolve_company_industry(code: str) -> Optional[IndustryRef]:
     )
 
 
+def _resolve_chat_company_code(question: str) -> Optional[str]:
+    """Resolve one company from the existing stock index; ambiguity fails closed."""
+    try:
+        stock_index.start()
+        stock_index.wait_ready(timeout=5.0)
+    except Exception:
+        return None
+    codes = list(dict.fromkeys(re.findall(r"(?<!\d)\d{6}(?!\d)", question or "")))
+    if len(codes) > 1:
+        return None
+    if len(codes) == 1:
+        try:
+            return codes[0] if stock_index.is_valid_code(codes[0]) else None
+        except Exception:
+            return None
+    try:
+        matched = stock_index.match_company_name(question or "")
+    except Exception:
+        matched = None
+    if not isinstance(matched, Mapping):
+        return None
+    code = matched.get("code")
+    if not isinstance(code, str) or not re.fullmatch(r"\d{6}", code):
+        return None
+    try:
+        return code if stock_index.is_valid_code(code) else None
+    except Exception:
+        return None
+
+
 def _build_scope_resolver() -> ScopeResolver:
-    """构造 ScopeResolver：报告身份来自本地 RAG，行业来自公司基本信息工具。"""
+    """构造 ScopeResolver：公司身份来自现有股票索引，报告来自本地 RAG。"""
     def _local_report_ids() -> List[str]:
         if rag_store is None:
             return []
@@ -1374,27 +1405,56 @@ def _build_scope_resolver() -> ScopeResolver:
         company_name_provider=lambda code: stock_index.company_name(code),
         industry_provider=_resolve_company_industry,
         cache_path=os.path.join(BASE_DIR, "data", "company_industries.json"),
+        company_code_resolver=_resolve_chat_company_code,
     )
 
 
-def _resolve_scope(body: StreamChatRequest, run_id: str = "") -> Scope:
-    """解析并冻结 Scope；任何解析失败回退全库，绝不向上抛出异常。"""
+def _resolve_scope(
+    body: StreamChatRequest, run_id: str = "", *, requires_company: bool = False
+) -> ScopeResolution:
+    """Resolve chat scope; an unresolved required company never falls back to whole corpus."""
     resolver = _build_scope_resolver()
     request = ScopeRequest(body.scope_mode, body.focus_report)
     try:
-        return resolver.resolve(body.question, request)
+        return resolver.resolve_for_chat(
+            body.question, request, requires_company=requires_company,
+        )
     except Exception as exc:
-        # 异常文本可能包含用户问题；日志与回退原因都只保留受控摘要。
+        # 异常文本可能携带问题内容；只记录受控错误类型，并对公司型问句 fail-closed。
         logger.warning(
             "chat_scope_resolution_failed run_id=%s error_type=%s",
             run_id or "-", type(exc).__name__,
         )
-        return Scope("whole_corpus", (), (), fallback_reason="范围解析失败，已回退全库范围")
+        if requires_company:
+            return ScopeResolution(None, "公司范围暂时无法确认，请稍后重试或提供股票代码。")
+        return ScopeResolution(Scope("whole_corpus", (), (), fallback_reason="范围解析失败，已回退全库范围"))
 
 
 def _sse(event: str, data: Dict[str, Any]) -> str:
     """SSE 帧：event: xxx\ndata: {...}\n\n"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _chat_preflight_response(
+    session_id: str, question: str, message: str, started_at: float,
+) -> StreamingResponse:
+    """Persist and return a clarification without constructing a planner or source runtime."""
+    chat_store.append_messages(session_id, [
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": message},
+    ])
+
+    async def events():
+        yield _sse("session", {"session_id": session_id})
+        yield _sse("clarification", {"message": message})
+        yield _sse("delta", {"text": message})
+        yield _sse("done", {
+            "answer": message, "run": None, "session_id": session_id,
+            "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+            "clarification": True,
+        })
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 # ── 智能问答财报补充下载：候选解析、一次性授权与恢复回答 ──────────
@@ -2196,34 +2256,41 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     原子持久化；停止（断开/取消）保存 stopped，生产异常保存 failed。
     """
     started_at = time.perf_counter()
-    _require_ai()
     if not body.question.strip():
         raise HTTPException(400, "问题不能为空")
-    chat_qa = _chat_qa_or_degraded()
 
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
     history = session.get("messages", [])[-8:]  # 传给模型的最近 4 轮
-
     run_id = uuid.uuid4().hex
 
-    # 解析并冻结 Scope（在启动生产线程之前；失败回退全库，不让线程崩溃）
-    # run_id 提前生成，使范围解析失败也能与本次问答关联检索。
-    scope = await asyncio.to_thread(_resolve_scope, body, run_id)
-    # 个股走势不依赖本地财报索引：从已就绪的股票名称索引冻结唯一公司，
-    # 使计划校验能强制行情快照与 K 线，而非以大盘指数替代。
-    trend_words = ("走势", "趋势", "近期", "近来", "最近", "表现", "价格")
-    if not scope.companies and any(word in body.question for word in trend_words):
-        stock_index.start()
-        stock_index.wait_ready(timeout=5.0)
-        matched_company = stock_index.match_company_name(body.question)
-        if matched_company is not None:
-            # Scope 合约要求公司范围必须绑定本地报告；若无本地报告则保持全库，
-            # 绝不制造空报告范围。
-            scope = _build_scope_resolver().resolve(
-                body.question,
-                ScopeRequest("company_only", {"code": matched_company["code"]}),
+    route = QuestionRouter().classify(body.question)
+    if route.intent == "clarification":
+        return _chat_preflight_response(
+            sid, body.question, "请说明你希望分析财报经营指标，还是证券价格走势。", started_at,
+        )
+
+    resolution = await asyncio.to_thread(
+        _resolve_scope, body, run_id, requires_company=route.requires_company,
+    )
+    if resolution.scope is None:
+        return _chat_preflight_response(sid, body.question, resolution.clarification, started_at)
+    scope = resolution.scope
+
+    financial_period = resolve_financial_period(body.question)
+    market_window = resolve_market_window(body.question)
+    if route.requires_time_window:
+        if route.intent == "financial_trend" and financial_period is None:
+            return _chat_preflight_response(
+                sid, body.question, "请明确财报期间或趋势范围，例如 2025 年或近三年。", started_at,
             )
+        if route.intent in {"market_trend", "market_recap"} and market_window is None:
+            return _chat_preflight_response(
+                sid, body.question, "请明确行情时间范围，例如今日、上周、本周、近五交易日或具体日期。", started_at,
+            )
+
+    _require_ai()
+    chat_qa = _chat_qa_or_degraded()
 
     # Scope 冻结后先用模型生成受限执行计划；计划失败才回退旧规则。
     tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
@@ -2243,6 +2310,19 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         available_kinds.add("market_overview")
     # 腾讯 K 线是冻结公司 Scope 的本地受控能力。
     available_kinds.add("market_kline")
+    authoritative_intent = route.intent if route.intent != "general_knowledge" else None
+    authoritative_window: Dict[str, Any] | None = None
+    if financial_period:
+        authoritative_window = {"kind": "financial_period", "expression": financial_period}
+    if market_window is not None:
+        authoritative_window = {
+            "kind": market_window.kind, "label": market_window.label,
+            "start_date": market_window.start_date.isoformat() if market_window.start_date else None,
+            "end_date": market_window.end_date.isoformat() if market_window.end_date else None,
+            "trading_days": market_window.trading_days,
+            "timezone": market_window.timezone,
+        }
+
     def _plan_json(question, snapshot):
         response = ai_client.chat(
             messages=[{"role": "user", "content": question}], temperature=0,
@@ -2251,7 +2331,10 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     "{\"objective\":\"简短目标\",\"source_mode\":\"local_evidence|external_market|market_recap|general_web|mixed\","
                     "\"steps\":[{\"id\":\"retrieve|quote|kline|overview|indices|web|answer\",\"kind\":\"retrieve|market_quote|market_kline|market_overview|market_indices|web_search|answer\",\"required\":true,\"depends_on\":[]}],"
                     "\"acceptance\":[\"可读验收条件\"]}。步骤必须以 answer 结尾；只可用步骤为 "
-                    + ",".join(snapshot["available_steps"]) + "；涉及今日、实时、行情、新闻或公告时必须选择外部步骤，除非问题明确要求历史财报，否则不得选择 retrieve；不得输出工具名、参数、公司代码或推理。"),
+                    + ",".join(snapshot["available_steps"]) + "；服务端确定意图/时间窗口不可更改："
+                    + json.dumps({"intent": snapshot.get("authoritative_intent"),
+                                  "window": snapshot.get("authoritative_window")}, ensure_ascii=False)
+                    + "。涉及今日、实时、行情、新闻或公告时必须选择外部步骤，除非问题明确要求历史财报，否则不得选择 retrieve；不得输出工具名、参数、公司代码或推理。"),
         )
         def parse(response):
             content = str(response.get("content") or "").strip()
@@ -2274,8 +2357,27 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     recap_budget = 6 if any(marker in body.question for marker in recap_markers) else 2
     planning = ExecutionPlanner(_plan_json).plan(
         body.question, scope, PlanningCapabilities(available_kinds, recap_budget),
+        authoritative_intent=authoritative_intent,
+        authoritative_window=authoritative_window,
     )
-    if planning.plan is not None:
+    if authoritative_intent is not None and planning.plan is None and route.intent not in {
+        "report_fact", "financial_trend", "market_quote",
+    }:
+        return _chat_preflight_response(
+            sid, body.question, "未能安全确定本次问答的数据来源计划，请调整问题后重试。", started_at,
+        )
+    if authoritative_intent is not None:
+        kinds = {step.kind for step in planning.plan.steps} if planning.plan else set()
+        if route.intent in {"report_fact", "financial_trend"}:
+            decision = IntentDecision(
+                "company_trend" if route.intent == "financial_trend" else "report_fact",
+                "high", True,
+            )
+        elif route.intent in {"market_quote", "market_trend", "market_recap"}:
+            decision = IntentDecision("realtime_market", "high", False, True, "web_search" in kinds)
+        else:
+            decision = IntentDecision("event_attribution", "high", False, False, "web_search" in kinds)
+    elif planning.plan is not None:
         kinds = {step.kind for step in planning.plan.steps}
         if planning.plan.source_mode == "general_web":
             decision = IntentDecision("event_attribution", "high", False, False, "web_search" in kinds)

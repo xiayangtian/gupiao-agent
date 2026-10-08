@@ -17,9 +17,9 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
-| 智能问答可靠性优化第二阶段：公司与时间范围、复盘口径及数字核验 | 待实现 | 先补计划 | [主记录](#chat-reliability-p2) |
 | 智能问答可靠性优化第三阶段：异步规划、即时进度、取消与研究路由 | 待实现 | 先补计划 | [主记录](#chat-reliability-p3) |
 | 智能问答可靠性优化第四阶段：真实链路评测、检索质量与上下文压缩 | 待实现 | 先补计划 | [主记录](#chat-reliability-p4) |
+| 智能问答可靠性优化第二阶段：公司与时间范围、复盘口径及数字核验 | 实施中 | — | [主记录](#chat-reliability-p2) |
 
 ## 全部设计
 
@@ -52,6 +52,6 @@
 | <a id="model-execution-planner"></a>模型执行计划器 | [设计](specs/2026-09-17-模型执行计划器-design.md) | [计划](plans/2026-09-17-模型执行计划器.md) | 已实现 | — | 合并 0478edd；`python3 -m pytest tests/unit/test_chat_execution_plan.py tests/unit/test_execution_plan_recap.py tests/unit/test_execution_market_recap.py tests/unit/test_execution_executor.py`：7 passed；真实 SSE 验证 market_recap 与 general_web 均返回 execution_plan、步骤完成及 done；完整套件存在既有并发时序阈值波动，未扩大范围修改 | 2026-09-20 |
 | <a id="a-share-market-recap"></a>A 股行情复盘 MCP | [设计](specs/2026-09-20-A股行情复盘MCP设计.md) | [计划](plans/2026-09-20-A股行情复盘MCP.md) | 已实现 | — | 合并 61135a2；`market_overview` 以服务端固定参数聚合 4 个 MCP 资源，计划保持四步上限；`python3 -m pytest -q tests/unit/test_mcp_tools.py tests/unit/test_execution_plan_recap.py tests/unit/test_execution_market_recap.py tests/unit/test_chat_execution_plan.py`：19 passed；计划/市场回归 11 passed、浏览器回归 18 passed；全量 pytest 首轮 1156 passed/2 skipped/1 浏览器会话超时，失败用例单独复跑通过 | 2026-09-23 |
 | <a id="chat-reliability-p1"></a>智能问答可靠性优化第一阶段：统一执行、证据、错误状态与预算 | [总设计](specs/2026-09-24-chat-reliability.md) | [实施计划](plans/2026-09-24-chat-p1.md) | 已实现 | — | 合并 c1c9a78；运行级来源授权、预算/去重、规范化、证据持久化与诚实终态；`python3 -m pytest -q tests/unit/test_source_runtime.py tests/unit/test_source_adapters.py tests/unit/test_chat_execution.py tests/unit/test_rag_context.py tests/unit/test_execution_plan.py tests/unit/test_execution_executor.py tests/unit/test_execution_market_recap.py tests/unit/test_execution_plan_recap.py tests/unit/test_market_mcp_client.py tests/unit/test_mcp_tools.py tests/unit/test_web_search.py tests/unit/test_chat_models.py tests/unit/test_chat_evidence.py tests/unit/test_chat_facts.py tests/unit/test_rag_qa.py tests/unit/test_rag_policy_m2.py tests/unit/test_server_api.py tests/unit/test_chat_store.py tests/unit/test_research_agent.py tests/unit/test_chat_supplement.py tests/unit/test_chat_rendering_js.py tests/unit/test_chat_execution_plan.py tests/unit/test_design_registry.py` 408 passed；浏览器回归 24 passed，`git diff --check` 通过；真实浏览器 desktop/tablet/mobile 无 console/page errors，390×844 无横向溢出；favicon.ico 404 一条。第二至四阶段仍未实现；TASK-20260924-003 | 2026-10-08 |
-| <a id="chat-reliability-p2"></a>智能问答可靠性优化第二阶段：公司与时间范围、复盘口径及数字核验 | 同第一阶段总设计，第二阶段范围 | 未创建；[计划边界](specs/2026-09-24-chat-reliability.md#p2-plan) | 待实现 | 先补计划 | 用户于 2026-09-24 要求独立保留后续任务；依赖第一阶段，未开发；TASK-20260924-004 | 2026-09-24 |
+| <a id="chat-reliability-p2"></a>智能问答可靠性优化第二阶段：公司与时间范围、复盘口径及数字核验 | [P2 设计](specs/chat-reliability-p2.md) | [已确认计划](plans/2026-09-24-chat-p2.md)；[计划边界](specs/2026-09-24-chat-reliability.md#p2-plan) | 实施中 | — | Task 1 已提交 5f169d4；Task 2 聚焦回归 219 passed，代码提交待执行；P2 尚未整体交付；TASK-20260924-004 | 2026-10-08 |
 | <a id="chat-reliability-p3"></a>智能问答可靠性优化第三阶段：异步规划、即时进度、取消与研究路由 | 同第一阶段总设计，第三阶段范围 | 未创建；[计划边界](specs/2026-09-24-chat-reliability.md#p3-plan) | 待实现 | 先补计划 | 用户于 2026-09-24 要求独立保留后续任务；依赖第一阶段，未开发；TASK-20260924-005 | 2026-09-24 |
 | <a id="chat-reliability-p4"></a>智能问答可靠性优化第四阶段：真实链路评测、检索质量与上下文压缩 | 同第一阶段总设计，第四阶段范围 | 未创建；[计划边界](specs/2026-09-24-chat-reliability.md#p4-plan) | 待实现 | 先补计划 | 用户于 2026-09-24 要求独立保留后续任务；依赖第二、三阶段，未开发；TASK-20260924-006 | 2026-09-24 |

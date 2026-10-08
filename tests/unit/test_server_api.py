@@ -258,10 +258,17 @@ class FakeIndex:
         return [{"code": "600900", "name": "长江电力"}] if q == "长江" else []
 
     def company_name(self, code):
-        return "长江电力" if code == "600900" else None
+        return {"600900": "长江电力", "601288": "农业银行"}.get(code)
 
     def is_valid_code(self, code):
-        return code == "600900"
+        return code in {"600900", "601288"}
+
+    def match_company_name(self, text):
+        if "长江电力" in text:
+            return {"code": "600900", "name": "长江电力"}
+        if "农业银行" in text:
+            return {"code": "601288", "name": "农业银行"}
+        return None
 
     @property
     def is_ready(self):
@@ -328,6 +335,78 @@ def env(monkeypatch, tmp_path):
 def client(env):
     with TestClient(server.app) as c:
         yield c
+
+
+def test_chat_stream_clarifies_unresolved_company_before_planning_or_sources(client, env, monkeypatch):
+    planner_calls = []
+    source_calls = []
+
+    class ForbiddenPlanner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def plan(self, *args, **kwargs):
+            planner_calls.append((args, kwargs))
+            raise AssertionError("planner must not run before company clarification")
+
+    monkeypatch.setattr(server, "ExecutionPlanner", ForbiddenPlanner)
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *args, **kwargs: source_calls.append("tools"))
+    monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: source_calls.append("qa") or object())
+
+    response = client.post("/api/chat/stream", json={
+        "question": "未知公司近五交易日股价走势", "use_mcp": True,
+    })
+    events = _read_sse(response)
+
+    assert response.status_code == 200
+    assert "clarification" in [name for name, _ in events]
+    assert "公司" in _event(events, "clarification")["message"]
+    assert planner_calls == []
+    assert source_calls == []
+
+
+def test_chat_stream_clarifies_missing_window_before_planning_or_sources(client, env, monkeypatch):
+    planner_calls = []
+    source_calls = []
+
+    class ForbiddenPlanner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def plan(self, *args, **kwargs):
+            planner_calls.append((args, kwargs))
+            raise AssertionError("planner must not run before window clarification")
+
+    monkeypatch.setattr(server, "ExecutionPlanner", ForbiddenPlanner)
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *args, **kwargs: source_calls.append("tools"))
+    monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: source_calls.append("qa") or object())
+
+    response = client.post("/api/chat/stream", json={
+        "question": "长江电力股价走势", "use_mcp": True,
+    })
+    events = _read_sse(response)
+
+    assert response.status_code == 200
+    assert "clarification" in [name for name, _ in events]
+    assert "时间" in _event(events, "clarification")["message"]
+    assert planner_calls == []
+    assert source_calls == []
+
+
+def test_chat_scope_preserves_known_company_when_no_reports_are_indexed(env, monkeypatch):
+    class EmptyRagStore:
+        def list_report_ids(self):
+            return []
+
+    monkeypatch.setattr(server, "rag_store", EmptyRagStore())
+    resolution = server._resolve_scope(
+        server.StreamChatRequest(question="600900最新股价"),
+        requires_company=True,
+    )
+
+    assert resolution.scope is not None
+    assert resolution.scope.companies[0].code == "600900"
+    assert resolution.scope.report_ids == ()
 
 
 def test_task_manager_startup_waits_for_inflight_shutdown(monkeypatch):
@@ -1462,7 +1541,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", store)
 
         class BrokenResolver:
-            def resolve(self, *args, **kwargs):
+            def resolve_for_chat(self, *args, **kwargs):
                 raise RuntimeError(secret_question)
 
         class FakeRagQA:
@@ -1502,7 +1581,7 @@ class TestChatSessionsApi:
         class FixedPlanner:
             def __init__(self, _planner):
                 pass
-            def plan(self, *_args):
+            def plan(self, *_args, **_kwargs):
                 plan = ExecutionPlan.from_dict({"objective": "复盘", "source_mode": "market_recap",
                     "steps": [{"id": "indices", "kind": "market_indices", "required": True},
                               {"id": "answer", "kind": "answer", "depends_on": ["indices"]}],
@@ -1546,7 +1625,7 @@ class TestChatSessionsApi:
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
         caplog.set_level(logging.INFO, logger=server.__name__)
-        r = client.post("/api/chat/stream", json={"question": "营收如何？"})
+        r = client.post("/api/chat/stream", json={"question": "长江电力营收如何？"})
         assert r.status_code == 200
         body = r.text
         assert "event: session" in body
@@ -1563,13 +1642,14 @@ class TestChatSessionsApi:
         sessions = store.list_sessions()
         assert len(sessions) == 1
         detail = store.get_session(sessions[0]["id"])
-        assert detail["messages"][0] == {"role": "user", "content": "营收如何？"}
+        assert detail["messages"][0] == {"role": "user", "content": "长江电力营收如何？"}
         assert detail["messages"][1]["role"] == "assistant"
         assert detail["messages"][1]["content"] == "营收增长"
         # 新 run 必须真实证据化，不再是旧消息迁移的 legacy_evidence_unavailable
         assert detail["messages"][1]["run"]["legacy_evidence_unavailable"] is False
         assert detail["messages"][1]["run"]["status"] == "completed"
-        assert detail["messages"][1]["run"]["scope"]["mode"] == "whole_corpus"
+        assert detail["messages"][1]["run"]["scope"]["mode"] == "company_only"
+        assert detail["messages"][1]["run"]["scope"]["companies"][0]["code"] == "600900"
         assert detail["messages"][1]["run"]["artifacts"] == []
 
     def test_chat_stream_failure_logs_run_id_without_question_or_traceback(self, client, env, monkeypatch, tmp_path, caplog):
@@ -1791,12 +1871,12 @@ class TestChatStreamPartial:
                 yield {"type": "delta", "text": "部分回答", "reasoning": ""}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
-        r = client.post("/api/chat/stream", json={"question": "营收如何？"})
+        r = client.post("/api/chat/stream", json={"question": "长江电力营收如何？"})
         assert r.status_code == 200
         assert "部分回答" in r.text
         sid = store.list_sessions()[0]["id"]
         detail = store.get_session(sid)
-        assert [m["content"] for m in detail["messages"]] == ["营收如何？", "部分回答"]
+        assert [m["content"] for m in detail["messages"]] == ["长江电力营收如何？", "部分回答"]
         assert detail["messages"][1]["run"]["status"] == "stopped"
 
 
@@ -1834,7 +1914,7 @@ class TestChatStreamRunPersistence:
         store = ChatStore(str(tmp_path / "sessions.json"))
         monkeypatch.setattr(server, "chat_store", store)
         events = _disconnect_after_first_delta(
-            client, monkeypatch, {"question": "营收如何？"}, ["部分回答"],
+            client, monkeypatch, {"question": "长江电力营收如何？"}, ["部分回答"],
         )
         sid = _event(events, "session")["session_id"]
         run = client.get(f"/api/chat/sessions/{sid}").json()["messages"][1]["run"]
@@ -1900,7 +1980,7 @@ class TestMcpChat:
                        "usage": {}, "tools_used": ["get_financial_metrics"]}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
-        r = client.post("/api/chat/stream", json={"question": "净利如何？"})
+        r = client.post("/api/chat/stream", json={"question": "600900净利如何？"})
         body = r.text
         assert "event: tool_call" in body
         assert "get_financial_metrics" in body
@@ -2481,7 +2561,7 @@ class TestFocusReport:
                        "model": "m", "usage": {}, "tools_used": []}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
-        r = client.post("/api/chat/stream", json={"question": "营收如何？"})
+        r = client.post("/api/chat/stream", json={"question": "长江电力营收如何？"})
         assert r.status_code == 200
         assert captured["priority"] is None
 
@@ -3090,17 +3170,19 @@ class TestChatSupplementApi:
         assert len(supplement_env["downloader"].calls) == 5
         assert len(supplement_env["rag"].calls[-1]["scope"].report_ids) == 6
 
-    def test_whole_corpus_proposal_is_rejected_with_out_of_scope_text(
+    def test_unresolved_financial_scope_is_clarified_without_source_calls(
         self, client, supplement_env,
     ):
-        """范围外的泛问题不提供自动补库，且说明真实原因是问题不在公司范围内。"""
+        """未给公司身份的财务问句先澄清，不访问来源或触发补报。"""
         events = _read_sse(client.post("/api/chat/stream", json={"question": "经营现金流怎么看？"}))
 
         names = [name for name, _ in events]
         assert "supplement_needed" not in names
+        assert "clarification" in names
         done = _event(events, "done")
-        assert done["answer"] == server._SUPPLEMENT_OUT_OF_SCOPE_TEXT
-        assert done["run"]["status"] == "partial"
+        assert done["clarification"] is True
+        assert "明确公司名称" in done["answer"]
+        assert done["run"] is None
         assert supplement_env["downloader"].calls == []
 
     def test_supplement_request_without_candidates_answers_with_gap_note(

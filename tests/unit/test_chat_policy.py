@@ -1,4 +1,5 @@
 from webapp.chat_models import Scope
+from webapp import chat_policy
 from webapp.chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
 
 
@@ -13,6 +14,48 @@ class _FakeSearch:
 
 def _scope():
     return Scope.company_only("601288", "农业银行", ["601288:2026-06-30:semi_annual"])
+
+
+def test_question_router_separates_financial_facts_and_trends():
+    router_type = getattr(chat_policy, "QuestionRouter", None)
+    assert router_type is not None, "QuestionRouter must be implemented before the planner can route chat"
+    router = router_type()
+
+    fact = router.classify("贵州茅台2025年营收是多少")
+    trend = router.classify("贵州茅台近三年营收趋势")
+    missing_period = router.classify("贵州茅台营收趋势")
+
+    assert (fact.intent, fact.requires_company, fact.requires_time_window) == ("report_fact", True, False)
+    assert (trend.intent, trend.requires_company, trend.requires_time_window) == ("financial_trend", True, True)
+    assert (missing_period.intent, missing_period.requires_company, missing_period.requires_time_window) == ("financial_trend", True, True)
+
+
+def test_question_router_separates_quotes_price_trends_recap_and_ambiguity():
+    router_type = getattr(chat_policy, "QuestionRouter", None)
+    assert router_type is not None, "QuestionRouter must be implemented before the planner can route chat"
+    router = router_type()
+
+    quote = router.classify("600519最新股价")
+    trend = router.classify("600519股价近五交易日走势")
+    recap = router.classify("A股上周复盘")
+    ambiguous = router.classify("分析趋势")
+
+    assert (quote.intent, quote.requires_company, quote.requires_time_window) == ("market_quote", True, False)
+    assert (trend.intent, trend.requires_company, trend.requires_time_window) == ("market_trend", True, True)
+    assert (recap.intent, recap.requires_company, recap.requires_time_window) == ("market_recap", False, True)
+    assert ambiguous.intent == "clarification"
+
+
+def test_question_router_separates_stable_knowledge_from_current_web_questions():
+    router_type = getattr(chat_policy, "QuestionRouter", None)
+    assert router_type is not None, "QuestionRouter must be implemented before the planner can route chat"
+    router = router_type()
+
+    knowledge = router.classify("什么是市盈率")
+    current = router.classify("当前政策有什么变化")
+
+    assert knowledge.intent == "general_knowledge"
+    assert current.intent == "general_web"
 
 
 def test_report_fact_uses_local_pdf_and_disallows_external_tools():

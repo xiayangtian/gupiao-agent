@@ -75,10 +75,28 @@ class ExecutionPlan:
 def validate_execution_plan(
     plan: ExecutionPlan, scope: Scope, available_kinds: set[str], max_external_calls: int,
     *, step_costs: Mapping[str, int] | None = None,
+    authoritative_intent: str | None = None,
 ) -> tuple[ExecutionPlan | None, tuple[PlanIssue, ...]]:
-    """校验计划只使用服务端可用来源、真实调用成本及有序依赖。"""
-    del scope  # Scope 由调用方冻结；本契约不接受模型传入的范围字段。
+    """校验计划只使用服务端意图、可用来源、真实调用成本及有序依赖。"""
     issues: list[PlanIssue] = []
+    intent_contracts = {
+        "report_fact": ("local_evidence", {"retrieve", "answer"}),
+        "financial_trend": ("local_evidence", {"retrieve", "answer"}),
+        "market_quote": ("external_market", {"market_quote", "answer"}),
+        "market_trend": ("external_market", {"market_kline", "answer"}),
+        "market_recap": ("market_recap", {"market_indices", "market_overview", "web_search", "answer"}),
+        "general_web": ("general_web", {"web_search", "answer"}),
+    }
+    if authoritative_intent is not None:
+        contract = intent_contracts.get(authoritative_intent)
+        if contract is None:
+            issues.append(PlanIssue("intent_source_mismatch", "当前服务端意图没有可执行来源合同。"))
+        else:
+            expected_mode, allowed_steps = contract
+            if plan.source_mode != expected_mode or any(step.kind not in allowed_steps for step in plan.steps):
+                issues.append(PlanIssue("intent_source_mismatch", "模型计划与服务端确定的问句意图不匹配。"))
+            if authoritative_intent in {"report_fact", "financial_trend", "market_quote", "market_trend"} and not scope.companies:
+                issues.append(PlanIssue("intent_scope_missing", "公司型问句缺少已解析公司范围。"))
     if not 1 <= len(plan.steps) <= 4:
         issues.append(PlanIssue("step_limit", "普通问答计划必须包含一至四步。"))
     ids = [step.id for step in plan.steps]

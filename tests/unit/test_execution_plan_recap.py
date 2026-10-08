@@ -1,3 +1,5 @@
+import inspect
+
 from webapp.chat_models import Scope
 from webapp.execution_plan import ExecutionPlan, validate_execution_plan
 
@@ -12,6 +14,51 @@ def test_market_recap_rejects_rag_and_accepts_indices_and_breadth():
     plan = ExecutionPlan.from_dict({"objective":"A股周复盘", "source_mode":"market_recap", "steps":[{"id":"i","kind":"market_indices"},{"id":"b","kind":"market_breadth"},{"id":"a","kind":"answer"}], "acceptance":["as_of"]})
     valid, issues = validate_execution_plan(plan, Scope.whole_corpus(), {"market_indices", "market_breadth"}, 2)
     assert valid == plan and not issues
+
+
+def test_authoritative_financial_trend_rejects_market_plan():
+    plan = ExecutionPlan.from_dict({"objective": "营收趋势", "source_mode": "external_market", "steps": [
+        {"id": "quote", "kind": "market_quote"}, {"id": "answer", "kind": "answer"},
+    ], "acceptance": ["期间"]})
+
+    assert "authoritative_intent" in inspect.signature(validate_execution_plan).parameters
+    valid, issues = validate_execution_plan(
+        plan, Scope.whole_corpus(), {"market_quote"}, 1,
+        authoritative_intent="financial_trend",
+    )
+
+    assert valid is None
+    assert any(issue.code == "intent_source_mismatch" for issue in issues)
+
+
+def test_authoritative_market_trend_accepts_kline_but_rejects_indices():
+    plan = ExecutionPlan.from_dict({"objective": "股价近五日走势", "source_mode": "external_market", "steps": [
+        {"id": "indices", "kind": "market_indices"}, {"id": "answer", "kind": "answer"},
+    ], "acceptance": ["窗口"]})
+
+    assert "authoritative_intent" in inspect.signature(validate_execution_plan).parameters
+    valid, issues = validate_execution_plan(
+        plan, Scope.whole_corpus(), {"market_indices"}, 1,
+        authoritative_intent="market_trend",
+    )
+
+    assert valid is None
+    assert any(issue.code == "intent_source_mismatch" for issue in issues)
+
+
+def test_authoritative_market_quote_rejects_rag_even_when_company_scope_exists():
+    plan = ExecutionPlan.from_dict({"objective": "最新股价", "source_mode": "local_evidence", "steps": [
+        {"id": "retrieve", "kind": "retrieve"}, {"id": "answer", "kind": "answer"},
+    ], "acceptance": ["as_of"]})
+
+    assert "authoritative_intent" in inspect.signature(validate_execution_plan).parameters
+    valid, issues = validate_execution_plan(
+        plan, Scope.company_only("600519", "贵州茅台"), {"retrieve"}, 0,
+        authoritative_intent="market_quote",
+    )
+
+    assert valid is None
+    assert any(issue.code == "intent_source_mismatch" for issue in issues)
 
 
 def test_market_recap_accepts_server_controlled_market_overview_within_step_limit():
