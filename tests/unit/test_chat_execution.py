@@ -79,6 +79,28 @@ def test_old_tool_artifact_fields_round_trip_and_partial_can_omit_as_of():
     assert partial.as_of == ""
 
 
+def test_server_frozen_market_plan_uses_one_authorized_tencent_call_without_model_tools():
+    from types import SimpleNamespace
+    from webapp.chat_execution import build_source_runtime
+    from webapp.chat_models import Scope
+    from webapp.source_adapters import SourceAccess
+    from webapp.source_runtime import SourceCall, SourceResult
+
+    access = SourceAccess(mcp_enabled=False, listed_tools=frozenset(), whitelist=frozenset(),
+                          mcp_allow=lambda: False, web_enabled=False, tencent_enabled=True)
+    runtime = build_source_runtime(
+        scope=Scope.company_only("600519", "贵州茅台"), policy=SimpleNamespace(max_calls=1),
+        cfg=SimpleNamespace(mcp_max_tool_calls=3), use_mcp=False,
+        source_mode="external_market", access=access,
+    )
+    result = runtime.call(SourceCall("tencent", "kline", "market", {"symbol": "600519"}),
+                          lambda: SourceResult("", "tencent", "kline", "market", "success",
+                                               as_of="2026-09-24"))
+    assert result.status == "success"
+    assert runtime.budget.snapshot()["market"] == 1
+    assert runtime.budget.snapshot()["web"] == 0
+
+
 def test_market_recap_runtime_budget_is_9_total_7_market_2_web_and_config_capped():
     from types import SimpleNamespace
 

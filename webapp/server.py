@@ -2463,6 +2463,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     else:
         decision = IntentRouter().classify(body.question, scope)
     policy = ToolPolicyResolver().resolve(decision, scope, availability)
+    if (planning.plan is not None and route.intent in {"market_quote", "market_trend"}
+            and policy.max_calls == 0 and not policy.allowed_tools):
+        # A validated server-frozen Tencent step is not a model tool; preserve one
+        # ordinary source call even when the model-tool policy has no MCP names.
+        policy = replace(policy, max_calls=1)
     # 聚焦报告：解析为 report_id 后提升其检索权重（历史记录跳转场景）
     priority_report_id = None
     fr = body.focus_report or {}

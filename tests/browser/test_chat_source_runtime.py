@@ -70,9 +70,9 @@ def app_url():
 
 
 @pytest.mark.parametrize(("question", "expected_status", "expected_label"), [
-    ("来源验收成功", "completed", "数据截至 2026-09-24"),
-    ("来源验收网页失败", "partial", "获取失败"),
-    ("来源验收全部失败", "partial", "获取失败"),
+    ("2026-09-24 A股来源验收成功复盘", "completed", "数据截至 2026-09-24"),
+    ("2026-09-24 A股来源验收网页失败复盘", "partial", "获取失败"),
+    ("2026-09-24 A股来源验收全部失败复盘", "partial", "获取失败"),
 ])
 def test_chat_source_status_and_time_are_visible_in_browser(app_url, question, expected_status, expected_label):
     session = "source-runtime-" + uuid.uuid4().hex
