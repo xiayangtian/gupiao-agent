@@ -3518,6 +3518,48 @@ def test_m2_mcp_financial_reference_cannot_support_report_fact_claims(client, en
     assert run["content"].count("未找到可核验的披露") == 1
 
 
+def test_explicit_research_route_survives_successful_ordinary_plan(client, env, monkeypatch):
+    from webapp.chat_models import AnswerRun
+    from webapp.execution_plan import ExecutionPlan, ExecutionStep
+    from webapp.execution_planner import PlanningResult
+
+    planned = ExecutionPlan("用户研究任务", "local_evidence", (
+        ExecutionStep("retrieve", "retrieve", True), ExecutionStep("answer", "answer", True),
+    ), ("引用范围内来源",))
+
+    class SuccessfulPlanner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def plan(self, *_args, **_kwargs):
+            return PlanningResult("validated", planned)
+
+    class RecordingResearchAgent:
+        last_run = None
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, question, scope, intent, policy, *, stop_event, emit):
+            calls.append((question, intent.intent, policy.intent))
+            emit({"type": "research_plan", "plan": {"objective": "研究任务", "steps": [], "acceptance": ["有来源"]}})
+            return AnswerRun(content="研究结果", status="completed", scope=scope,
+                             intent_decision=intent, tool_policy=policy)
+
+    calls = []
+    monkeypatch.setattr(server, "ExecutionPlanner", SuccessfulPlanner)
+    monkeypatch.setattr(server, "ResearchAgent", RecordingResearchAgent)
+    monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: object())
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *_args, **_kwargs: None)
+
+    events = _read_sse(client.post("/api/chat/stream", json={"question": "请研究一下公司经营情况"}))
+
+    assert calls == [("请研究一下公司经营情况", "research_task", "research_task")]
+    assert _event(events, "policy_resolved")["intent"] == "research_task"
+    assert _event(events, "research_plan")["plan"]["objective"] == "研究任务"
+    assert _event(events, "done")["run"]["content"] == "研究结果"
+
+
 def test_research_task_uses_policy_gated_rag_evidence_and_public_step_events(client, env):
     """M3 不得用空产物伪造完成：生产 RAG 产物进入可恢复研究步骤。"""
     _configure_scoped_rag_answer(env, citations=[{

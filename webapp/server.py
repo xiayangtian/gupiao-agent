@@ -2462,6 +2462,12 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             decision = IntentDecision("report_fact", "high", "retrieve" in kinds)
     else:
         decision = IntentRouter().classify(body.question, scope)
+    # Explicit research intent is a server-owned route, not a planner fallback.
+    # A successful ordinary execution plan must not turn a research request back
+    # into ordinary chat or grant it tools beyond the resolved policy.
+    explicit_research = IntentRouter().classify(body.question, scope).intent == "research_task"
+    if explicit_research:
+        decision = IntentDecision("research_task", "high", True)
     policy = ToolPolicyResolver().resolve(decision, scope, availability)
     if (planning.plan is not None and route.intent in {"market_quote", "market_trend"}
             and policy.max_calls == 0 and not policy.allowed_tools):
