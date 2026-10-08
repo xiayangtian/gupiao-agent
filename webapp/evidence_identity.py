@@ -32,6 +32,9 @@ def make_fact_id(
     entity_scope: str,
     company_code: str,
     evidence_ids: tuple[str, ...],
+    source_category: str = "unknown",
+    derived_from_ids: tuple[str, ...] = (),
+    formula: str = "",
 ) -> str:
     """Build a deterministic stable ID from normalized fact identity fields."""
     payload = {
@@ -41,6 +44,9 @@ def make_fact_id(
         "metric": metric,
         "period": period,
         "period_kind": period_kind,
+        "source_category": source_category,
+        "derived_from_ids": sorted(derived_from_ids),
+        "formula": formula,
         "unit": unit,
         "value": value,
     }
@@ -107,9 +113,29 @@ def pdf_evidence_index(run: "AnswerRun") -> dict[str, "EvidenceArtifact"]:
 
 
 def fact_is_backed_by_pdf(fact: "Fact", run: "AnswerRun") -> bool:
-    """Require every fact evidence identity to resolve to a positive-page PDF."""
-    evidence_ids: Any = getattr(fact, "evidence_ids", ())
-    if getattr(fact, "source_type", None) != "pdf" or not evidence_ids:
-        return False
+    """Require base facts and every derived input to resolve to positive-page PDFs."""
     index = pdf_evidence_index(run)
-    return all(identifier in index for identifier in evidence_ids)
+    facts = {item.id: item for item in getattr(run, "facts", ()) if getattr(item, "id", "")}
+    visiting: set[str] = set()
+
+    def backed(candidate: "Fact") -> bool:
+        evidence_ids: Any = getattr(candidate, "evidence_ids", ())
+        if not evidence_ids:
+            return False
+        if getattr(candidate, "source_type", None) == "pdf":
+            return all(identifier in index for identifier in evidence_ids)
+        if (getattr(candidate, "source_type", None) != "derived"
+                or getattr(candidate, "source_category", None) != "local_pdf"
+                or not getattr(candidate, "derived_from_ids", ())
+                or candidate.id in visiting):
+            return False
+        visiting.add(candidate.id)
+        parents = [facts.get(identifier) for identifier in candidate.derived_from_ids]
+        if any(parent is None or not backed(parent) for parent in parents):
+            visiting.discard(candidate.id)
+            return False
+        parent_evidence = {identifier for parent in parents for identifier in parent.evidence_ids}
+        visiting.discard(candidate.id)
+        return set(evidence_ids) == parent_evidence
+
+    return backed(fact)

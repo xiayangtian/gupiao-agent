@@ -108,6 +108,13 @@ def test_financial_period_requires_explicit_period_or_range():
     assert api.resolve_financial_period("营收趋势") is None
 
 
+def test_financial_period_range_resolves_rolling_years_and_quarters_with_fixed_clock():
+    api = _api()
+    assert api.resolve_financial_period_range("近三年", NOW) == (date(2023, 10, 5), date(2026, 10, 5))
+    assert api.resolve_financial_period_range("2025年第1季度", NOW) == (date(2025, 1, 1), date(2025, 3, 31))
+    assert api.resolve_financial_period_range("2025年至2026年", NOW) == (date(2025, 1, 1), date(2026, 12, 31))
+
+
 def test_naive_now_is_interpreted_in_shanghai_timezone():
     window = _api().resolve_market_window("上周", datetime(2026, 10, 5, 10, 0))
 

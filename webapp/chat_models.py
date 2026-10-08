@@ -19,6 +19,7 @@ from webapp.evidence_identity import make_fact_id
 ScopeMode = Literal["company_only", "company_industry", "whole_corpus"]
 AnswerStatus = Literal["completed", "partial", "stopped", "failed", "waiting_consent"]
 FactVerification = Literal["verified", "reference", "conflict", "unavailable"]
+FactSourceCategory = Literal["local_pdf", "market", "mcp", "web", "unknown"]
 IntentName = Literal["report_fact", "company_trend", "industry_benchmark", "realtime_market", "event_attribution", "research_task"]
 VerificationStatus = Literal["passed", "partial", "blocked"]
 
@@ -472,6 +473,9 @@ class Fact:
     # A sentinel distinguishes newly constructed facts from historical payloads
     # whose absent ID must remain empty and therefore non-saveable.
     id: str = field(default=_FACT_ID_UNSET)  # type: ignore[arg-type]
+    source_category: FactSourceCategory = "unknown"
+    derived_from_ids: tuple[str, ...] = ()
+    formula: str = ""
 
     def __post_init__(self) -> None:
         for name in ("metric", "unit", "period", "period_kind", "entity_scope", "company_code", "source_type"):
@@ -488,6 +492,24 @@ class Fact:
         if self.original_value is not None and (isinstance(self.original_value, bool) or not isinstance(self.original_value, Real) or not isfinite(self.original_value)):
             raise ValueError("original_value must be a finite number or null")
         _string(self.original_unit, "original_unit", required=False)
+        if not isinstance(self.source_category, str) or self.source_category not in {"local_pdf", "market", "mcp", "web", "unknown"}:
+            raise ValueError("source_category is unsupported")
+        if not isinstance(self.derived_from_ids, tuple) or any(
+            not isinstance(item, str) or not item.startswith("fact_") for item in self.derived_from_ids
+        ):
+            raise ValueError("derived_from_ids must be a tuple of fact ids")
+        if self.derived_from_ids:
+            if self.source_type != "derived":
+                raise ValueError("derived inputs require derived source_type")
+            if len(set(self.derived_from_ids)) < 2:
+                raise ValueError("derived facts require at least two distinct input facts")
+            if not self.formula:
+                raise ValueError("derived facts require a formula")
+        elif self.source_type == "derived":
+            raise ValueError("derived facts require input fact ids")
+        elif self.formula:
+            raise ValueError("formula is only valid for derived facts")
+        _string(self.formula, "formula", required=False)
         if self.id is _FACT_ID_UNSET:
             object.__setattr__(
                 self,
@@ -495,6 +517,9 @@ class Fact:
                 make_fact_id(
                     self.metric, self.value, self.unit, self.period, self.period_kind,
                     self.entity_scope, self.company_code, self.evidence_ids,
+                    source_category=self.source_category,
+                    derived_from_ids=self.derived_from_ids,
+                    formula=self.formula,
                 ),
             )
         elif not isinstance(self.id, str):
@@ -531,6 +556,9 @@ class Fact:
             evidence_ids=(f"tool:{tool.provider}:{tool.tool_name}",),
             verification="reference" if tool.as_of else "unavailable",
             as_of=tool.as_of,
+            source_category=("market" if tool.provider == "tencent" else
+                             "mcp" if tool.provider in {"mcp", "stock-data-mcp"} else
+                             "web" if tool.provider in {"web", "web_search"} else "unknown"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -549,6 +577,9 @@ class Fact:
             "original_value": self.original_value,
             "original_unit": self.original_unit,
             "id": self.id,
+            "source_category": self.source_category,
+            "derived_from_ids": list(self.derived_from_ids),
+            "formula": self.formula,
         }
 
     @classmethod
@@ -569,6 +600,9 @@ class Fact:
             original_value=data.get("original_value"),
             original_unit=_string(data.get("original_unit", ""), "original_unit", required=False),
             id=_string(data.get("id", ""), "fact id", required=False),
+            source_category=data.get("source_category", "unknown"),
+            derived_from_ids=_strings(data.get("derived_from_ids", []), "derived_from_ids"),
+            formula=_string(data.get("formula", ""), "formula", required=False),
         )
 
 

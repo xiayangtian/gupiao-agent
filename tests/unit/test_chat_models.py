@@ -332,3 +332,33 @@ def test_all_contracts_are_json_round_trippable_and_frozen():
     assert CompanyRef.from_dict(CompanyRef("601288", "农业银行").to_dict()) == CompanyRef("601288", "农业银行")
     with pytest.raises(FrozenInstanceError):
         fact.metric = "profit"
+
+
+def test_legacy_fact_defaults_to_unknown_source_and_round_trips_new_lineage_fields():
+    payload = {
+        "metric": "revenue", "value": 100, "unit": "亿元", "period": "2025-12-31",
+        "period_kind": "annual", "entity_scope": "consolidated", "company_code": "601288",
+        "source_type": "pdf", "evidence_ids": ["r#p1"], "verification": "verified",
+    }
+
+    fact = Fact.from_dict(payload)
+
+    assert fact.source_category == "unknown"
+    assert fact.derived_from_ids == ()
+    assert fact.formula == ""
+    assert Fact.from_dict(fact.to_dict()) == fact
+
+
+def test_derived_fact_requires_multiple_inputs_and_formula_and_changes_identity():
+    fields = dict(metric="growth", value=25, unit="百分比", period="2025-12-31",
+                  period_kind="annual", entity_scope="consolidated", company_code="601288",
+                  source_type="derived", evidence_ids=("r#p1", "r#p2"),
+                  verification="verified", source_category="local_pdf")
+    first = Fact(**fields, derived_from_ids=("fact_base", "fact_current"), formula="growth_v1")
+    different_formula = Fact(**fields, derived_from_ids=("fact_base", "fact_current"), formula="growth_v2")
+
+    assert first.id != different_formula.id
+    with pytest.raises(ValueError, match="derived"):
+        Fact(**fields, derived_from_ids=("fact_only",), formula="growth_v1")
+    with pytest.raises(ValueError, match="formula"):
+        Fact(**fields, derived_from_ids=("fact_base", "fact_current"))

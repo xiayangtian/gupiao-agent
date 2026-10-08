@@ -3402,6 +3402,32 @@ def test_m2_raw_tool_json_does_not_bypass_fact_normalization(client, env, monkey
     assert run["facts"] == []
 
 
+def test_pdf_citations_are_projected_to_literal_scoped_facts_before_verification(monkeypatch):
+    from webapp.chat_models import EvidenceArtifact, Scope
+
+    report_id = "601288:2026-06-30:semi_annual"
+    artifact = EvidenceArtifact.pdf(report_id, "report.pdf", 40, "营业收入为 100 亿元")
+    scope = Scope.company_only("601288", "农业银行", [report_id])
+
+    class FakeNormalizer:
+        def normalize_rag_citations(self, *_args, **_kwargs):
+            return (artifact,)
+
+        def normalize_web_sources(self, *_args, **_kwargs):
+            return ()
+
+    state = server._RagRunState(scope=scope)
+    frames = server._relay_rag_event({
+        "type": "done", "answer": "营业收入为 100 亿元", "citations": [],
+        "retrieval_report_ids": [], "retrieval_degraded": False,
+    }, state, FakeNormalizer())
+
+    assert len(state.facts) == 1
+    assert state.facts[0].source_category == "local_pdf"
+    assert state.facts[0].value == 100
+    assert any(frame.startswith("event: fact") for frame in frames)
+
+
 def test_m2_policy_is_emitted_and_unsupported_numeric_is_degraded(client, env, monkeypatch):
     class PolicyRag:
         def answer_stream(self, question, **kwargs):
@@ -3418,8 +3444,8 @@ def test_m2_policy_is_emitted_and_unsupported_numeric_is_degraded(client, env, m
     assert "未找到可核验" in _event(events, "done")["run"]["content"]
 
 
-def test_m2_blocked_run_replaces_only_the_unsupported_claims(client, env, monkeypatch):
-    """blocked 只替换不受支持的确定性论断，受支持内容必须保留。"""
+def test_m2_mcp_financial_reference_cannot_support_report_fact_claims(client, env, monkeypatch):
+    """财务 MCP 参考值不能替代 PDF 对半年报事实的核验。"""
     class MixedClaimRag:
         def answer_stream(self, question, **kwargs):
             yield {"type": "tool_call", "name": "get_financial_metrics", "arguments": {"symbol": "601288"}}
@@ -3442,9 +3468,9 @@ def test_m2_blocked_run_replaces_only_the_unsupported_claims(client, env, monkey
 
     run = _event(events, "done")["run"]
     assert run["verification_report"]["status"] == "blocked"
-    assert "营业收入为 100 亿元" in run["content"]
+    assert "100 亿元" not in run["content"]
     assert "621" not in run["content"]
-    assert "未找到可核验的披露" in run["content"]
+    assert run["content"].count("未找到可核验的披露") == 1
 
 
 def test_research_task_uses_policy_gated_rag_evidence_and_public_step_events(client, env):

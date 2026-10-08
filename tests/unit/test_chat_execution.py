@@ -114,6 +114,26 @@ def test_market_recap_runtime_budget_is_9_total_7_market_2_web_and_config_capped
     assert capped.budget.snapshot() == {"total": 6, "market": 6, "web": 0}
 
 
+def test_tencent_kline_projection_creates_dated_market_facts_with_source_identity():
+    from webapp.chat_execution import project_sources
+    from webapp.chat_models import Scope
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    result = SourceResult(
+        "source-7", "tencent", "kline", "market", "success", as_of="2025-10-02",
+        payload=({"symbol": "600900", "date": "2025-10-02", "close": 10.5},),
+        coverage=SourceCoverage(query_window="2025-10-02", data_window="2025-10-02"),
+    )
+
+    projection = project_sources([result], Scope.company_only("600900", "长江电力"))
+
+    assert len(projection.facts) == 1
+    assert projection.facts[0].source_category == "market"
+    assert projection.facts[0].period == "2025-10-02"
+    assert projection.facts[0].evidence_ids == ("source-7:600900:2025-10-02",)
+    assert projection.tool_artifacts[0].source_id == "source-7"
+
+
 def test_source_coverage_is_projected_into_bounded_tool_artifact_summary():
     from webapp.chat_execution import project_sources
     from webapp.chat_models import Scope

@@ -84,6 +84,42 @@ class WindowSelection:
     status: Literal["complete", "partial", "unavailable"]
 
 
+def resolve_financial_period_range(expression: str, now: datetime | None = None) -> tuple[date, date] | None:
+    """Resolve supported financial-period expressions to bounded calendar dates."""
+    text = expression or ""
+    today = _request_date(now)
+    date_range = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})至(\d{4})-(\d{2})-(\d{2})", text)
+    year_range = re.fullmatch(r"(\d{4})年至(\d{4})年", text)
+    year = re.fullmatch(r"(\d{4})年", text)
+    rolling = re.fullmatch(r"近([一二三四五六七八九十\d]+)年", text)
+    quarter = re.fullmatch(r"(\d{4})年第([1-4])季度", text)
+    if date_range:
+        try:
+            start = date(int(date_range.group(1)), int(date_range.group(2)), int(date_range.group(3)))
+            end = date(int(date_range.group(4)), int(date_range.group(5)), int(date_range.group(6)))
+        except ValueError:
+            return None
+        return (start, end) if start <= end else None
+    if year_range:
+        start_year, end_year = int(year_range.group(1)), int(year_range.group(2))
+        return (date(start_year, 1, 1), date(end_year, 12, 31)) if start_year <= end_year else None
+    if year:
+        number = int(year.group(1))
+        return date(number, 1, 1), date(number, 12, 31)
+    if rolling:
+        digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+        count = min(20, max(1, digits.get(rolling.group(1), int(rolling.group(1)) if rolling.group(1).isdigit() else 1)))
+        try:
+            start = today.replace(year=today.year - count)
+        except ValueError:
+            start = today.replace(year=today.year - count, day=28)
+        return start, today
+    if quarter:
+        number, q = int(quarter.group(1)), int(quarter.group(2))
+        return (date(number, 3 * q - 2, 1), date(number, 3 * q, (date(number, 3 * q + 1, 1) - timedelta(days=1)).day)) if q < 4 else (date(number, 10, 1), date(number, 12, 31))
+    return None
+
+
 def resolve_financial_period(question: str) -> str | None:
     """Return an explicit fiscal period expression; never invent a default period."""
     text = question or ""

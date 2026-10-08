@@ -63,6 +63,28 @@ def test_evidence_identity_rejects_untrusted_pdf_url_and_maps_positive_page_only
     assert pdf_evidence_index(run_with_positive_page)["601288:2026-06-30:semi_annual#p40"] == verified_artifact
 
 
+def test_derived_pdf_fact_is_backed_only_when_every_parent_resolves_to_pdf():
+    from webapp.chat_facts import derive_growth
+
+    baseline = Fact("revenue", 100, "亿元", "2024-12-31", "annual", "consolidated", "601288",
+                    "pdf", ("601288:2024-12-31:annual#p1",), "verified", source_category="local_pdf")
+    current = Fact("revenue", 125, "亿元", "2025-12-31", "annual", "consolidated", "601288",
+                   "pdf", ("601288:2025-12-31:annual#p2",), "verified", source_category="local_pdf")
+    derived = derive_growth(current, baseline, relation="yoy")
+    assert derived is not None
+    run = AnswerRun(
+        content="", status="completed", facts=(baseline, current, derived),
+        artifacts=(
+            EvidenceArtifact.pdf("601288:2024-12-31:annual", "baseline.pdf", 1, "revenue"),
+            EvidenceArtifact.pdf("601288:2025-12-31:annual", "current.pdf", 2, "revenue"),
+        ),
+    )
+
+    assert fact_is_backed_by_pdf(derived, run)
+    missing_parent = AnswerRun(content="", status="completed", facts=(derived, current), artifacts=run.artifacts)
+    assert not fact_is_backed_by_pdf(derived, missing_parent)
+
+
 def test_artifact_evidence_ids_exclude_untrusted_pdf_urls_and_keep_web_url_identity():
     untrusted_pdf = _pdf(pdf_url="https://untrusted.example/report.pdf#page=40")
     web = EvidenceArtifact.web(

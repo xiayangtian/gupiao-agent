@@ -76,14 +76,14 @@ from .chat_evidence import EvidenceNormalizer
 from .chat_execution import build_source_runtime, execute_source, project_sources, resolve_answer_status
 from .source_adapters import SourceAccess
 from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceResult
-from .chat_facts import FactNormalizer, detect_conflicts
+from .chat_facts import FactNormalizer, derive_available_facts, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, QuestionRouter, ToolAvailability, ToolPolicyResolver
 from .execution_planner import ExecutionPlanner, PlanningCapabilities
 from .execution_executor import ExecutionExecutor, market_kline_request_count
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolution, ScopeResolver
-from .chat_time import MarketWindow, resolve_financial_period, resolve_market_window, select_market_bars
+from .chat_time import MarketWindow, resolve_financial_period, resolve_financial_period_range, resolve_market_window, select_market_bars
 from .chat_store import ChatStore
 from .chat_evaluation import FAILURE_CODES
 from .research_export import ExportValidationError, ResearchExporter
@@ -2016,12 +2016,20 @@ def _relay_rag_event(
         legacy_citations = evt.get("citations", []) or []
         legacy_web_sources = evt.get("web_sources", []) or []
         # 标准化 PDF/网页证据（analysis 引用只保留在旧 citations 字段一个版本）
-        state.evidence_artifacts.extend(normalizer.normalize_rag_citations(
+        pdf_artifacts = normalizer.normalize_rag_citations(
             legacy_citations,
             analysis_dir=ANALYSIS_DIR,
             reports_dir=REPORTS_DIR,
             jump_version=int(time.time() * 1000),
-        ))
+        )
+        state.evidence_artifacts.extend(pdf_artifacts)
+        known_fact_ids = {fact.id for fact in state.facts}
+        for artifact in pdf_artifacts:
+            for fact in FactNormalizer().facts_from_pdf_evidence(artifact, state.scope or Scope.whole_corpus()):
+                if fact.id not in known_fact_ids:
+                    state.facts.append(fact)
+                    known_fact_ids.add(fact.id)
+                    frames.append(_sse("fact", {"fact": fact.to_dict()}))
         state.evidence_artifacts.extend(normalizer.normalize_web_sources(
             legacy_web_sources,
             fetched_at=dt.datetime.now().isoformat(timespec="seconds"),
@@ -2306,6 +2314,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     scope = resolution.scope
 
     financial_period = resolve_financial_period(body.question)
+    financial_period_bounds = resolve_financial_period_range(financial_period) if financial_period else None
+    verification_period = (
+        f"{financial_period_bounds[0].isoformat()}至{financial_period_bounds[1].isoformat()}"
+        if financial_period_bounds else financial_period
+    )
     market_window = resolve_market_window(body.question)
     if route.requires_time_window:
         if route.intent == "financial_trend" and financial_period is None:
@@ -2513,7 +2526,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     if not selection.bars:
                         return {"error": "market_window_data_unavailable"}, selection
                     return {
-                        "as_of": selection.covered_dates[-1], "bars": list(selection.bars),
+                        "as_of": selection.covered_dates[-1],
+                        "bars": [dict(bar, symbol=symbol) for bar in selection.bars],
                         "coverage_status": selection.status,
                     }, selection
 
@@ -2795,16 +2809,34 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     legacy_citations = done_evt.get("citations", []) or []
                     legacy_web_sources = done_evt.get("web_sources", []) or []
                     legacy_tools_used = done_evt.get("tools_used", []) or []
+                    relations = tuple(relation for phrase, relation in (("同比", "yoy"), ("环比", "qoq"))
+                                      if phrase in body.question)
+                    derived_facts = derive_available_facts(
+                        state.facts, relations=relations,
+                        percentage_points="百分点" in body.question,
+                        index_delta=route.intent in {"market_trend", "market_recap"},
+                    )
+                    known_fact_ids = {fact.id for fact in state.facts}
+                    for fact in derived_facts:
+                        if fact.id not in known_fact_ids:
+                            state.facts.append(fact)
+                            known_fact_ids.add(fact.id)
+                            yield _sse("fact", {"fact": fact.to_dict()})
                     state.conflicts = list(detect_conflicts(state.facts))
                     for conflict in state.conflicts:
                         yield _sse("conflict", {"conflict": conflict.to_dict()})
                     state.verification_report = ClaimVerifier().verify(
                         answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
+                        requested_period=verification_period, window=market_window,
+                        answer_intent=route.intent,
                     )
                     yield _sse("verification", {"verification": state.verification_report.to_dict()})
                     if state.verification_report.status == "blocked":
                         # 只替换不受支持的数值论断；受支持内容与上下文保留。
-                        answer = ClaimVerifier().degrade_blocked(answer, scope, state.facts)
+                        answer = ClaimVerifier().degrade_blocked(
+                            answer, scope, state.facts, requested_period=verification_period,
+                            window=market_window, answer_intent=route.intent,
+                        )
                     elif state.verification_report.status == "partial":
                         answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
                     status = resolve_answer_status(
