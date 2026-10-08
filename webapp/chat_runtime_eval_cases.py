@@ -122,8 +122,11 @@ class RuntimeCase:
             raise ValueError(f"case {case_id}.turns must be a non-empty array")
         turns = tuple(_nonempty_string(turn, f"case {case_id}.turns[{i}]") for i, turn in enumerate(turns_raw))
         scope = _mapping(data["scope"], f"case {case_id}.scope")
-        if set(scope) - {"mode", "companies", "period", "market_window"}:
+        if set(scope) - {"mode", "companies", "period", "market_window", "report_ids"}:
             raise ValueError(f"case {case_id}.scope has unsupported fields")
+        report_ids = scope.get("report_ids", [])
+        if not isinstance(report_ids, list) or any(not isinstance(item, str) or not item for item in report_ids):
+            raise ValueError(f"case {case_id}.scope.report_ids must be an array of report identities")
         mode = _nonempty_string(scope.get("mode"), f"case {case_id}.scope.mode")
         if mode not in {"company_only", "company_industry", "whole_corpus", "external_market", "general_knowledge"}:
             raise ValueError(f"case {case_id}.scope.mode is unsupported")
