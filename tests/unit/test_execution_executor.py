@@ -4,6 +4,31 @@ from webapp.execution_plan import ExecutionPlan
 from webapp.source_runtime import SourceResult
 
 
+def test_executor_does_not_start_next_source_after_deadline_without_cancel_flag():
+    import time
+
+    from webapp.chat_runs import ChatRunControl
+
+    control = ChatRunControl("session", "run", timeout_seconds=10)
+    calls = []
+    plan = ExecutionPlan.from_dict({"objective": "行情", "source_mode": "mixed",
+        "steps": [{"id": "quote", "kind": "market_quote", "required": True},
+                  {"id": "web", "kind": "web_search", "required": False},
+                  {"id": "answer", "kind": "answer"}], "acceptance": ["来源"]})
+
+    def first_source(*_args):
+        calls.append("quote")
+        control.deadline = time.monotonic() - 0.01
+        return {"price": 10}
+
+    result = ExecutionExecutor(market_quote=first_source,
+        web_search=lambda *_: calls.append("web")).execute(
+            plan, "行情", Scope.whole_corpus(), control=control)
+    assert calls == ["quote"]
+    assert [(step.id, step.status) for step in result.steps] == [("quote", "completed")]
+    assert control.cancelled is False
+
+
 def test_executor_preserves_finished_step_and_skips_following_steps_after_cancel():
     from webapp.chat_runs import ChatRunControl
 

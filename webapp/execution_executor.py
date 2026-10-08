@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from webapp.chat_models import Scope
+from webapp.chat_runs import ChatRunCancelled, ChatRunDeadlineExceeded
 from webapp.source_runtime import AnswerContext, SourceCall, SourceResult
 from webapp.source_adapters import normalize_source
 from webapp.chat_time import MarketWindow, select_market_bars
@@ -141,8 +142,11 @@ class ExecutionExecutor:
         required_missing = False
         had_failure = False
         for step in plan.steps:
-            if control is not None and control.cancelled:
-                break
+            if control is not None:
+                try:
+                    control.check_active()
+                except (ChatRunCancelled, ChatRunDeadlineExceeded):
+                    break
             if step.kind == "answer":
                 rows.append(ExecutionStepResult(step.id, step.kind,
                                                 "pending" if required_missing else "completed"))
@@ -182,6 +186,10 @@ class ExecutionExecutor:
                     # answer with explicit limits when at least one source is usable.
                     required_missing = required_missing or (step.required and not has_usable_source)
                 record(ExecutionStepResult(step.id, step.kind, row_status, value))
+            except (ChatRunCancelled, ChatRunDeadlineExceeded):
+                # A run-level stop is not a source failure; preserve finished rows and
+                # return immediately so the caller can persist the honest run terminal.
+                break
             except Exception:
                 record(ExecutionStepResult(step.id, step.kind, "failed", error="来源调用失败"))
                 had_failure = True
