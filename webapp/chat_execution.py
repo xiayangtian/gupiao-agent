@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from webapp.chat_evidence import EvidenceNormalizer
+from webapp.chat_facts import facts_from_market_result
 from webapp.chat_models import EvidenceArtifact, Fact, Scope, ToolArtifact
 from webapp.source_adapters import SourceAccess, normalize_source
 from webapp.source_runtime import AnswerContext, CallBudget, SourceCall, SourceResult, SourceRuntime
@@ -29,8 +30,8 @@ def build_source_runtime(*, scope: Scope, policy: object, cfg: object, use_mcp: 
     if isinstance(policy_limit, bool) or not isinstance(policy_limit, int):
         policy_limit = configured
     if source_mode == "market_recap":
-        total = min(max(0, configured), 6)
-        market, web = min(total, 4), min(total, 2)
+        total = min(max(0, configured), 9)
+        market, web = min(total, 7), min(total, 2)
     else:
         total = min(max(0, configured), max(0, policy_limit))
         market, web = total, total
@@ -61,7 +62,7 @@ def resolve_answer_status(*, stopped: bool, failed: bool, waiting_consent: bool,
 
 
 def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProjection:
-    del scope  # Scope is an explicit API input: authorization was frozen before execution.
+    # Scope was frozen before execution; use it only to prevent foreign ticker facts from entering the run.
     normalizer = EvidenceNormalizer()
     unique: list[SourceResult] = []
     seen: set[str] = set()
@@ -91,17 +92,28 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
         if result.category == "local":
             continue
         provider = result.provider if result.provider in {"mcp", "tencent", "web", "local"} else "other"
+        coverage_summary = result.coverage.summary()
+        artifact_summary = result.content[:400] if status in {"success", "partial"} else result.error_code[:120]
+        if coverage_summary:
+            artifact_summary = ("覆盖：" + coverage_summary + ("；" + artifact_summary if artifact_summary else ""))[:500]
         artifact = ToolArtifact(
             provider=provider,
             tool_name=result.operation[:120] or "source",
-            as_of=result.as_of if status == "success" else "",
+            as_of=result.as_of if status in {"success", "partial"} else "",
             status=status,
-            result_summary=result.content[:500] if status in {"success", "partial"} else result.error_code[:120],
+            result_summary=artifact_summary,
             fetched_at=result.fetched_at,
             source_id=result.call_id,
         )
         tools.append(artifact)
-        facts.extend(normalizer.facts_from_structured_tool_payload(result.payload, artifact))
+        if result.provider == "tencent" and result.operation == "kline":
+            market_facts = facts_from_market_result(result, artifact)
+            if scope.mode != "whole_corpus":
+                allowed_codes = {company.code for company in scope.companies}
+                market_facts = tuple(fact for fact in market_facts if fact.company_code in allowed_codes)
+            facts.extend(market_facts)
+        else:
+            facts.extend(normalizer.facts_from_structured_tool_payload(result.payload, artifact))
 
     summary: dict[str, str] = {}
     for key, values in states.items():

@@ -7,10 +7,10 @@ from typing import Any, Literal, Mapping
 from webapp.chat_models import Scope
 
 StepKind = Literal["retrieve", "market_quote", "market_kline", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "market_overview", "web_search", "answer"]
-SourceMode = Literal["local_evidence", "external_market", "market_recap", "general_web", "mixed"]
+SourceMode = Literal["local_evidence", "external_market", "market_recap", "general_web", "general_knowledge", "mixed"]
 
 _STEP_KINDS = frozenset(("retrieve", "market_quote", "market_kline", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "market_overview", "web_search", "answer"))
-_SOURCE_MODES = frozenset(("local_evidence", "external_market", "market_recap", "general_web", "mixed"))
+_SOURCE_MODES = frozenset(("local_evidence", "external_market", "market_recap", "general_web", "general_knowledge", "mixed"))
 
 
 @dataclass(frozen=True)
@@ -75,10 +75,29 @@ class ExecutionPlan:
 def validate_execution_plan(
     plan: ExecutionPlan, scope: Scope, available_kinds: set[str], max_external_calls: int,
     *, step_costs: Mapping[str, int] | None = None,
+    authoritative_intent: str | None = None,
 ) -> tuple[ExecutionPlan | None, tuple[PlanIssue, ...]]:
-    """校验计划只使用服务端可用来源、真实调用成本及有序依赖。"""
-    del scope  # Scope 由调用方冻结；本契约不接受模型传入的范围字段。
+    """校验计划只使用服务端意图、可用来源、真实调用成本及有序依赖。"""
     issues: list[PlanIssue] = []
+    intent_contracts = {
+        "report_fact": ("local_evidence", {"retrieve", "answer"}),
+        "financial_trend": ("local_evidence", {"retrieve", "answer"}),
+        "market_quote": ("external_market", {"market_quote", "answer"}),
+        "market_trend": ("external_market", {"market_kline", "answer"}),
+        "market_recap": ("market_recap", {"market_indices", "market_overview", "web_search", "answer"}),
+        "general_web": ("general_web", {"web_search", "answer"}),
+        "general_knowledge": ("general_knowledge", {"answer"}),
+    }
+    if authoritative_intent is not None:
+        contract = intent_contracts.get(authoritative_intent)
+        if contract is None:
+            issues.append(PlanIssue("intent_source_mismatch", "当前服务端意图没有可执行来源合同。"))
+        else:
+            expected_mode, allowed_steps = contract
+            if plan.source_mode != expected_mode or any(step.kind not in allowed_steps for step in plan.steps):
+                issues.append(PlanIssue("intent_source_mismatch", "模型计划与服务端确定的问句意图不匹配。"))
+            if authoritative_intent in {"report_fact", "financial_trend", "market_quote", "market_trend"} and not scope.companies:
+                issues.append(PlanIssue("intent_scope_missing", "公司型问句缺少已解析公司范围。"))
     if not 1 <= len(plan.steps) <= 4:
         issues.append(PlanIssue("step_limit", "普通问答计划必须包含一至四步。"))
     ids = [step.id for step in plan.steps]
@@ -87,6 +106,8 @@ def validate_execution_plan(
     answers = [step for step in plan.steps if step.kind == "answer"]
     if len(answers) != 1 or not plan.steps or plan.steps[-1].kind != "answer":
         issues.append(PlanIssue("missing_answer", "计划必须且只能以一个最终回答步骤结束。"))
+    if plan.source_mode == "general_knowledge" and (len(plan.steps) != 1 or plan.steps[0].kind != "answer" or authoritative_intent != "general_knowledge"):
+        issues.append(PlanIssue("knowledge_boundary", "普通常识只允许服务端确认的单步回答计划。"))
     if plan.source_mode == "general_web" and any(step.kind not in {"web_search", "answer"} for step in plan.steps):
         issues.append(PlanIssue("general_web_boundary", "非股票问题只允许网页搜索和模型回答。"))
     if plan.source_mode == "market_recap" and "retrieve" in {step.kind for step in plan.steps}:

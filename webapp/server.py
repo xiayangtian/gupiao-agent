@@ -75,14 +75,16 @@ from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
 from .chat_execution import build_source_runtime, execute_source, project_sources, resolve_answer_status
 from .source_adapters import SourceAccess
-from .source_runtime import AnswerContext, SourceCall, SourceResult
-from .chat_facts import FactNormalizer, detect_conflicts
+from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceResult
+from .chat_facts import FactNormalizer, derive_available_facts, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
-from .chat_policy import IntentRouter, ToolAvailability, ToolPolicyResolver
-from .execution_planner import ExecutionPlanner, PlanningCapabilities
-from .execution_executor import ExecutionExecutor, a_share_indices_handler, company_kline_handler, market_overview_handler
+from .chat_policy import IntentRouter, QuestionRouter, ToolAvailability, ToolPolicyResolver
+from .execution_plan import ExecutionPlan
+from .execution_planner import ExecutionPlanner, PlanningCapabilities, PlanningResult
+from .execution_executor import ExecutionExecutor, market_kline_request_count
 from .chat_verifier import ClaimVerifier
-from .chat_scope import ScopeRequest, ScopeResolver
+from .chat_scope import ScopeRequest, ScopeResolution, ScopeResolver
+from .chat_time import MarketWindow, resolve_financial_period, resolve_financial_period_range, resolve_market_window, select_market_bars
 from .chat_store import ChatStore
 from .chat_evaluation import FAILURE_CODES
 from .research_export import ExportValidationError, ResearchExporter
@@ -1359,8 +1361,38 @@ def _resolve_company_industry(code: str) -> Optional[IndustryRef]:
     )
 
 
+def _resolve_chat_company_code(question: str) -> Optional[str]:
+    """Resolve one company from the existing stock index; ambiguity fails closed."""
+    try:
+        stock_index.start()
+        stock_index.wait_ready(timeout=5.0)
+    except Exception:
+        return None
+    codes = list(dict.fromkeys(re.findall(r"(?<!\d)\d{6}(?!\d)", question or "")))
+    if len(codes) > 1:
+        return None
+    if len(codes) == 1:
+        try:
+            return codes[0] if stock_index.is_valid_code(codes[0]) else None
+        except Exception:
+            return None
+    try:
+        matched = stock_index.match_company_name(question or "")
+    except Exception:
+        matched = None
+    if not isinstance(matched, Mapping):
+        return None
+    code = matched.get("code")
+    if not isinstance(code, str) or not re.fullmatch(r"\d{6}", code):
+        return None
+    try:
+        return code if stock_index.is_valid_code(code) else None
+    except Exception:
+        return None
+
+
 def _build_scope_resolver() -> ScopeResolver:
-    """构造 ScopeResolver：报告身份来自本地 RAG，行业来自公司基本信息工具。"""
+    """构造 ScopeResolver：公司身份来自现有股票索引，报告来自本地 RAG。"""
     def _local_report_ids() -> List[str]:
         if rag_store is None:
             return []
@@ -1374,27 +1406,84 @@ def _build_scope_resolver() -> ScopeResolver:
         company_name_provider=lambda code: stock_index.company_name(code),
         industry_provider=_resolve_company_industry,
         cache_path=os.path.join(BASE_DIR, "data", "company_industries.json"),
+        company_code_resolver=_resolve_chat_company_code,
     )
 
 
-def _resolve_scope(body: StreamChatRequest, run_id: str = "") -> Scope:
-    """解析并冻结 Scope；任何解析失败回退全库，绝不向上抛出异常。"""
+def _resolve_scope(
+    body: StreamChatRequest, run_id: str = "", *, requires_company: bool = False
+) -> ScopeResolution:
+    """Resolve chat scope; an unresolved required company never falls back to whole corpus."""
     resolver = _build_scope_resolver()
     request = ScopeRequest(body.scope_mode, body.focus_report)
     try:
-        return resolver.resolve(body.question, request)
+        return resolver.resolve_for_chat(
+            body.question, request, requires_company=requires_company,
+        )
     except Exception as exc:
-        # 异常文本可能包含用户问题；日志与回退原因都只保留受控摘要。
+        # 异常文本可能携带问题内容；只记录受控错误类型，并对公司型问句 fail-closed。
         logger.warning(
             "chat_scope_resolution_failed run_id=%s error_type=%s",
             run_id or "-", type(exc).__name__,
         )
-        return Scope("whole_corpus", (), (), fallback_reason="范围解析失败，已回退全库范围")
+        if requires_company:
+            return ScopeResolution(None, "公司范围暂时无法确认，请稍后重试或提供股票代码。")
+        return ScopeResolution(Scope("whole_corpus", (), (), fallback_reason="范围解析失败，已回退全库范围"))
 
 
 def _sse(event: str, data: Dict[str, Any]) -> str:
     """SSE 帧：event: xxx\ndata: {...}\n\n"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _recap_coverage_for_window(result: SourceResult, window: MarketWindow) -> SourceResult:
+    """Annotate fixed MCP query periods against the user's requested recap window."""
+    coverage = result.coverage
+    query = coverage.query_window
+    if result.operation == "stock_zt_pool":
+        actual_day = coverage.data_window if coverage.data_window and "至" not in coverage.data_window else None
+        try:
+            parsed_day = dt.date.fromisoformat(actual_day) if actual_day else None
+        except ValueError:
+            parsed_day = None
+        if parsed_day and window.start_date and window.end_date and window.start_date <= parsed_day <= window.end_date:
+            query = f"未指定（仅{actual_day}单日补充，不代表{window.label}区间总量）"
+        else:
+            query = f"未指定（与请求窗口{window.label}不匹配）"
+    elif result.operation == "stock_sector_fund_flow_rank":
+        matches = (
+            (window.kind == "rolling_trading_days" and query == f"{window.trading_days}日")
+            or (window.kind == "explicit" and window.start_date is not None
+                and window.start_date == window.end_date and query == "今日"
+                and coverage.data_window == window.start_date.isoformat())
+        )
+        if not matches:
+            query = f"{query or '未指定'}（与请求窗口{window.label}不匹配）"
+    if query == coverage.query_window:
+        return result
+    return replace(result, coverage=replace(coverage, query_window=query))
+
+
+def _chat_preflight_response(
+    session_id: str, question: str, message: str, started_at: float,
+) -> StreamingResponse:
+    """Persist and return a clarification without constructing a planner or source runtime."""
+    chat_store.append_messages(session_id, [
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": message},
+    ])
+
+    async def events():
+        yield _sse("session", {"session_id": session_id})
+        yield _sse("clarification", {"message": message})
+        yield _sse("delta", {"text": message})
+        yield _sse("done", {
+            "answer": message, "run": None, "session_id": session_id,
+            "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+            "clarification": True,
+        })
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 # ── 智能问答财报补充下载：候选解析、一次性授权与恢复回答 ──────────
@@ -1928,12 +2017,20 @@ def _relay_rag_event(
         legacy_citations = evt.get("citations", []) or []
         legacy_web_sources = evt.get("web_sources", []) or []
         # 标准化 PDF/网页证据（analysis 引用只保留在旧 citations 字段一个版本）
-        state.evidence_artifacts.extend(normalizer.normalize_rag_citations(
+        pdf_artifacts = normalizer.normalize_rag_citations(
             legacy_citations,
             analysis_dir=ANALYSIS_DIR,
             reports_dir=REPORTS_DIR,
             jump_version=int(time.time() * 1000),
-        ))
+        )
+        state.evidence_artifacts.extend(pdf_artifacts)
+        known_fact_ids = {fact.id for fact in state.facts}
+        for artifact in pdf_artifacts:
+            for fact in FactNormalizer().facts_from_pdf_evidence(artifact, state.scope or Scope.whole_corpus()):
+                if fact.id not in known_fact_ids:
+                    state.facts.append(fact)
+                    known_fact_ids.add(fact.id)
+                    frames.append(_sse("fact", {"fact": fact.to_dict()}))
         state.evidence_artifacts.extend(normalizer.normalize_web_sources(
             legacy_web_sources,
             fetched_at=dt.datetime.now().isoformat(timespec="seconds"),
@@ -1974,6 +2071,8 @@ def _make_answer_run(
         execution_steps=tuple(state.execution_steps),
         source_summary=state.source_summary,
         plan_status=state.plan_status,
+        knowledge_basis=("model_knowledge_unretrieved" if state.execution_plan
+                         and state.execution_plan.get("source_mode") == "general_knowledge" else ""),
         id=run_id,
         research_run_id=research_run_id,
         research_summary=research_summary,
@@ -2196,38 +2295,59 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     原子持久化；停止（断开/取消）保存 stopped，生产异常保存 failed。
     """
     started_at = time.perf_counter()
-    _require_ai()
     if not body.question.strip():
         raise HTTPException(400, "问题不能为空")
-    chat_qa = _chat_qa_or_degraded()
 
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
     history = session.get("messages", [])[-8:]  # 传给模型的最近 4 轮
-
     run_id = uuid.uuid4().hex
 
-    # 解析并冻结 Scope（在启动生产线程之前；失败回退全库，不让线程崩溃）
-    # run_id 提前生成，使范围解析失败也能与本次问答关联检索。
-    scope = await asyncio.to_thread(_resolve_scope, body, run_id)
-    # 个股走势不依赖本地财报索引：从已就绪的股票名称索引冻结唯一公司，
-    # 使计划校验能强制行情快照与 K 线，而非以大盘指数替代。
-    trend_words = ("走势", "趋势", "近期", "近来", "最近", "表现", "价格")
-    if not scope.companies and any(word in body.question for word in trend_words):
-        stock_index.start()
-        stock_index.wait_ready(timeout=5.0)
-        matched_company = stock_index.match_company_name(body.question)
-        if matched_company is not None:
-            # Scope 合约要求公司范围必须绑定本地报告；若无本地报告则保持全库，
-            # 绝不制造空报告范围。
-            scope = _build_scope_resolver().resolve(
-                body.question,
-                ScopeRequest("company_only", {"code": matched_company["code"]}),
+    route = QuestionRouter().classify(body.question)
+    knowledge_mode = route.intent == "general_knowledge" and QuestionRouter.is_knowledge_question(body.question)
+    if route.intent == "clarification":
+        return _chat_preflight_response(
+            sid, body.question, "请说明你希望分析财报经营指标，还是证券价格走势。", started_at,
+        )
+
+    resolution = await asyncio.to_thread(
+        _resolve_scope, body, run_id, requires_company=route.requires_company,
+    )
+    if resolution.scope is None:
+        return _chat_preflight_response(sid, body.question, resolution.clarification, started_at)
+    scope = resolution.scope
+    if knowledge_mode and scope.companies:
+        return _chat_preflight_response(
+            sid, body.question, "该问题含公司范围；请明确需要解释通用概念，还是查询有来源支持的公司事实。", started_at,
+        )
+
+    financial_period = resolve_financial_period(body.question)
+    financial_period_bounds = resolve_financial_period_range(financial_period) if financial_period else None
+    verification_period = (
+        f"{financial_period_bounds[0].isoformat()}至{financial_period_bounds[1].isoformat()}"
+        if financial_period_bounds else financial_period
+    )
+    market_window = resolve_market_window(body.question)
+    if route.requires_time_window:
+        if route.intent == "financial_trend" and financial_period is None:
+            return _chat_preflight_response(
+                sid, body.question, "请明确财报期间或趋势范围，例如 2025 年或近三年。", started_at,
+            )
+        if route.intent in {"market_trend", "market_recap"} and market_window is None:
+            return _chat_preflight_response(
+                sid, body.question, "请明确行情时间范围，例如今日、上周、本周、近五交易日或具体日期。", started_at,
             )
 
+    _require_ai()
+    chat_qa = _chat_qa_or_degraded()
+
     # Scope 冻结后先用模型生成受限执行计划；计划失败才回退旧规则。
-    tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp else None
+    tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp and not knowledge_mode else None
     tool_names = [str(item.get("function", {}).get("name") or "") for item in (tools or [])]
+    if route.intent == "general_web" and "web_search" not in tool_names:
+        return _chat_preflight_response(
+            sid, body.question, "当前网页来源未获授权或不可用，无法核实最新事实。", started_at,
+        )
     availability = ToolAvailability.available(*tool_names)
     available_kinds = set()
     if rag_qa is not None:
@@ -2243,6 +2363,19 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         available_kinds.add("market_overview")
     # 腾讯 K 线是冻结公司 Scope 的本地受控能力。
     available_kinds.add("market_kline")
+    authoritative_intent = route.intent if route.intent != "general_knowledge" or knowledge_mode else None
+    authoritative_window: Dict[str, Any] | None = None
+    if financial_period:
+        authoritative_window = {"kind": "financial_period", "expression": financial_period}
+    if market_window is not None:
+        authoritative_window = {
+            "kind": market_window.kind, "label": market_window.label,
+            "start_date": market_window.start_date.isoformat() if market_window.start_date else None,
+            "end_date": market_window.end_date.isoformat() if market_window.end_date else None,
+            "trading_days": market_window.trading_days,
+            "timezone": market_window.timezone,
+        }
+
     def _plan_json(question, snapshot):
         response = ai_client.chat(
             messages=[{"role": "user", "content": question}], temperature=0,
@@ -2251,7 +2384,10 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     "{\"objective\":\"简短目标\",\"source_mode\":\"local_evidence|external_market|market_recap|general_web|mixed\","
                     "\"steps\":[{\"id\":\"retrieve|quote|kline|overview|indices|web|answer\",\"kind\":\"retrieve|market_quote|market_kline|market_overview|market_indices|web_search|answer\",\"required\":true,\"depends_on\":[]}],"
                     "\"acceptance\":[\"可读验收条件\"]}。步骤必须以 answer 结尾；只可用步骤为 "
-                    + ",".join(snapshot["available_steps"]) + "；涉及今日、实时、行情、新闻或公告时必须选择外部步骤，除非问题明确要求历史财报，否则不得选择 retrieve；不得输出工具名、参数、公司代码或推理。"),
+                    + ",".join(snapshot["available_steps"]) + "；服务端确定意图/时间窗口不可更改："
+                    + json.dumps({"intent": snapshot.get("authoritative_intent"),
+                                  "window": snapshot.get("authoritative_window")}, ensure_ascii=False)
+                    + "。涉及今日、实时、行情、新闻或公告时必须选择外部步骤，除非问题明确要求历史财报，否则不得选择 retrieve；不得输出工具名、参数、公司代码或推理。"),
         )
         def parse(response):
             content = str(response.get("content") or "").strip()
@@ -2270,12 +2406,49 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                                    max_tokens=400, thinking={"type": "disabled"},
                                    system="只输出执行计划 JSON：objective、source_mode、steps、acceptance；不要 Markdown、解释或工具调用。")
             return parse(retry)
-    recap_markers = ("复盘", "行情回顾", "收盘总结", "大盘总结")
-    recap_budget = 6 if any(marker in body.question for marker in recap_markers) else 2
-    planning = ExecutionPlanner(_plan_json).plan(
-        body.question, scope, PlanningCapabilities(available_kinds, recap_budget),
-    )
-    if planning.plan is not None:
+    if route.intent == "market_recap":
+        try:
+            configured_recap_budget = int(RagConfig.load().mcp_max_tool_calls)
+        except Exception:
+            configured_recap_budget = 1
+        recap_budget = min(9, max(0, configured_recap_budget))
+    else:
+        recap_budget = 2
+    if knowledge_mode:
+        # Server-owned answer-only plan; no second model call can choose a source.
+        knowledge_plan = ExecutionPlan.from_dict({
+            "objective": "解释通用概念", "source_mode": "general_knowledge",
+            "steps": [{"id": "answer", "kind": "answer"}],
+            "acceptance": ["依据模型常识，未检索外部来源"],
+        })
+        planning = PlanningResult("validated", knowledge_plan)
+        tools = None
+    else:
+        planning = ExecutionPlanner(_plan_json).plan(
+            body.question, scope, PlanningCapabilities(available_kinds, recap_budget),
+            authoritative_intent=authoritative_intent,
+            authoritative_window=authoritative_window,
+        )
+    if authoritative_intent is not None and planning.plan is None and route.intent not in {
+        "report_fact", "financial_trend", "market_quote",
+    }:
+        return _chat_preflight_response(
+            sid, body.question, "未能安全确定本次问答的数据来源计划，请调整问题后重试。", started_at,
+        )
+    if authoritative_intent is not None:
+        kinds = {step.kind for step in planning.plan.steps} if planning.plan else set()
+        if route.intent in {"report_fact", "financial_trend"}:
+            decision = IntentDecision(
+                "company_trend" if route.intent == "financial_trend" else "report_fact",
+                "high", True,
+            )
+        elif route.intent in {"market_quote", "market_trend", "market_recap"}:
+            decision = IntentDecision("realtime_market", "high", False, True, "web_search" in kinds)
+        elif knowledge_mode:
+            decision = IntentDecision("report_fact", "low", False)
+        else:
+            decision = IntentDecision("event_attribution", "high", False, False, "web_search" in kinds)
+    elif planning.plan is not None:
         kinds = {step.kind for step in planning.plan.steps}
         if planning.plan.source_mode == "general_web":
             decision = IntentDecision("event_attribution", "high", False, False, "web_search" in kinds)
@@ -2290,6 +2463,11 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     else:
         decision = IntentRouter().classify(body.question, scope)
     policy = ToolPolicyResolver().resolve(decision, scope, availability)
+    if (planning.plan is not None and route.intent in {"market_quote", "market_trend"}
+            and policy.max_calls == 0 and not policy.allowed_tools):
+        # A validated server-frozen Tencent step is not a model tool; preserve one
+        # ordinary source call even when the model-tool policy has no MCP names.
+        policy = replace(policy, max_calls=1)
     # 聚焦报告：解析为 report_id 后提升其检索权重（历史记录跳转场景）
     priority_report_id = None
     fr = body.focus_report or {}
@@ -2307,6 +2485,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
         # 流式请求真正并行，一个会话的模型调用不会阻塞其他会话的响应。
         state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
         state.plan_status = planning.status
+        if knowledge_mode:
+            state.source_summary = {"local_pdf": "未使用", "market_data": "未使用", "web": "未使用"}
         if planning.plan is not None:
             state.execution_plan = {"objective": planning.plan.objective, "source_mode": planning.plan.source_mode,
                                     "steps": [{"id": step.id, "kind": step.kind, "required": step.required} for step in planning.plan.steps],
@@ -2330,6 +2510,12 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             return run
 
         def _produce() -> Any:
+            if knowledge_mode:
+                yield from chat_qa.answer_from_context(
+                    body.question, context=AnswerContext(), history=history,
+                    scope=scope, run_id=run_id, knowledge_mode=True,
+                )
+                return
             cfg = RagConfig.load()
             runtime = _source_runtime_for_run(
                 scope, policy, cfg, use_mcp=body.use_mcp,
@@ -2367,35 +2553,69 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                             lambda: execute_tool(quote_tool, {"symbol": company_code}), fetched_at=fetched())
                     return runtime.unavailable(SourceCall("mcp", "quote", "market", {}), "not_authorized")
 
-                def kline(question, _scope):
+                def _kline_source(symbol):
+                    if market_window is None:
+                        return {"error": "market_window_unavailable"}, None
+                    rows = tencent_quote.kline(
+                        symbol, period="day", count=market_kline_request_count(market_window), adjust="none",
+                    )
+                    selection = select_market_bars(rows or (), market_window)
+                    if not selection.bars:
+                        return {"error": "market_window_data_unavailable"}, selection
+                    return {
+                        "as_of": selection.covered_dates[-1],
+                        "bars": [dict(bar, symbol=symbol) for bar in selection.bars],
+                        "coverage_status": selection.status,
+                    }, selection
+
+                def kline(_question, _scope):
                     if not company_code:
                         return runtime.unavailable(SourceCall("tencent", "kline", "market", {}), "scope_missing")
-                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
-                    period = "week" if weekly else "day"
-                    call = SourceCall("tencent", "kline", "market", {"symbol": company_code, "period": period})
-                    return execute_source(runtime, call,
-                        lambda: {"bars": tencent_quote.kline(company_code, period=period,
-                            count=5 if weekly else 10, adjust="none")}, fetched_at=fetched())
+                    count = market_kline_request_count(market_window) if market_window else 0
+                    call = SourceCall("tencent", "kline", "market", {
+                        "symbol": company_code, "period": "day", "count": count, "adjust": "none",
+                        "window": market_window.label if market_window else "unknown",
+                    })
+                    selected = {}
+                    def invoke():
+                        source, selection = _kline_source(company_code)
+                        selected["selection"] = selection
+                        return source
+                    result = execute_source(runtime, call, invoke, fetched_at=fetched())
+                    selection = selected.get("selection")
+                    return replace(result, status="partial") if selection and selection.status == "partial" and result.status == "success" else result
 
-                def indices(question, _scope):
-                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
-                    period = "week" if weekly else "day"
+                def indices(_question, _scope):
                     results = []
                     for symbol in ("sh000001", "sz399001", "sz399006", "sh000688"):
-                        call = SourceCall("tencent", "kline", "market", {"symbol": symbol, "period": period})
-                        results.append(execute_source(runtime, call,
-                            lambda symbol=symbol: {"data": tencent_quote.kline(symbol, period=period, count=1, adjust="none")},
-                            fetched_at=fetched()))
+                        count = market_kline_request_count(market_window) if market_window else 0
+                        call = SourceCall("tencent", "kline", "market", {
+                            "symbol": symbol, "period": "day", "count": count, "adjust": "none",
+                            "window": market_window.label if market_window else "unknown",
+                        })
+                        selected = {}
+                        def invoke(symbol=symbol):
+                            source, selection = _kline_source(symbol)
+                            selected["selection"] = selection
+                            return source
+                        result = execute_source(runtime, call, invoke, fetched_at=fetched())
+                        selection = selected.get("selection")
+                        if selection and selection.status == "partial" and result.status == "success":
+                            result = replace(result, status="partial")
+                        results.append(result)
                     return tuple(results)
 
-                def overview(question, _scope):
-                    weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
+                def overview(_question, _scope):
+                    weekly = market_window is not None and market_window.kind in {"calendar_week", "rolling_trading_days"}
                     results = []
                     for name, arguments in market_recap_tool_calls(weekly=weekly):
                         call = SourceCall("mcp", name, "market", arguments)
-                        results.append(execute_source(runtime, call,
+                        result = execute_source(runtime, call,
                             lambda name=name, arguments=arguments: market_data_mcp.call_tool(
-                                name, arguments, timeout=cfg.mcp_tool_timeout, retry=False), fetched_at=fetched()))
+                                name, arguments, timeout=cfg.mcp_tool_timeout, retry=False), fetched_at=fetched())
+                        if market_window is not None:
+                            result = _recap_coverage_for_window(result, market_window)
+                        results.append(result)
                     return tuple(results)
 
                 def search(question, _scope):
@@ -2484,7 +2704,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             yield _sse("policy_resolved", {"intent": policy.intent, "allowed_tools": list(policy.allowed_tools),
                                              "max_calls": policy.max_calls, "max_rounds": policy.max_rounds})
             # 策略降级说明进入生产事件流：无外部工具或研究任务时用户能知道本次能力的边界。
-            if policy.fallback_message and (not policy.allowed_tools or is_research):
+            if not knowledge_mode and policy.fallback_message and (not policy.allowed_tools or is_research):
                 yield _sse("policy_fallback", {
                     "intent": policy.intent,
                     "message": policy.fallback_message,
@@ -2626,24 +2846,44 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
                     legacy_citations = done_evt.get("citations", []) or []
                     legacy_web_sources = done_evt.get("web_sources", []) or []
                     legacy_tools_used = done_evt.get("tools_used", []) or []
+                    relations = tuple(relation for phrase, relation in (("同比", "yoy"), ("环比", "qoq"))
+                                      if phrase in body.question)
+                    derived_facts = derive_available_facts(
+                        state.facts, relations=relations,
+                        percentage_points="百分点" in body.question,
+                        index_delta=route.intent in {"market_trend", "market_recap"},
+                    )
+                    known_fact_ids = {fact.id for fact in state.facts}
+                    for fact in derived_facts:
+                        if fact.id not in known_fact_ids:
+                            state.facts.append(fact)
+                            known_fact_ids.add(fact.id)
+                            yield _sse("fact", {"fact": fact.to_dict()})
                     state.conflicts = list(detect_conflicts(state.facts))
                     for conflict in state.conflicts:
                         yield _sse("conflict", {"conflict": conflict.to_dict()})
-                    state.verification_report = ClaimVerifier().verify(
-                        answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
-                    )
-                    yield _sse("verification", {"verification": state.verification_report.to_dict()})
-                    if state.verification_report.status == "blocked":
+                    if not knowledge_mode:
+                        state.verification_report = ClaimVerifier().verify(
+                            answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
+                            requested_period=verification_period, window=market_window,
+                            answer_intent=route.intent,
+                        )
+                        yield _sse("verification", {"verification": state.verification_report.to_dict()})
+                    if state.verification_report is not None and state.verification_report.status == "blocked":
                         # 只替换不受支持的数值论断；受支持内容与上下文保留。
-                        answer = ClaimVerifier().degrade_blocked(answer, scope, state.facts)
-                    elif state.verification_report.status == "partial":
+                        answer = ClaimVerifier().degrade_blocked(
+                            answer, scope, state.facts, requested_period=verification_period,
+                            window=market_window, answer_intent=route.intent,
+                        )
+                    elif state.verification_report is not None and state.verification_report.status == "partial":
                         answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
                     status = resolve_answer_status(
                         stopped=False, failed=False, waiting_consent=False,
                         required_missing=state.required_sources_missing,
                         had_source_failure=state.had_external_failure,
                         retrieval_degraded=state.retrieval_degraded,
-                        verification=state.verification_report.status,
+                        verification=(state.verification_report.status if state.verification_report
+                                      else "passed" if knowledge_mode else None),
                     )
                     run = _persist(status, answer)
                     yield _sse("done", {

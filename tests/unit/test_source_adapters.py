@@ -55,3 +55,53 @@ def test_unsupported_text_is_never_promoted_to_data():
     assert result.status == "unavailable"
     assert result.error_code == "unsupported_payload"
     assert result.content == ""
+
+
+def test_market_mcp_coverage_keeps_only_allowlisted_counts_and_windows():
+    from webapp.source_runtime import SourceCall, SourceCoverage
+    from webapp.source_adapters import normalize_source
+
+    call = SourceCall("mcp", "stock_zt_pool", "market", {"pool_type": "涨停", "limit": 50})
+    result = normalize_source(call, {
+        "data": [{"date": "2026-10-05", "symbol": "600001"}],
+        "total_rows": 120,
+        "private_provider_metadata": "must not persist",
+    })
+
+    assert isinstance(result.coverage, SourceCoverage)
+    assert result.coverage.returned_rows == 1
+    assert result.coverage.limit == 50
+    assert result.coverage.total_rows == 120
+    assert result.coverage.query_window is None
+    assert result.coverage.data_window == "2026-10-05"
+    assert "private_provider_metadata" not in str(result.payload)
+    assert "total_rows" not in str(result.payload)
+
+
+def test_market_mcp_coverage_does_not_infer_unknown_totals():
+    from webapp.source_runtime import SourceCall
+    from webapp.source_adapters import normalize_source
+
+    result = normalize_source(
+        SourceCall("mcp", "stock_sector_fund_flow_rank", "market", {"days": "5日", "cate": "行业资金流"}),
+        {"data": [{"date": "2026-10-05", "sector": "电力"}]},
+    )
+
+    assert result.coverage.total_rows is None
+    assert result.coverage.query_window == "5日"
+    assert result.coverage.data_window == "2026-10-05"
+
+
+def test_market_pool_at_limit_does_not_claim_total_completeness():
+    from webapp.source_runtime import SourceCall
+    from webapp.source_adapters import normalize_source
+
+    result = normalize_source(
+        SourceCall("mcp", "stock_zt_pool", "market", {"pool_type": "涨停", "limit": 50}),
+        {"data": [{"symbol": f"600{i:03d}", "date": "2026-10-05"} for i in range(51)]},
+    )
+
+    assert result.coverage.returned_rows == 50
+    assert result.coverage.limit == 50
+    assert result.coverage.total_rows is None
+    assert "已达到返回上限，总量未知" in result.coverage.summary()

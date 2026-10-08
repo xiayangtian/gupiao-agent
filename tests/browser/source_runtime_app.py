@@ -43,7 +43,7 @@ class _FixedPlanner:
     def __init__(self, _json_planner):
         pass
 
-    def plan(self, question, *_args):
+    def plan(self, question, *_args, **_kwargs):
         global CURRENT_SCENARIO
         CURRENT_SCENARIO = ("all_failed" if "全部失败" in question else
                             "web_failed" if "网页失败" in question else "success")

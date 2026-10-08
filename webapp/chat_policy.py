@@ -1,8 +1,9 @@
 """Fail-closed intent routing and external-tool policy for trusted chat M2."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Literal
 
 from financial_report_fetcher.rag.mcp_tools import (
     WEB_SEARCH_TOOL_FAMILY,
@@ -24,6 +25,57 @@ class ToolAvailability:
 
     def permits(self, name: str) -> bool:
         return name in self.names
+
+
+@dataclass(frozen=True)
+class QuestionRoute:
+    intent: Literal["report_fact", "financial_trend", "market_quote", "market_trend", "market_recap", "general_knowledge", "general_web", "clarification"]
+    requires_company: bool
+    requires_time_window: bool
+
+
+class QuestionRouter:
+    """Deterministic question intent routing, separate from tool authorization."""
+
+    _RECAP = ("复盘", "行情回顾", "收盘总结", "大盘总结", "市场回顾")
+    _FINANCIAL = ("营收", "营业收入", "净利润", "净利", "利润", "ROE", "毛利率", "资产负债", "现金流", "财报", "年报", "半年报", "季报")
+    _FINANCIAL_TREND = ("趋势", "同比", "环比", "历年", "多年", "增长率", "变化趋势")
+    _MARKET = ("股价", "股票", "个股", "K线", "涨跌", "行情")
+    _MARKET_TREND = ("走势", "趋势", "近", "最近", "上周", "本周", "历史", "过去", "变化")
+    _CURRENT = ("当前", "现在", "今日", "今天", "最新", "近期", "公告", "新闻", "政策", "最近")
+    _DEFINITION = ("什么是", "如何理解", "怎么理解", "解释", "定义", "含义")
+    _CONCEPTS = ("市盈率", "市净率", "市销率", "毛利率", "净利润", "现金流", "资产负债率", "ROE")
+
+    @classmethod
+    def is_knowledge_question(cls, question: str) -> bool:
+        """Only stand-alone stable concept definitions may skip retrieval and numeric fact checks."""
+        terms = "|".join(re.escape(term) for term in cls._CONCEPTS)
+        starts = "|".join(re.escape(term) for term in cls._DEFINITION)
+        return bool(re.fullmatch(rf"(?:{starts})\s*(?:{terms})\s*[？?。]?", (question or "").strip(), re.IGNORECASE))
+
+    def classify(self, question: str) -> QuestionRoute:
+        text = question or ""
+        if any(word in text for word in self._RECAP) and any(word in text for word in ("A股", "大盘", "市场", "行情", "指数", "复盘")):
+            return QuestionRoute("market_recap", False, True)
+        if any(word in text for word in self._DEFINITION) and any(word in text for word in self._CONCEPTS):
+            if self.is_knowledge_question(text):
+                return QuestionRoute("general_knowledge", False, False)
+            return QuestionRoute("clarification", False, False)
+        market = any(word in text for word in self._MARKET)
+        if market:
+            if any(word in text for word in self._MARKET_TREND):
+                return QuestionRoute("market_trend", True, True)
+            return QuestionRoute("market_quote", True, False)
+        financial = any(word.lower() in text.lower() for word in self._FINANCIAL)
+        if financial and any(word in text for word in self._FINANCIAL_TREND):
+            return QuestionRoute("financial_trend", True, True)
+        if financial:
+            return QuestionRoute("report_fact", True, False)
+        if text.strip() in {"趋势", "分析趋势", "看趋势"} or ("趋势" in text and not market and not financial):
+            return QuestionRoute("clarification", False, False)
+        if any(word in text for word in self._CURRENT):
+            return QuestionRoute("general_web", False, False)
+        return QuestionRoute("general_knowledge", False, False)
 
 
 class IntentRouter:

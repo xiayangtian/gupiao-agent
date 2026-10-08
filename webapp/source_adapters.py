@@ -6,11 +6,11 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
-from webapp.source_runtime import SourceCall, SourceResult
+from webapp.source_runtime import SourceCall, SourceCoverage, SourceResult
 
 MAX_SOURCE_CHARS = 2000
 MAX_ROWS = 50
@@ -114,34 +114,90 @@ def _extract_rows(value: Any) -> tuple[list[dict[str, Any]], str]:
     return normalized, as_of
 
 
+def _request_coverage(call: SourceCall) -> SourceCoverage:
+    arguments = call.arguments
+    limit = arguments.get("limit")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        limit = None
+    query_window = None
+    if call.operation == "stock_sector_fund_flow_rank":
+        raw_window = arguments.get("days")
+        if isinstance(raw_window, str) and len(raw_window) <= 40:
+            query_window = raw_window
+    elif call.operation == "index_prices":
+        raw_window = arguments.get("period")
+        if isinstance(raw_window, str) and len(raw_window) <= 40:
+            query_window = raw_window
+    return SourceCoverage(limit=limit, query_window=query_window)
+
+
+def _response_coverage(call: SourceCall, value: Any, rows: list[dict[str, Any]], base: SourceCoverage) -> SourceCoverage:
+    total = (
+        value.get("total_rows")
+        if call.provider == "mcp" and call.operation in {"stock_zt_pool", "stock_sector_fund_flow_rank"}
+        and isinstance(value, Mapping) else None
+    )
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        total = None
+    dates: set[str] = set()
+    if isinstance(value, Mapping):
+        for key in ("as_of", "date", "trade_date"):
+            raw_date = value.get(key)
+            if isinstance(raw_date, str):
+                try:
+                    dates.add(date.fromisoformat(raw_date[:10]).isoformat())
+                    break
+                except ValueError:
+                    continue
+    for row in rows:
+        for key in ("date", "trade_date", "as_of", "time"):
+            raw_date = row.get(key)
+            if isinstance(raw_date, str):
+                try:
+                    dates.add(date.fromisoformat(raw_date[:10]).isoformat())
+                    break
+                except ValueError:
+                    continue
+    data_window = None
+    if dates:
+        ordered = sorted(dates)
+        data_window = ordered[0] if len(ordered) == 1 else f"{ordered[0]}至{ordered[-1]}"
+    return SourceCoverage(
+        returned_rows=len(rows), limit=base.limit, total_rows=total,
+        query_window=base.query_window, data_window=data_window,
+    )
+
+
 def normalize_source(call: SourceCall, raw: Any, *, fetched_at: str = "") -> SourceResult:
     """Return only bounded structured rows; unsupported text is never declared successful."""
+    base_coverage = _request_coverage(call)
     try:
         value = _parse(raw)
         if isinstance(value, Mapping) and (value.get("error") or value.get("success") is False):
             return SourceResult("", call.provider, call.operation, call.category, "failed",
-                                fetched_at=fetched_at, error_code="provider_error")
+                                fetched_at=fetched_at, error_code="provider_error", coverage=base_coverage)
         rows, as_of = _extract_rows(value)
         if call.provider == "web":
             rows = [row for row in rows if isinstance(row.get("url"), str)
                     and urlparse(row["url"]).scheme in {"http", "https"}]
             if not rows:
                 return SourceResult("", call.provider, call.operation, call.category, "failed",
-                                    fetched_at=fetched_at, error_code="empty_payload")
+                                    fetched_at=fetched_at, error_code="empty_payload", coverage=base_coverage)
+        coverage = _response_coverage(call, value, rows, base_coverage)
         payload = tuple(rows)
         content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:MAX_SOURCE_CHARS]
         status = "success" if as_of else "partial"
         return SourceResult("", call.provider, call.operation, call.category, status,
                             content=content, as_of=as_of, fetched_at=fetched_at,
-                            payload=payload)
+                            payload=payload, coverage=coverage)
     except ValueError as exc:
         raw_text = raw if isinstance(raw, str) else ""
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
         if len(lines) >= 3 and "|" in lines[0] and re.fullmatch(r"\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?", lines[1]):
             return SourceResult("", call.provider, call.operation, call.category, "partial",
                                 content=raw_text[:MAX_SOURCE_CHARS], fetched_at=fetched_at,
-                                error_code="structured_reference_only")
+                                error_code="structured_reference_only", coverage=base_coverage)
         code = str(exc) if str(exc) in {"provider_error", "empty_payload", "unsupported_payload"} else "unsupported_payload"
         state = "failed" if code in {"provider_error", "empty_payload"} else "unavailable"
         return SourceResult("", call.provider, call.operation, call.category, state,
-                            fetched_at=fetched_at, error_code=code)
+                            fetched_at=fetched_at, error_code=code, coverage=base_coverage)

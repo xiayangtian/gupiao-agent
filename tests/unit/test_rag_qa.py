@@ -53,6 +53,25 @@ def test_answer_empty_retrieval_returns_none(tmp_path, fake_embedder):
     assert qa.answer("随便问问") is None
 
 
+def test_empty_company_report_scope_keeps_empty_hard_filter():
+    class RecordingStore:
+        def __init__(self):
+            self.where = None
+
+        def query(self, question, *, top_k, where):
+            self.where = where
+            return []
+
+    store = RecordingStore()
+    ai = FakeAI()
+    qa = RagQA(store, ai, top_k=4)
+    scope = Scope.company_only("600519", "贵州茅台", ())
+
+    assert qa.answer("贵州茅台的财报说了什么", scope=scope) is None
+    assert store.where == {"report_id": {"$in": []}}
+    assert ai.last_messages is None
+
+
 def test_try_answer_report_filters_by_report_id(tmp_path, fake_embedder):
     store = RagStore(str(tmp_path), fake_embedder)
     store.upsert([_chunk("A公司内容", rid="600900:2025-12-31:annual")])
@@ -99,6 +118,38 @@ class FakeAIStream:
             yield {"type": "delta", "text": chunk, "reasoning": ""}
         yield {"type": "done", "answer": self.answer, "reasoning": "",
                "model": "test-model", "usage": {"total_tokens": 10}}
+
+
+def test_knowledge_mode_answers_without_retrieval_or_tools():
+    from webapp.source_runtime import AnswerContext
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("knowledge mode must not retrieve")
+
+    ai = FakeAIStream(deltas=("市盈率",), answer="市盈率衡量价格与盈利的关系。")
+    events = list(RagQA(NoStore(), ai).answer_from_context(
+        "什么是市盈率？", context=AnswerContext(), knowledge_mode=True,
+    ))
+
+    assert events[-1]["type"] == "done"
+    assert events[-1]["citations"] == []
+    assert "未检索" in ai.last_system
+    assert "已查" not in ai.last_system
+    assert ai.last_messages[-1]["content"] == "什么是市盈率？"
+
+
+def test_knowledge_mode_rejects_company_and_current_market_questions():
+    from webapp.source_runtime import AnswerContext
+    ai = FakeAIStream()
+    qa = RagQA(object(), ai)
+
+    company = list(qa.answer_from_context("什么是市盈率？", context=AnswerContext(),
+        knowledge_mode=True, scope=Scope.company_only("601288", "农业银行")))
+    market = list(qa.answer_from_context("今天股价是多少？", context=AnswerContext(), knowledge_mode=True))
+
+    assert company[0]["type"] == market[0]["type"] == "error"
+    assert ai.last_messages is None
 
 
 def test_answer_stream_yields_deltas_and_done_with_citations(tmp_path, fake_embedder):
@@ -734,3 +785,32 @@ def test_rejected_supplement_request_keeps_tool_call_budget_usable(tmp_path, fak
     assert not any(event["type"] == "supplement_request" for event in events)
     assert executed == ["stock_prices"]
     assert events[-1]["type"] == "done"
+
+
+def test_answer_from_context_exposes_source_coverage_and_failed_optional_sources():
+    from webapp.source_runtime import AnswerContext, SourceCoverage, SourceResult
+
+    class CapturingAI:
+        def __init__(self):
+            self.messages = None
+
+        def chat_stream(self, messages, *, system=None, **_kwargs):
+            self.messages = messages
+            yield {"type": "done", "answer": "仅按已返回数据描述。", "model": "fixture", "usage": {}}
+
+    ai = CapturingAI()
+    qa = RagQA(object(), ai)
+    context = AnswerContext(sources=(
+        SourceResult("s1", "mcp", "stock_zt_pool", "market", "partial", content='[{"date":"2026-10-05"}]',
+                     as_of="2026-10-05", coverage=SourceCoverage(
+                         returned_rows=50, limit=50, query_window=None, data_window="2026-10-05",
+                     )),
+        SourceResult("s2", "mcp", "fund_flow", "market", "failed", error_code="timeout"),
+    ))
+
+    list(qa.answer_from_context("上周A股复盘", context=context))
+
+    prompt = "\n".join(message["content"] for message in ai.messages)
+    assert "已达到返回上限，总量未知" in prompt
+    assert "状态=failed" in prompt
+    assert "错误类别=timeout" in prompt

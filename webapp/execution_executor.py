@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from webapp.chat_models import Scope
-from webapp.source_runtime import AnswerContext, SourceResult
+from webapp.source_runtime import AnswerContext, SourceCall, SourceResult
+from webapp.source_adapters import normalize_source
+from webapp.chat_time import MarketWindow, select_market_bars
 from financial_report_fetcher.rag.mcp_tools import market_recap_tool_calls
 from webapp.execution_plan import ExecutionPlan
 
@@ -32,49 +34,84 @@ class ExecutionResult:
     context: AnswerContext = AnswerContext()
 
 
-def company_kline_handler(tencent_quote: Any) -> Callable[[str, Scope], dict[str, Any]]:
-    """获取已冻结公司 Scope 的近期日/周 K 线，绝不接受模型股票代码。"""
-    def handler(question: str, scope: Scope) -> dict[str, Any]:
+def market_kline_request_count(window: MarketWindow) -> int:
+    if window.kind == "rolling_trading_days":
+        return min(800, max(10, (window.trading_days or 5) * 2))
+    if window.kind == "calendar_week":
+        return 15
+    if window.start_date is None or window.end_date is None:
+        return 20
+    return min(800, max(10, (window.end_date - window.start_date).days * 2 + 2))
+
+
+def _select_kline(tencent_quote: Any, symbol: str, window: MarketWindow) -> dict[str, Any]:
+    rows = tencent_quote.kline(symbol, period="day", count=market_kline_request_count(window), adjust="none")
+    selection = select_market_bars(rows or (), window)
+    if not selection.bars:
+        raise RuntimeError("腾讯行情未返回请求窗口内的日线")
+    return {
+        "symbol": symbol, "period": "day", "window": window.label,
+        "bars": list(selection.bars), "covered_dates": list(selection.covered_dates),
+        "status": selection.status,
+    }
+
+
+def company_kline_handler(
+    tencent_quote: Any, window: MarketWindow,
+) -> Callable[[str, Scope], dict[str, Any]]:
+    """获取已冻结公司 Scope 的日线并按服务端窗口筛选，不接受自由文本改写窗口。"""
+    def handler(_question: str, scope: Scope) -> dict[str, Any]:
         if not scope.companies:
             raise RuntimeError("个股走势缺少公司范围")
-        weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
-        period, count = ("week", 5) if weekly else ("day", 10)
-        rows = tencent_quote.kline(scope.companies[0].code, period=period, count=count, adjust="none")
-        if not rows:
-            raise RuntimeError("腾讯行情未返回个股 K 线")
-        return {"provider": "tencent", "symbol": scope.companies[0].code, "period": period, "bars": rows}
+        return {"provider": "tencent", **_select_kline(tencent_quote, scope.companies[0].code, window)}
     return handler
 
 
-def a_share_indices_handler(tencent_quote: Any) -> Callable[[str, Scope], dict[str, Any]]:
-    """从腾讯行情返回 A 股主要指数的日/周窗口，不补造缺失市场数据。"""
-    def handler(question: str, _scope: Scope) -> dict[str, Any]:
-        weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
-        period, count = ("week", 1) if weekly else ("day", 1)
-        rows = {}
+def a_share_indices_handler(
+    tencent_quote: Any, window: MarketWindow,
+) -> Callable[[str, Scope], dict[str, Any]]:
+    """取四大指数的实际日线并统一筛选同一服务端窗口，保留单项失败。"""
+    def handler(_question: str, _scope: Scope) -> dict[str, Any]:
+        indices: dict[str, dict[str, Any]] = {}
         for symbol in _A_SHARE_INDICES:
-            candles = tencent_quote.kline(symbol, period=period, count=count, adjust="none")
-            if candles:
-                rows[symbol] = candles[-1]
-        if not rows:
+            try:
+                indices[symbol] = _select_kline(tencent_quote, symbol, window)
+            except Exception:
+                indices[symbol] = {"symbol": symbol, "status": "unavailable", "bars": [], "covered_dates": []}
+        if not any(item.get("bars") for item in indices.values()):
             raise RuntimeError("腾讯行情未返回 A 股指数数据")
-        return {"provider": "tencent", "window": "week" if weekly else "day", "indices": rows}
+        return {"provider": "tencent", "window": window.label, "indices": indices}
     return handler
 
 
-def market_overview_handler(mcp_client: Any, *, timeout: int) -> Callable[[str, Scope], dict[str, Any]]:
-    """聚合固定 A 股 MCP 调用；失败产物保留，不能由模型补造市场数据。"""
-    def handler(question: str, _scope: Scope) -> dict[str, Any]:
-        weekly = any(word in question for word in ("上周", "本周", "周度", "一周"))
+def market_overview_handler(
+    mcp_client: Any, *, timeout: int, window: MarketWindow,
+) -> Callable[[str, Scope], dict[str, Any]]:
+    """聚合固定 MCP 调用并标记与用户窗口的匹配情况。"""
+    def handler(_question: str, _scope: Scope) -> dict[str, Any]:
+        weekly = window.kind in {"calendar_week", "rolling_trading_days"}
         artifacts = []
         for name, arguments in market_recap_tool_calls(weekly=weekly):
+            query_window = arguments.get("days")
+            matches = (
+                (window.kind == "rolling_trading_days" and query_window == f"{window.trading_days}日")
+                or (window.label == "今日" and query_window == "今日")
+            )
             try:
-                artifacts.append({"tool": name, "value": mcp_client.call_tool(name, arguments, timeout=timeout)})
+                raw = mcp_client.call_tool(name, arguments, timeout=timeout)
+                source = normalize_source(SourceCall("mcp", name, "market", arguments), raw)
+                artifacts.append({
+                    "tool": name, "query_window": query_window,
+                    "window_match": bool(matches), "status": source.status,
+                    "content": source.content, "coverage": source.coverage.summary(),
+                })
             except Exception:
-                artifacts.append({"tool": name, "error": "来源调用失败"})
-        if not any("value" in artifact for artifact in artifacts):
+                artifacts.append({"tool": name, "query_window": query_window,
+                                  "window_match": bool(matches), "status": "failed",
+                                  "error": "来源调用失败"})
+        if not any(artifact.get("status") in {"success", "partial"} for artifact in artifacts):
             raise RuntimeError("市场概览 MCP 均不可用")
-        return {"provider": "stock-data-mcp", "window": "week" if weekly else "day", "artifacts": artifacts}
+        return {"provider": "stock-data-mcp", "window": window.label, "artifacts": artifacts}
     return handler
 
 
@@ -129,9 +166,9 @@ class ExecutionExecutor:
                               "partial" if source_failed else "completed")
                 if source_failed:
                     had_failure = True
-                    required_missing = required_missing or (step.required and not all(
-                        item.status == "success" for item in source_values
-                    ))
+                    # Optional holes remain visible, but a required aggregate can still
+                    # answer with explicit limits when at least one source is usable.
+                    required_missing = required_missing or (step.required and not has_usable_source)
                 rows.append(ExecutionStepResult(step.id, step.kind, row_status, value))
             except Exception:
                 rows.append(ExecutionStepResult(step.id, step.kind, "failed", error="来源调用失败"))

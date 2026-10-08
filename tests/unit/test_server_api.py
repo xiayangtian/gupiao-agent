@@ -258,10 +258,17 @@ class FakeIndex:
         return [{"code": "600900", "name": "长江电力"}] if q == "长江" else []
 
     def company_name(self, code):
-        return "长江电力" if code == "600900" else None
+        return {"600900": "长江电力", "601288": "农业银行"}.get(code)
 
     def is_valid_code(self, code):
-        return code == "600900"
+        return code in {"600900", "601288"}
+
+    def match_company_name(self, text):
+        if "长江电力" in text:
+            return {"code": "600900", "name": "长江电力"}
+        if "农业银行" in text:
+            return {"code": "601288", "name": "农业银行"}
+        return None
 
     @property
     def is_ready(self):
@@ -328,6 +335,107 @@ def env(monkeypatch, tmp_path):
 def client(env):
     with TestClient(server.app) as c:
         yield c
+
+
+def test_chat_stream_clarifies_unresolved_company_before_planning_or_sources(client, env, monkeypatch):
+    planner_calls = []
+    source_calls = []
+
+    class ForbiddenPlanner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def plan(self, *args, **kwargs):
+            planner_calls.append((args, kwargs))
+            raise AssertionError("planner must not run before company clarification")
+
+    monkeypatch.setattr(server, "ExecutionPlanner", ForbiddenPlanner)
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *args, **kwargs: source_calls.append("tools"))
+    monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: source_calls.append("qa") or object())
+
+    response = client.post("/api/chat/stream", json={
+        "question": "未知公司近五交易日股价走势", "use_mcp": True,
+    })
+    events = _read_sse(response)
+
+    assert response.status_code == 200
+    assert "clarification" in [name for name, _ in events]
+    assert "公司" in _event(events, "clarification")["message"]
+    assert planner_calls == []
+    assert source_calls == []
+
+
+def test_chat_stream_clarifies_missing_window_before_planning_or_sources(client, env, monkeypatch):
+    planner_calls = []
+    source_calls = []
+
+    class ForbiddenPlanner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def plan(self, *args, **kwargs):
+            planner_calls.append((args, kwargs))
+            raise AssertionError("planner must not run before window clarification")
+
+    monkeypatch.setattr(server, "ExecutionPlanner", ForbiddenPlanner)
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *args, **kwargs: source_calls.append("tools"))
+    monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: source_calls.append("qa") or object())
+
+    response = client.post("/api/chat/stream", json={
+        "question": "长江电力股价走势", "use_mcp": True,
+    })
+    events = _read_sse(response)
+
+    assert response.status_code == 200
+    assert "clarification" in [name for name, _ in events]
+    assert "时间" in _event(events, "clarification")["message"]
+    assert planner_calls == []
+    assert source_calls == []
+
+
+def test_chat_scope_preserves_known_company_when_no_reports_are_indexed(env, monkeypatch):
+    class EmptyRagStore:
+        def list_report_ids(self):
+            return []
+
+    monkeypatch.setattr(server, "rag_store", EmptyRagStore())
+    resolution = server._resolve_scope(
+        server.StreamChatRequest(question="600900最新股价"),
+        requires_company=True,
+    )
+
+    assert resolution.scope is not None
+    assert resolution.scope.companies[0].code == "600900"
+    assert resolution.scope.report_ids == ()
+
+
+def test_recap_coverage_marks_fixed_provider_window_mismatch_and_single_day_pool():
+    from datetime import date
+
+    from webapp.chat_time import MarketWindow
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    window = MarketWindow("上周", "calendar_week", date(2026, 9, 28), date(2026, 10, 4), None)
+    fund = SourceResult("f", "mcp", "stock_sector_fund_flow_rank", "market", "partial",
+                        coverage=SourceCoverage(query_window="5日", data_window="2026-10-05"))
+    pool = SourceResult("p", "mcp", "stock_zt_pool", "market", "partial",
+                        coverage=SourceCoverage(returned_rows=50, limit=50, data_window="2026-10-02"))
+    outside = SourceResult("p2", "mcp", "stock_zt_pool", "market", "partial",
+                           coverage=SourceCoverage(returned_rows=5, limit=50, data_window="2026-10-05"))
+
+    fund_coverage = server._recap_coverage_for_window(fund, window).coverage
+    pool_coverage = server._recap_coverage_for_window(pool, window).coverage
+    outside_coverage = server._recap_coverage_for_window(outside, window).coverage
+
+    assert "与请求窗口上周不匹配" in fund_coverage.query_window
+    assert "仅2026-10-02单日补充" in pool_coverage.query_window
+    assert "与请求窗口上周不匹配" in outside_coverage.query_window
+
+    today = MarketWindow("今日", "explicit", date(2026, 10, 5), date(2026, 10, 5), None)
+    stale_fund = SourceResult("f2", "mcp", "stock_sector_fund_flow_rank", "market", "partial",
+                              coverage=SourceCoverage(query_window="今日", data_window="2026-10-04"))
+    stale_coverage = server._recap_coverage_for_window(stale_fund, today).coverage
+    assert "与请求窗口今日不匹配" in stale_coverage.query_window
 
 
 def test_task_manager_startup_waits_for_inflight_shutdown(monkeypatch):
@@ -1462,7 +1570,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "chat_store", store)
 
         class BrokenResolver:
-            def resolve(self, *args, **kwargs):
+            def resolve_for_chat(self, *args, **kwargs):
                 raise RuntimeError(secret_question)
 
         class FakeRagQA:
@@ -1502,7 +1610,7 @@ class TestChatSessionsApi:
         class FixedPlanner:
             def __init__(self, _planner):
                 pass
-            def plan(self, *_args):
+            def plan(self, *_args, **_kwargs):
                 plan = ExecutionPlan.from_dict({"objective": "复盘", "source_mode": "market_recap",
                     "steps": [{"id": "indices", "kind": "market_indices", "required": True},
                               {"id": "answer", "kind": "answer", "depends_on": ["indices"]}],
@@ -1519,15 +1627,90 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
         monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
 
-        response = client.post("/api/chat/stream", json={"question": "今日复盘", "use_mcp": False,
+        response = client.post("/api/chat/stream", json={"question": "2026-09-24复盘", "use_mcp": False,
                                                          "scope_mode": "whole_corpus"})
         assert response.status_code == 200
         events = _read_sse(response)
         run = _event(events, "done")["run"]
         assert len(calls) == 4
+        assert all(period == "day" and count >= 5 for _, period, count, _ in calls)
         assert len(run["tool_artifacts"]) == 4
         assert all(item["as_of"] == "2026-09-24" for item in run["tool_artifacts"])
+        assert all("实际数据期 2026-09-24" in item["result_summary"] for item in run["tool_artifacts"])
         assert run["source_summary"]["market_data"] == "已使用"
+
+    def test_recap_asgi_executes_four_tencent_and_three_fixed_mcp_calls_with_one_window(
+        self, client, env, monkeypatch, tmp_path,
+    ):
+        from webapp.chat_store import ChatStore
+        from webapp.execution_plan import ExecutionPlan
+        from webapp.execution_planner import PlanningResult
+        from financial_report_fetcher.rag.qa import RagQA
+
+        monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "recap-sessions.json")))
+        tencent_calls = []
+        mcp_calls = []
+        def fake_kline(symbol, *, period, count, adjust):
+            tencent_calls.append((symbol, period, count, adjust))
+            return [{"date": "2026-09-24", "close": 10.0}]
+        def fake_mcp(name, arguments, *, timeout, retry):
+            mcp_calls.append((name, dict(arguments), timeout, retry))
+            return {"as_of": "2026-09-24", "data": [{"date": "2026-09-24", "symbol": "600001"}], "total_rows": 1}
+        monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+        monkeypatch.setattr(server.market_data_mcp, "call_tool", fake_mcp)
+        monkeypatch.setattr(server, "mcp_breaker", type("Breaker", (), {"allow": lambda self: True})())
+        monkeypatch.setattr(server, "_mcp_tool_defs_cache", [
+            {"function": {"name": "stock_zt_pool"}},
+            {"function": {"name": "stock_sector_fund_flow_rank"}},
+        ])
+        monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: [
+            {"type": "function", "function": {"name": "stock_zt_pool"}},
+            {"type": "function", "function": {"name": "stock_sector_fund_flow_rank"}},
+        ])
+        monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: lambda *_a: "")
+        runtimes = []
+        original_runtime = server._source_runtime_for_run
+        def capture_runtime(*args, **kwargs):
+            runtime = original_runtime(*args, **kwargs)
+            runtimes.append(runtime)
+            return runtime
+        monkeypatch.setattr(server, "_source_runtime_for_run", capture_runtime)
+
+        class FixedPlanner:
+            def __init__(self, _planner):
+                pass
+            def plan(self, *_args, **_kwargs):
+                plan = ExecutionPlan.from_dict({"objective": "2026-09-24 A股复盘", "source_mode": "market_recap",
+                    "steps": [{"id": "indices", "kind": "market_indices"},
+                              {"id": "overview", "kind": "market_overview"},
+                              {"id": "answer", "kind": "answer", "depends_on": ["indices", "overview"]}],
+                    "acceptance": ["披露实际数据覆盖"]})
+                return PlanningResult("validated", plan)
+
+        class AnswerAI:
+            def chat_stream(self, **_kwargs):
+                yield {"type": "done", "answer": "仅依据请求窗口内的实际返回数据。", "model": "fixture", "usage": {}}
+
+        class NoStore:
+            def query(self, *_args, **_kwargs):
+                raise AssertionError("recap plan must not retrieve")
+        monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+        monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+
+        response = client.post("/api/chat/stream", json={
+            "question": "2026-09-24 A股复盘", "use_mcp": True, "scope_mode": "whole_corpus",
+        })
+        events = _read_sse(response)
+        run = _event(events, "done")["run"]
+
+        assert len(tencent_calls) == 4 and all(item[1] == "day" for item in tencent_calls)
+        assert [call[0] for call in mcp_calls] == [
+            "stock_zt_pool", "stock_zt_pool", "stock_sector_fund_flow_rank",
+        ]
+        assert len(run["tool_artifacts"]) == 7
+        assert all(item["as_of"] == "2026-09-24" for item in run["tool_artifacts"])
+        assert all("实际数据期 2026-09-24" in item["result_summary"] for item in run["tool_artifacts"])
+        assert runtimes[0].budget.snapshot() == {"total": 7, "market": 7, "web": 0}
 
     def test_chat_stream_sse_and_session_persist(self, client, env, monkeypatch, tmp_path, caplog):
         """流式端点：SSE 事件含 session/delta/done；会话消息持久化"""
@@ -1546,7 +1729,7 @@ class TestChatSessionsApi:
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
         caplog.set_level(logging.INFO, logger=server.__name__)
-        r = client.post("/api/chat/stream", json={"question": "营收如何？"})
+        r = client.post("/api/chat/stream", json={"question": "长江电力营收如何？"})
         assert r.status_code == 200
         body = r.text
         assert "event: session" in body
@@ -1563,13 +1746,14 @@ class TestChatSessionsApi:
         sessions = store.list_sessions()
         assert len(sessions) == 1
         detail = store.get_session(sessions[0]["id"])
-        assert detail["messages"][0] == {"role": "user", "content": "营收如何？"}
+        assert detail["messages"][0] == {"role": "user", "content": "长江电力营收如何？"}
         assert detail["messages"][1]["role"] == "assistant"
         assert detail["messages"][1]["content"] == "营收增长"
         # 新 run 必须真实证据化，不再是旧消息迁移的 legacy_evidence_unavailable
         assert detail["messages"][1]["run"]["legacy_evidence_unavailable"] is False
         assert detail["messages"][1]["run"]["status"] == "completed"
-        assert detail["messages"][1]["run"]["scope"]["mode"] == "whole_corpus"
+        assert detail["messages"][1]["run"]["scope"]["mode"] == "company_only"
+        assert detail["messages"][1]["run"]["scope"]["companies"][0]["code"] == "600900"
         assert detail["messages"][1]["run"]["artifacts"] == []
 
     def test_chat_stream_failure_logs_run_id_without_question_or_traceback(self, client, env, monkeypatch, tmp_path, caplog):
@@ -1791,12 +1975,12 @@ class TestChatStreamPartial:
                 yield {"type": "delta", "text": "部分回答", "reasoning": ""}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
-        r = client.post("/api/chat/stream", json={"question": "营收如何？"})
+        r = client.post("/api/chat/stream", json={"question": "长江电力营收如何？"})
         assert r.status_code == 200
         assert "部分回答" in r.text
         sid = store.list_sessions()[0]["id"]
         detail = store.get_session(sid)
-        assert [m["content"] for m in detail["messages"]] == ["营收如何？", "部分回答"]
+        assert [m["content"] for m in detail["messages"]] == ["长江电力营收如何？", "部分回答"]
         assert detail["messages"][1]["run"]["status"] == "stopped"
 
 
@@ -1834,7 +2018,7 @@ class TestChatStreamRunPersistence:
         store = ChatStore(str(tmp_path / "sessions.json"))
         monkeypatch.setattr(server, "chat_store", store)
         events = _disconnect_after_first_delta(
-            client, monkeypatch, {"question": "营收如何？"}, ["部分回答"],
+            client, monkeypatch, {"question": "长江电力营收如何？"}, ["部分回答"],
         )
         sid = _event(events, "session")["session_id"]
         run = client.get(f"/api/chat/sessions/{sid}").json()["messages"][1]["run"]
@@ -1900,7 +2084,7 @@ class TestMcpChat:
                        "usage": {}, "tools_used": ["get_financial_metrics"]}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
-        r = client.post("/api/chat/stream", json={"question": "净利如何？"})
+        r = client.post("/api/chat/stream", json={"question": "600900净利如何？"})
         body = r.text
         assert "event: tool_call" in body
         assert "get_financial_metrics" in body
@@ -2481,7 +2665,7 @@ class TestFocusReport:
                        "model": "m", "usage": {}, "tools_used": []}
 
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
-        r = client.post("/api/chat/stream", json={"question": "营收如何？"})
+        r = client.post("/api/chat/stream", json={"question": "长江电力营收如何？"})
         assert r.status_code == 200
         assert captured["priority"] is None
 
@@ -3090,17 +3274,19 @@ class TestChatSupplementApi:
         assert len(supplement_env["downloader"].calls) == 5
         assert len(supplement_env["rag"].calls[-1]["scope"].report_ids) == 6
 
-    def test_whole_corpus_proposal_is_rejected_with_out_of_scope_text(
+    def test_unresolved_financial_scope_is_clarified_without_source_calls(
         self, client, supplement_env,
     ):
-        """范围外的泛问题不提供自动补库，且说明真实原因是问题不在公司范围内。"""
+        """未给公司身份的财务问句先澄清，不访问来源或触发补报。"""
         events = _read_sse(client.post("/api/chat/stream", json={"question": "经营现金流怎么看？"}))
 
         names = [name for name, _ in events]
         assert "supplement_needed" not in names
+        assert "clarification" in names
         done = _event(events, "done")
-        assert done["answer"] == server._SUPPLEMENT_OUT_OF_SCOPE_TEXT
-        assert done["run"]["status"] == "partial"
+        assert done["clarification"] is True
+        assert "明确公司名称" in done["answer"]
+        assert done["run"] is None
         assert supplement_env["downloader"].calls == []
 
     def test_supplement_request_without_candidates_answers_with_gap_note(
@@ -3195,6 +3381,51 @@ class TestChatSupplementApi:
         assert captured["company_code_resolver"] is server._resolve_symbol_code
 
 
+def test_general_knowledge_skips_planner_and_sources_and_persists_unretrieved_label(client, env, monkeypatch):
+    from financial_report_fetcher.rag.qa import RagQA
+
+    calls = []
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("knowledge path must not retrieve")
+    class AnswerAI:
+        def chat_stream(self, **kwargs):
+            calls.append(kwargs)
+            yield {"type": "done", "answer": "市盈率是价格与每股收益的比值。", "model": "fixture", "usage": {}}
+    class NoPlanner:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("knowledge path must not plan with model")
+    monkeypatch.setattr(server, "ExecutionPlanner", NoPlanner)
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+    monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not build tools")))
+
+    events = _read_sse(client.post("/api/chat/stream", json={"question": "什么是市盈率？", "scope_mode": "whole_corpus"}))
+    run = _event(events, "done")["run"]
+    assert run["knowledge_basis"] == "model_knowledge_unretrieved"
+    assert run["facts"] == run["artifacts"] == run["tool_artifacts"] == []
+    assert run["execution_plan"]["source_mode"] == "general_knowledge"
+    assert len(calls) == 1 and calls[0].get("tools") is None
+
+
+def test_current_policy_without_authorized_web_does_not_claim_latest_knowledge(client, env, monkeypatch):
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: [])
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "当前政策是什么？", "use_mcp": False,
+    }))
+    assert "无法核实" in _event(events, "clarification")["message"]
+    assert not any(name == "execution_plan" for name, _ in events)
+
+
+def test_company_specific_definition_does_not_use_unretrieved_knowledge(client, env, monkeypatch):
+    monkeypatch.setattr(server, "rag_qa", object())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "什么是市盈率？",
+        "focus_report": {"code": "601288", "period": "2026-06-30"},
+    }))
+    assert _event(events, "clarification")["message"]
+    assert not any(name == "execution_plan" for name, _ in events)
+
+
 def test_m2_raw_tool_json_does_not_bypass_fact_normalization(client, env, monkeypatch):
     class RawToolRag:
         def answer_stream(self, question, **kwargs):
@@ -3216,6 +3447,32 @@ def test_m2_raw_tool_json_does_not_bypass_fact_normalization(client, env, monkey
     assert run["facts"] == []
 
 
+def test_pdf_citations_are_projected_to_literal_scoped_facts_before_verification(monkeypatch):
+    from webapp.chat_models import EvidenceArtifact, Scope
+
+    report_id = "601288:2026-06-30:semi_annual"
+    artifact = EvidenceArtifact.pdf(report_id, "report.pdf", 40, "营业收入为 100 亿元")
+    scope = Scope.company_only("601288", "农业银行", [report_id])
+
+    class FakeNormalizer:
+        def normalize_rag_citations(self, *_args, **_kwargs):
+            return (artifact,)
+
+        def normalize_web_sources(self, *_args, **_kwargs):
+            return ()
+
+    state = server._RagRunState(scope=scope)
+    frames = server._relay_rag_event({
+        "type": "done", "answer": "营业收入为 100 亿元", "citations": [],
+        "retrieval_report_ids": [], "retrieval_degraded": False,
+    }, state, FakeNormalizer())
+
+    assert len(state.facts) == 1
+    assert state.facts[0].source_category == "local_pdf"
+    assert state.facts[0].value == 100
+    assert any(frame.startswith("event: fact") for frame in frames)
+
+
 def test_m2_policy_is_emitted_and_unsupported_numeric_is_degraded(client, env, monkeypatch):
     class PolicyRag:
         def answer_stream(self, question, **kwargs):
@@ -3232,8 +3489,8 @@ def test_m2_policy_is_emitted_and_unsupported_numeric_is_degraded(client, env, m
     assert "未找到可核验" in _event(events, "done")["run"]["content"]
 
 
-def test_m2_blocked_run_replaces_only_the_unsupported_claims(client, env, monkeypatch):
-    """blocked 只替换不受支持的确定性论断，受支持内容必须保留。"""
+def test_m2_mcp_financial_reference_cannot_support_report_fact_claims(client, env, monkeypatch):
+    """财务 MCP 参考值不能替代 PDF 对半年报事实的核验。"""
     class MixedClaimRag:
         def answer_stream(self, question, **kwargs):
             yield {"type": "tool_call", "name": "get_financial_metrics", "arguments": {"symbol": "601288"}}
@@ -3256,9 +3513,9 @@ def test_m2_blocked_run_replaces_only_the_unsupported_claims(client, env, monkey
 
     run = _event(events, "done")["run"]
     assert run["verification_report"]["status"] == "blocked"
-    assert "营业收入为 100 亿元" in run["content"]
+    assert "100 亿元" not in run["content"]
     assert "621" not in run["content"]
-    assert "未找到可核验的披露" in run["content"]
+    assert run["content"].count("未找到可核验的披露") == 1
 
 
 def test_research_task_uses_policy_gated_rag_evidence_and_public_step_events(client, env):

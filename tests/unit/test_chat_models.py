@@ -20,7 +20,16 @@ _ABSOLUTE_TEST_PDF_PATH = "/" + "Users/x/reports/a.pdf"
 _ABSOLUTE_TEST_REPORT_PATH = "/" + "Users/x/reports/农业银行_601288_年报_2024.pdf"
 
 
-def test_scope_company_only_requires_one_company_and_report_ids():
+def test_scope_company_only_allows_known_company_with_no_local_reports():
+    scope = Scope.company_only("600519", "贵州茅台")
+
+    assert scope.mode == "company_only"
+    assert scope.companies[0].code == "600519"
+    assert scope.report_ids == ()
+    assert Scope.from_dict(scope.to_dict()) == scope
+
+
+def test_scope_company_only_still_requires_exactly_one_company():
     with pytest.raises(ValueError, match="company_only"):
         Scope(mode="company_only", companies=(), report_ids=())
 
@@ -323,3 +332,43 @@ def test_all_contracts_are_json_round_trippable_and_frozen():
     assert CompanyRef.from_dict(CompanyRef("601288", "农业银行").to_dict()) == CompanyRef("601288", "农业银行")
     with pytest.raises(FrozenInstanceError):
         fact.metric = "profit"
+
+
+def test_knowledge_basis_round_trips_without_marking_legacy_runs_as_sourced():
+    legacy = AnswerRun.from_dict({"content": "旧回答", "status": "completed"})
+    assert legacy.knowledge_basis == ""
+    run = AnswerRun(content="市盈率是估值指标。", status="completed",
+                    knowledge_basis="model_knowledge_unretrieved")
+    assert AnswerRun.from_dict(run.to_dict()) == run
+    with pytest.raises(ValueError, match="knowledge_basis"):
+        AnswerRun(content="x", status="completed", knowledge_basis="untrusted")
+
+
+def test_legacy_fact_defaults_to_unknown_source_and_round_trips_new_lineage_fields():
+    payload = {
+        "metric": "revenue", "value": 100, "unit": "亿元", "period": "2025-12-31",
+        "period_kind": "annual", "entity_scope": "consolidated", "company_code": "601288",
+        "source_type": "pdf", "evidence_ids": ["r#p1"], "verification": "verified",
+    }
+
+    fact = Fact.from_dict(payload)
+
+    assert fact.source_category == "unknown"
+    assert fact.derived_from_ids == ()
+    assert fact.formula == ""
+    assert Fact.from_dict(fact.to_dict()) == fact
+
+
+def test_derived_fact_requires_multiple_inputs_and_formula_and_changes_identity():
+    fields = dict(metric="growth", value=25, unit="百分比", period="2025-12-31",
+                  period_kind="annual", entity_scope="consolidated", company_code="601288",
+                  source_type="derived", evidence_ids=("r#p1", "r#p2"),
+                  verification="verified", source_category="local_pdf")
+    first = Fact(**fields, derived_from_ids=("fact_base", "fact_current"), formula="growth_v1")
+    different_formula = Fact(**fields, derived_from_ids=("fact_base", "fact_current"), formula="growth_v2")
+
+    assert first.id != different_formula.id
+    with pytest.raises(ValueError, match="derived"):
+        Fact(**fields, derived_from_ids=("fact_only",), formula="growth_v1")
+    with pytest.raises(ValueError, match="formula"):
+        Fact(**fields, derived_from_ids=("fact_base", "fact_current"))
