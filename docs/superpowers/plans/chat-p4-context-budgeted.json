@@ -1,9 +1,7 @@
 {
   "cases": [
     {
-      "blocking_codes": [
-        "missing_claim"
-      ],
+      "blocking_codes": [],
       "call_limits": {
         "model": 2,
         "retrieval": 1
@@ -14,23 +12,22 @@
       },
       "case_id": "report-number-after-300",
       "category": "report",
-      "citation_support": 0.0,
+      "citation_support": 1.0,
       "citation_support_expected": 1,
-      "citation_support_found": 0,
+      "citation_support_found": 1,
       "cost": "unknown",
       "expected_status": "completed",
       "prompt_characters": 1153,
       "prompt_measure": "character_estimate",
       "quality_codes": [
-        "status_mismatch",
         "usage_unknown"
       ],
       "retrieval_diagnostics": {
-        "601288:2026-06-30:semi_annual#p40": "window_clipped"
+        "601288:2026-06-30:semi_annual#p40": "supported"
       },
       "review_items": [],
-      "status": "partial",
-      "terminal_matches": false,
+      "status": "completed",
+      "terminal_matches": true,
       "usage_reported": false
     },
     {
@@ -162,18 +159,17 @@
       "citation_support_found": 0,
       "cost": "unknown",
       "expected_status": "completed",
-      "prompt_characters": 2392,
+      "prompt_characters": 2399,
       "prompt_measure": "character_estimate",
       "quality_codes": [
-        "status_mismatch",
         "usage_unknown"
       ],
       "retrieval_diagnostics": {},
       "review_items": [
         "从历史回答推导未确认期间"
       ],
-      "status": "partial",
-      "terminal_matches": false,
+      "status": "completed",
+      "terminal_matches": true,
       "usage_reported": false
     },
     {
@@ -237,9 +233,7 @@
       "usage_reported": false
     },
     {
-      "blocking_codes": [
-        "missing_claim"
-      ],
+      "blocking_codes": [],
       "call_limits": {
         "model": 4,
         "retrieval": 2
@@ -250,54 +244,51 @@
       },
       "case_id": "context-budget-long-history",
       "category": "followup",
-      "citation_support": 0.0,
+      "citation_support": 1.0,
       "citation_support_expected": 1,
-      "citation_support_found": 0,
+      "citation_support_found": 1,
       "cost": "unknown",
       "expected_status": "completed",
-      "prompt_characters": 15895,
+      "prompt_characters": 15877,
       "prompt_measure": "character_estimate",
       "quality_codes": [
-        "status_mismatch",
         "usage_unknown"
       ],
       "retrieval_diagnostics": {
-        "601288:2026-06-30:semi_annual#p40": "window_clipped"
+        "601288:2026-06-30:semi_annual#p40": "supported"
       },
       "review_items": [
         "旧历史消息扩大公司或期间范围"
       ],
-      "status": "partial",
-      "terminal_matches": false,
+      "status": "completed",
+      "terminal_matches": true,
       "usage_reported": false
     }
   ],
   "clock": "2026-10-08T15:00:00+08:00",
   "code_revision": "6900661",
   "context_budget": "enabled",
-  "context_window_strategy": "legacy",
+  "context_window_strategy": "relevance",
   "corpus_version": "chat-eval-fixture-v3",
-  "generated_at": "2026-10-09T11:52:49+0800",
+  "generated_at": "2026-10-09T11:52:52+0800",
   "harness_version": "chat-runtime-offline-v1",
   "runs": [
     {
       "answer_present": true,
-      "blocking_codes": [
-        "missing_claim"
-      ],
+      "blocking_codes": [],
       "calls": {
         "model": 2,
         "retrieval": 1
       },
       "category": "report",
       "citation_support_expected": 1,
-      "citation_support_found": 0,
-      "event_count": 13,
+      "citation_support_found": 1,
+      "event_count": 14,
       "expected_status": "completed",
       "id": "report-number-after-300",
-      "status": "partial",
-      "status_matches_expectation": false,
-      "total_seconds": 0.0089,
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0106,
       "usage_reported": false
     },
     {
@@ -333,7 +324,7 @@
       "id": "market-recap-window",
       "status": "completed",
       "status_matches_expectation": true,
-      "total_seconds": 0.0047,
+      "total_seconds": 0.0049,
       "usage_reported": false
     },
     {
@@ -350,7 +341,7 @@
       "id": "general-knowledge",
       "status": "completed",
       "status_matches_expectation": true,
-      "total_seconds": 0.0036,
+      "total_seconds": 0.0041,
       "usage_reported": false
     },
     {
@@ -368,7 +359,7 @@
       "id": "explicit-research",
       "status": "completed",
       "status_matches_expectation": true,
-      "total_seconds": 0.0042,
+      "total_seconds": 0.0057,
       "usage_reported": false
     },
     {
@@ -381,12 +372,12 @@
       "category": "followup",
       "citation_support_expected": 0,
       "citation_support_found": 0,
-      "event_count": 26,
+      "event_count": 28,
       "expected_status": "completed",
       "id": "followup-scope",
-      "status": "partial",
-      "status_matches_expectation": false,
-      "total_seconds": 0.008,
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0108,
       "usage_reported": false
     },
     {
@@ -422,38 +413,36 @@
       "id": "research-recovery",
       "status": "completed",
       "status_matches_expectation": true,
-      "total_seconds": 0.0041,
+      "total_seconds": 0.0052,
       "usage_reported": false
     },
     {
       "answer_present": true,
-      "blocking_codes": [
-        "missing_claim"
-      ],
+      "blocking_codes": [],
       "calls": {
         "model": 4,
         "retrieval": 2
       },
       "category": "followup",
       "citation_support_expected": 1,
-      "citation_support_found": 0,
-      "event_count": 26,
+      "citation_support_found": 1,
+      "event_count": 28,
       "expected_status": "completed",
       "id": "context-budget-long-history",
-      "status": "partial",
-      "status_matches_expectation": false,
-      "total_seconds": 0.0207,
+      "status": "completed",
+      "status_matches_expectation": true,
+      "total_seconds": 0.0215,
       "usage_reported": false
     }
   ],
   "suite_id": "chat-runtime-offline-v1",
   "totals": {
-    "blocking": 2,
+    "blocking": 0,
     "cases": 9,
-    "elapsed_seconds": 0.1051,
+    "elapsed_seconds": 0.1137,
     "harness_errors": 0,
     "review_required": 5,
-    "status_matches": 6,
-    "statuses_matching_expectation": 6
+    "status_matches": 9,
+    "statuses_matching_expectation": 9
   }
 }
