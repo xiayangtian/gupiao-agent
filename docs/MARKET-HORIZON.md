@@ -1,0 +1,1 @@
+superpowers/specs/2026-10-09-individual-and-market-horizon-analysis-design.md
