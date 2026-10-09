@@ -11,7 +11,7 @@ import os
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from webapp.chat_models import AnswerRun, ChatMessage
@@ -23,6 +23,10 @@ DEFAULT_PATH = "data/chat_sessions.json"
 
 # 会话标题取首条用户消息的最大字符数
 TITLE_MAX_CHARS = 24
+PENDING_CLARIFICATION_TTL = timedelta(minutes=15)
+_PENDING_FIELDS = frozenset({"version", "created_at", "missing_field", "intent", "company_code", "question"})
+_PENDING_MISSING_FIELDS = frozenset({"subject", "window", "kind"})
+_PENDING_INTENTS = frozenset({"market_quote", "market_trend", "market_recap", "report_fact", "financial_trend"})
 
 
 @dataclass(frozen=True)
@@ -261,6 +265,118 @@ class ChatStore:
                 self._save()
                 return dict(s)
             return None
+
+    @staticmethod
+    def _normalize_pending(pending: Mapping[str, Any]) -> Dict[str, Any]:
+        if not isinstance(pending, Mapping) or set(pending) != _PENDING_FIELDS:
+            raise ValueError("pending clarification has an invalid shape")
+        record = dict(pending)
+        if not isinstance(record["version"], str) or not record["version"].strip():
+            raise ValueError("pending clarification version is required")
+        if record["missing_field"] not in _PENDING_MISSING_FIELDS:
+            raise ValueError("pending clarification field is unsupported")
+        if record["intent"] not in _PENDING_INTENTS:
+            raise ValueError("pending clarification intent is unsupported")
+        code = record["company_code"]
+        if code is not None and (not isinstance(code, str) or len(code) != 6 or not code.isdigit()):
+            raise ValueError("pending clarification company code is invalid")
+        if not isinstance(record["question"], str) or not record["question"].strip():
+            raise ValueError("pending clarification question is required")
+        try:
+            created = datetime.fromisoformat(str(record["created_at"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("pending clarification timestamp is invalid") from exc
+        if created.tzinfo is None or created.utcoffset() is None:
+            raise ValueError("pending clarification timestamp must include a timezone")
+        record["created_at"] = created.astimezone(timezone.utc).isoformat()
+        return record
+
+    @staticmethod
+    def _utc_now(now: datetime) -> datetime:
+        if not isinstance(now, datetime):
+            raise ValueError("now must be a datetime")
+        if now.tzinfo is None or now.utcoffset() is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return now.astimezone(timezone.utc)
+
+    def save_pending(self, sid: str, pending: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        """Replace a session's single validated clarification slot."""
+        record = self._normalize_pending(pending)
+        with self._lock:
+            for session in self._data["sessions"]:
+                if session.get("id") != sid:
+                    continue
+                session["pending_clarification"] = record
+                session["updated_at"] = _now_iso()
+                self._save()
+                return json.loads(json.dumps(record, ensure_ascii=False))
+        return None
+
+    def consume_pending(self, sid: str, *, now: datetime, expected_version: str) -> Optional[Dict[str, Any]]:
+        """Atomically consume an unexpired slot once, bound to its session and version."""
+        current = self._utc_now(now)
+        if not isinstance(expected_version, str) or not expected_version:
+            return None
+        with self._lock:
+            for session in self._data["sessions"]:
+                if session.get("id") != sid:
+                    continue
+                raw = session.get("pending_clarification")
+                if not isinstance(raw, Mapping):
+                    return None
+                try:
+                    record = self._normalize_pending(raw)
+                    created = datetime.fromisoformat(record["created_at"])
+                except (TypeError, ValueError):
+                    record = None
+                    created = None
+                if record is None or created is None:
+                    session.pop("pending_clarification", None)
+                    self._save()
+                    return None
+                if record["version"] != expected_version:
+                    return None
+                if current - created > PENDING_CLARIFICATION_TTL or current < created:
+                    session.pop("pending_clarification", None)
+                    self._save()
+                    return None
+                session.pop("pending_clarification", None)
+                self._save()
+                return json.loads(json.dumps(record, ensure_ascii=False))
+        return None
+
+    def clear_pending(self, sid: str) -> bool:
+        with self._lock:
+            for session in self._data["sessions"]:
+                if session.get("id") != sid or "pending_clarification" not in session:
+                    continue
+                session.pop("pending_clarification", None)
+                self._save()
+                return True
+        return False
+
+    def append_clarification(
+        self, sid: str, question: str, reply: str, pending: Mapping[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Persist the user turn, visible clarification, and trusted slot in one write."""
+        record = self._normalize_pending(pending)
+        messages = [
+            self._normalize_message({"role": "user", "content": question}),
+            self._normalize_message({"role": "assistant", "content": reply}),
+        ]
+        with self._lock:
+            for session in self._data["sessions"]:
+                if session.get("id") != sid:
+                    continue
+                session.setdefault("messages", []).extend(messages)
+                if session.get("title") in (None, "", "新会话"):
+                    title = question.strip().replace("\\n", " ")
+                    session["title"] = title[:TITLE_MAX_CHARS] or "新会话"
+                session["pending_clarification"] = record
+                session["updated_at"] = _now_iso()
+                self._save()
+                return json.loads(json.dumps(session, ensure_ascii=False))
+        return None
 
     # ── 补充授权请求 ────────────────────────────────────────
 

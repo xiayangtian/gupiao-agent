@@ -1,6 +1,8 @@
 """ChatStore 会话存储单元测试：新建/追加/列表/读取/持久化"""
 
 import json
+import threading
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -19,6 +21,89 @@ def _stopped_run_with_pdf_artifact() -> AnswerRun:
             snippet="经营活动产生的现金流量净额",
         ),),
     )
+
+
+def _pending_clarification(now):
+    return {
+        "version": "pending-v1",
+        "created_at": now.isoformat(),
+        "missing_field": "window",
+        "intent": "market_trend",
+        "company_code": "600660",
+        "question": "福耀玻璃股价走势",
+    }
+
+
+def test_pending_clarification_is_one_shot_across_store_reload(tmp_path):
+    path = str(tmp_path / "sessions.json")
+    store = ChatStore(path)
+    sid = store.create_session()["id"]
+    now = datetime(2026, 10, 9, 10, 0, tzinfo=timezone.utc)
+
+    store.save_pending(sid, _pending_clarification(now))
+    reopened = ChatStore(path)
+
+    pending = reopened.consume_pending(sid, now=now, expected_version="pending-v1")
+    assert pending["company_code"] == "600660"
+    assert reopened.consume_pending(sid, now=now, expected_version="pending-v1") is None
+
+
+def test_pending_clarification_rejects_expired_wrong_version_and_foreign_session(tmp_path):
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    sid = store.create_session()["id"]
+    now = datetime(2026, 10, 9, 10, 0, tzinfo=timezone.utc)
+    store.save_pending(sid, _pending_clarification(now))
+
+    assert store.consume_pending(sid, now=now, expected_version="wrong") is None
+    assert store.consume_pending("other-session", now=now, expected_version="pending-v1") is None
+    assert store.consume_pending(sid, now=now + timedelta(minutes=16), expected_version="pending-v1") is None
+
+
+def test_pending_clarification_has_one_atomic_consumer(tmp_path):
+    store = ChatStore(str(tmp_path / "sessions.json"))
+    sid = store.create_session()["id"]
+    now = datetime(2026, 10, 9, 10, 0, tzinfo=timezone.utc)
+    store.save_pending(sid, _pending_clarification(now))
+    barrier = threading.Barrier(3)
+    results = []
+
+    def consume():
+        barrier.wait()
+        results.append(store.consume_pending(sid, now=now, expected_version="pending-v1"))
+
+    threads = [threading.Thread(target=consume) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+
+    assert sum(result is not None for result in results) == 1
+
+
+def test_append_clarification_persists_messages_and_pending_atomically(tmp_path):
+    path = str(tmp_path / "sessions.json")
+    store = ChatStore(path)
+    sid = store.create_session()["id"]
+    now = datetime(2026, 10, 9, 10, 0, tzinfo=timezone.utc)
+
+    saved = store.append_clarification(
+        sid, "福耀玻璃股价走势", "请补充时间范围。", _pending_clarification(now),
+    )
+    reloaded = ChatStore(path).get_session(sid)
+
+    assert [message["content"] for message in saved["messages"]] == ["福耀玻璃股价走势", "请补充时间范围。"]
+    assert reloaded["pending_clarification"]["version"] == "pending-v1"
+
+
+def test_old_sessions_without_pending_slot_remain_readable(tmp_path):
+    path = tmp_path / "sessions.json"
+    path.write_text(json.dumps({"sessions": [{"id": "old", "title": "old", "messages": [],
+                                                "created_at": "2026-01-01", "updated_at": "2026-01-01"}]}))
+
+    session = ChatStore(str(path)).get_session("old")
+
+    assert "pending_clarification" not in session
 
 
 def test_create_and_list_session(tmp_path):
