@@ -413,8 +413,12 @@ class OfflineChatHarness:
         scope = self._frozen_scope()
         market_rows = tuple(dict(row) for row in quote_rows if isinstance(row, Mapping))
         use_mcp = self.case.category == "recap"
+        case_rag_config = type("CaseRagConfig", (_FixtureRagConfig,), {
+            "mcp_max_tool_calls": 7 if use_mcp else _FixtureRagConfig.mcp_max_tool_calls,
+        })
 
-        def frozen_scope(_body: Any, _run_id: str = "", *, requires_company: bool = False) -> Any:
+        def frozen_scope(_body: Any, _run_id: str = "", *, requires_company: bool = False,
+                         question: str | None = None) -> Any:
             from webapp.chat_scope import ScopeResolution
             if scope.mode == "whole_corpus" and requires_company:
                 return ScopeResolution(None, "离线评测未提供公司范围。")
@@ -433,7 +437,7 @@ class OfflineChatHarness:
             "_resolve_scope": frozen_scope,
             "resolve_market_window": frozen_window,
             "EvidenceNormalizer": _FixtureEvidenceNormalizer,
-            "RagConfig": _FixtureRagConfig,
+            "RagConfig": case_rag_config,
             "market_data_mcp": _FixtureMarketMcp(self.fixture),
             "_mcp_tool_defs_cache": [
                 {"type": "function", "function": {"name": "stock_zt_pool"}},
@@ -445,7 +449,8 @@ class OfflineChatHarness:
             stack.enter_context(patch.object(server, name, value))
         if use_mcp:
             stack.enter_context(patch.object(server, "_build_chat_tool_defs", lambda _cfg: [
-                {"type": "function", "function": {"name": "market_overview", "parameters": {"type": "object", "properties": {}}}},
+                {"type": "function", "function": {"name": "stock_zt_pool", "parameters": {"type": "object", "properties": {}}}},
+                {"type": "function", "function": {"name": "stock_sector_fund_flow_rank", "parameters": {"type": "object", "properties": {}}}},
             ]))
             stack.enter_context(patch.object(server, "_build_chat_tool_executor", _fixture_recap_executor(self.fixture)))
         else:

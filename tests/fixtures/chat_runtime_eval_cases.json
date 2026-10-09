@@ -125,6 +125,7 @@
       "expected_intent": "market_recap",
       "expected_status": "completed",
       "allowed_sources": [
+        "market",
         "mcp"
       ],
       "expected_claims": [],
@@ -140,18 +141,20 @@
             "model": "fixed-offline"
           }
         ],
+        "market": [
+          {"symbol": "sh000001", "date": "2026-10-08", "close": 1.0},
+          {"symbol": "sz399001", "date": "2026-10-08", "close": 1.0},
+          {"symbol": "sz399006", "date": "2026-10-08", "close": 1.0},
+          {"symbol": "sh000688", "date": "2026-10-08", "close": 1.0}
+        ],
         "mcp": [
-          {
-            "tool": "market_overview",
-            "result": {
-              "pool_count": 50
-            }
-          }
+          {"tool": "stock_zt_pool", "result": {"pool_count": 50}}
         ]
       },
       "max_calls": {
         "model": 2,
-        "mcp": 4
+        "market": 4,
+        "mcp": 3
       }
     },
     {
