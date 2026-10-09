@@ -1863,7 +1863,7 @@ def _resume_history(session: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
     if messages and messages[-1].get("role") == "user":
         messages = messages[:-1]
-    return messages[-8:]
+    return messages
 
 
 def _resume_tool_policy(session: Mapping[str, Any], question: str) -> ToolPolicy:
@@ -2158,7 +2158,7 @@ def _research_resume_origin(session: Mapping[str, Any], run_id: str) -> _Researc
         origin = _preceding_user_index(messages, index)
         if origin is None:
             return _ResearchResumeOrigin("", [], intent, policy)
-        history = [dict(item) for item in messages[:origin] if isinstance(item, Mapping)][-8:]
+        history = [dict(item) for item in messages[:origin] if isinstance(item, Mapping)]
         return _ResearchResumeOrigin(str(messages[origin].get("content") or ""), history, intent, policy)
     return _ResearchResumeOrigin("", [], None, None)
 
@@ -2444,7 +2444,9 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
 
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
-    history = session.get("messages", [])[-8:]  # 传给模型的最近 4 轮
+    # The shared RagQA context-budget projection owns history truncation; preserve
+    # the original session records here so it can keep the most relevant recent turns.
+    history = session.get("messages", [])
     run_id = run_id_override or uuid.uuid4().hex
 
     route = QuestionRouter().classify(body.question)

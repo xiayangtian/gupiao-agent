@@ -3522,6 +3522,45 @@ def test_m2_mcp_financial_reference_cannot_support_report_fact_claims(client, en
     assert run["content"].count("未找到可核验的披露") == 1
 
 
+def test_resume_history_passes_full_safe_history_to_budget_projection():
+    history = []
+    for index in range(10):
+        history.extend([
+            {"role": "user", "content": f"用户轮次 {index}"},
+            {"role": "assistant", "content": f"助手轮次 {index}"},
+        ])
+    history.append({"role": "user", "content": "恢复问题"})
+
+    projected_input = server._resume_history({"messages": history})
+
+    assert len(projected_input) == 20
+    assert projected_input[0]["content"] == "用户轮次 0"
+    assert projected_input[-1]["content"] == "助手轮次 9"
+
+
+def test_research_resume_origin_passes_full_prior_history_to_budget_projection():
+    from webapp.chat_models import ToolPolicy
+
+    messages = []
+    for index in range(10):
+        messages.extend([
+            {"role": "user", "content": f"用户轮次 {index}"},
+            {"role": "assistant", "content": f"助手轮次 {index}"},
+        ])
+    messages.extend([
+        {"role": "user", "content": "研究公司 601288 2026 半年报"},
+        {"role": "assistant", "run": {
+            "research_run_id": "r1", "tool_policy": ToolPolicy(intent="research_task").to_dict(),
+        }},
+    ])
+
+    origin = server._research_resume_origin({"messages": messages}, "r1")
+
+    assert origin.question == "研究公司 601288 2026 半年报"
+    assert len(origin.history) == 20
+    assert origin.history[0]["content"] == "用户轮次 0"
+
+
 def test_sse_event_pump_producer_waits_for_bounded_async_queue_capacity():
     import asyncio
     from threading import Thread

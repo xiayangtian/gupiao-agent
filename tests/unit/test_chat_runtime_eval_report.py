@@ -108,6 +108,58 @@ def test_compare_rejects_undeclared_or_incomparable_reports():
     assert any(item.startswith("blocking:a") for item in comparison.regressions)
 
 
+def test_comparator_accepts_serialized_case_score_shape():
+    base = _report([{"case_id": "a", "calls": {"model": 1}, "blocking_codes": [],
+                    "citation_support_found": 0}])
+    candidate = _report([{"case_id": "a", "calls": {"model": 1}, "blocking_codes": [],
+                         "citation_support_found": 1}])
+
+    result = compare(base, candidate, declared_change="context window")
+
+    assert result.comparable is True
+    assert result.improvements == ("a",)
+
+
+def test_additional_provider_attempt_is_a_regression_not_an_incomparability():
+    base = _report([{"case_id": "a", "calls": {"model": 1, "retrieval": 1},
+                    "blocking_codes": [], "citation_support_found": 1}])
+    candidate = _report([{"case_id": "a", "calls": {"model": 2, "retrieval": 1},
+                         "blocking_codes": [], "citation_support_found": 1}])
+
+    result = compare(base, candidate, declared_change="candidate retrieval policy")
+
+    assert result.comparable is False
+    assert "incomparable_call_limits:a" not in result.reasons
+    assert "calls:a" in result.regressions
+
+
+def test_prompt_character_increase_is_reported_as_regression():
+    base = _report([{"case_id": "a", "calls": {"model": 1}, "blocking_codes": [],
+                    "citation_support_found": 1, "prompt_characters": 100}])
+    candidate = _report([{"case_id": "a", "calls": {"model": 1}, "blocking_codes": [],
+                         "citation_support_found": 1, "prompt_characters": 120}])
+    base["context_budget"] = "disabled"
+    candidate["context_budget"] = "enabled"
+
+    result = compare(base, candidate, declared_change="context_budget disabled->enabled")
+
+    assert "prompt_characters:a" in result.regressions
+
+
+def test_context_strategy_comparison_requires_declared_policy_difference():
+    base = _report([{"id": "a", "calls": {"model": 1}, "blocking_codes": [], "citation_support_found": 0}])
+    candidate = dict(base)
+    base["context_window_strategy"] = "legacy"
+    candidate["context_window_strategy"] = "relevance"
+
+    undeclared = compare(base, candidate, declared_change="implementation refactor")
+    declared = compare(base, candidate, declared_change="context_window_strategy legacy->relevance")
+
+    assert undeclared.comparable is False
+    assert "undeclared_context_window_strategy" in undeclared.reasons
+    assert declared.comparable is True
+
+
 def test_report_payload_is_whitelisted_and_writer_is_atomic(tmp_path):
     case = _case("report-number-after-300")
     observation = _observation(facts=(), artifacts=(), usage={"total_tokens": 10})
@@ -115,9 +167,10 @@ def test_report_payload_is_whitelisted_and_writer_is_atomic(tmp_path):
 
     payload = build_report("s", "c", "rev", [result], elapsed_seconds=1.0, clock="2026-10-08")
     serialized = json.dumps(payload, ensure_ascii=False)
-    for leaked in ("answer", "snippet", "prompt", "arguments"):
+    for leaked in ("answer", "snippet", "arguments"):
         assert leaked not in payload["cases"][0]
         assert leaked not in serialized or leaked == "answer"
+    assert '"prompt":' not in serialized
     assert payload["cases"][0]["usage_reported"] is True
 
     target = tmp_path / "report.json"

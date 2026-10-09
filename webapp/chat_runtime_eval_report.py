@@ -39,6 +39,9 @@ class CaseScore:
     call_attempts: Mapping[str, int]
     cost: str
     usage_reported: bool
+    prompt_characters: int
+    prompt_measure: str
+    retrieval_diagnostics: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -134,7 +137,17 @@ def score(case: RuntimeCase, observed: Any) -> CaseScore:
         citation_support=citation_support,
         call_attempts=dict(observed.call_attempts),
         cost="unknown", usage_reported=observed.usage is not None,
+        prompt_characters=int(getattr(observed, "prompt_characters", 0)),
+        prompt_measure=str(getattr(observed, "prompt_measure", "unknown")),
+        retrieval_diagnostics=dict(getattr(observed, "retrieval_diagnostics", {})),
     )
+
+
+def _case_id(item: Mapping[str, Any]) -> str:
+    value = item.get("case_id", item.get("id"))
+    if not isinstance(value, str) or not value:
+        raise ValueError("report case requires case_id")
+    return value
 
 
 def _comparability_reasons(base: Mapping[str, Any], candidate: Mapping[str, Any], declared_change: str) -> list[str]:
@@ -144,13 +157,20 @@ def _comparability_reasons(base: Mapping[str, Any], candidate: Mapping[str, Any]
     for key in ("suite_id", "corpus_version", "harness_version", "clock"):
         if base.get(key) != candidate.get(key):
             reasons.append(f"incomparable_{key}")
-    base_cases = {item["id"]: item for item in base.get("cases", [])}
-    candidate_cases = {item["id"]: item for item in candidate.get("cases", [])}
+    if base.get("context_window_strategy") != candidate.get("context_window_strategy"):
+        if "context_window_strategy" not in declared_change:
+            reasons.append("undeclared_context_window_strategy")
+    if base.get("context_budget") != candidate.get("context_budget"):
+        if "context_budget" not in declared_change:
+            reasons.append("undeclared_context_budget")
+    base_cases = {_case_id(item): item for item in base.get("cases", [])}
+    candidate_cases = {_case_id(item): item for item in candidate.get("cases", [])}
     if set(base_cases) != set(candidate_cases):
         reasons.append("incomparable_case_set")
     for case_id in sorted(set(base_cases) & set(candidate_cases)):
-        if base_cases[case_id].get("calls") != candidate_cases[case_id].get("calls"):
-            reasons.append(f"incomparable_call_limits:{case_id}")
+        if base_cases[case_id].get("call_limits") != candidate_cases[case_id].get("call_limits"):
+            if "call_limits" in base_cases[case_id] or "call_limits" in candidate_cases[case_id]:
+                reasons.append(f"incomparable_call_limits:{case_id}")
     return reasons
 
 
@@ -159,27 +179,43 @@ def compare(base: Mapping[str, Any], candidate: Mapping[str, Any], *, declared_c
     reasons = _comparability_reasons(base, candidate, declared_change)
     if reasons:
         return Comparison(False, tuple(reasons), declared_change, (), (), ())
-    base_cases = {item["id"]: item for item in base["cases"]}
+    base_cases = {_case_id(item): item for item in base["cases"]}
     regressions: list[str] = []
     improvements: list[str] = []
     unchanged: list[str] = []
-    for case_id, candidate_case in sorted({item["id"]: item for item in candidate["cases"]}.items()):
+    for case_id, candidate_case in sorted({_case_id(item): item for item in candidate["cases"]}.items()):
         base_case = base_cases[case_id]
+        base_calls = base_case.get("calls", {})
+        candidate_calls = candidate_case.get("calls", {})
+        if any(int(count) > int(base_calls.get(source, 0))
+               for source, count in candidate_calls.items()):
+            regressions.append(f"calls:{case_id}")
+        base_prompt_chars = int(base_case.get("prompt_characters", 0))
+        candidate_prompt_chars = int(candidate_case.get("prompt_characters", 0))
+        budget_changed = base.get("context_budget") != candidate.get("context_budget")
+        prompt_improved = budget_changed and candidate_prompt_chars < base_prompt_chars
+        if budget_changed and candidate_prompt_chars > base_prompt_chars:
+            regressions.append(f"prompt_characters:{case_id}")
+        elif prompt_improved:
+            improvements.append(f"prompt_characters:{case_id}")
         base_blocking = set(base_case.get("blocking_codes", ()))
+        support_found = candidate_case.get("citation_support_found", 0)
+        base_support_found = base_case.get("citation_support_found", 0)
         if set(candidate_case.get("blocking_codes", ())) - base_blocking:
             regressions.append(f"blocking:{case_id}")
-        elif candidate_case.get("citation_support_found", 0) < base_case.get("citation_support_found", 0):
+        elif support_found < base_support_found:
             regressions.append(f"citation_support:{case_id}")
-        elif candidate_case.get("citation_support_found", 0) > base_case.get("citation_support_found", 0):
+        elif support_found > base_support_found:
             improvements.append(case_id)
-        else:
+        elif not prompt_improved and not any(item.endswith(f":{case_id}") for item in regressions):
             unchanged.append(case_id)
     return Comparison(not regressions, (), declared_change, tuple(regressions), tuple(improvements), tuple(unchanged))
 
 
 def build_report(suite_id: str, corpus_version: str, code_revision: str,
                  scores: Sequence[CaseScore], *, elapsed_seconds: float,
-                 clock: str) -> dict[str, Any]:
+                 clock: str, context_window_strategy: str = "relevance",
+                 context_budget: str = "enabled") -> dict[str, Any]:
     """Aggregate whitelisted counts only: no prompts, answers, snippets or tool arguments."""
     return {
         "suite_id": suite_id,
@@ -187,6 +223,8 @@ def build_report(suite_id: str, corpus_version: str, code_revision: str,
         "code_revision": code_revision,
         "harness_version": HARNESS_VERSION,
         "clock": clock,
+        "context_window_strategy": context_window_strategy,
+        "context_budget": context_budget,
         "totals": {
             "cases": len(scores),
             "blocking": sum(1 for item in scores if item.blocking_codes),

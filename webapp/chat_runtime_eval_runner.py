@@ -66,6 +66,11 @@ class ProviderFixture:
     case_id: str = ""
     calls: Counter[str] = field(default_factory=Counter)
     limits: Mapping[str, int] = field(default_factory=dict)
+    prompt_characters: int = 0
+    candidate_evidence_ids: set[str] = field(default_factory=set)
+    ranked_evidence_ids: set[str] = field(default_factory=set)
+    windowed_evidence_ids: set[str] = field(default_factory=set)
+    cited_evidence_ids: set[str] = field(default_factory=set)
 
     def record_attempt(self, source: str) -> None:
         self.calls[source] += 1
@@ -96,6 +101,9 @@ class RuntimeObservation:
     facts: tuple[Mapping[str, Any], ...]
     artifacts: tuple[Mapping[str, Any], ...]
     terminal: Mapping[str, Any]
+    prompt_characters: int = 0
+    prompt_measure: str = "character_estimate"
+    retrieval_diagnostics: Mapping[str, str] = field(default_factory=dict)
 
 
 def _deny_network(*_args: Any, **_kwargs: Any) -> Any:
@@ -170,6 +178,9 @@ class _FixtureStore:
             allowed = {str(item) for item in where["report_id"].get("$in", ())}
         hits = [dict(document) for document in self._documents
                 if allowed is None or document["report_id"] in allowed]
+        self._fixture.candidate_evidence_ids.update(
+            str(hit.get("evidence_id") or hit.get("id") or "") for hit in hits
+        )
         return hits[:max(1, top_k)]
 
     def list_report_ids(self) -> list[str]:
@@ -199,14 +210,25 @@ class _FixtureAI:
             "acceptance": ["固定离线用例按预期完成"],
         }, ensure_ascii=False)
 
+    def _record_prompt(self, messages: Any, system: Any, tools: Any = None) -> None:
+        total = len(str(system or ""))
+        if isinstance(messages, (list, tuple)):
+            total += sum(len(str(message.get("content") or "")) for message in messages
+                         if isinstance(message, Mapping))
+        if tools:
+            total += len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+        self._fixture.prompt_characters += total
+
     def chat(self, *, messages: Any = None, system: Any = None, response_format: Any = None, **_kwargs: Any) -> dict[str, Any]:
         self._fixture.record_attempt("model")
+        self._record_prompt(messages, system)
         if isinstance(response_format, Mapping) and response_format.get("type") == "json_object":
             return {"content": self._plan_json()}
         return {"content": self._answer}
 
     def chat_stream(self, *, messages: Any = None, system: Any = None, tools: Any = None, **_kwargs: Any):
         self._fixture.record_attempt("model")
+        self._record_prompt(messages, system, tools)
         yield {"type": "delta", "text": self._answer, "reasoning": ""}
         yield {"type": "done", "answer": self._answer, "reasoning": "",
                "model": self._model, "usage": {}}
@@ -319,9 +341,14 @@ class _FixtureQuote:
 class OfflineChatHarness:
     """Apply the case's frozen providers to the real server module for one case."""
 
-    def __init__(self, case: RuntimeCase, *, workspace: Path, corpus: Iterable[Mapping[str, Any]] | None = None) -> None:
+    def __init__(self, case: RuntimeCase, *, workspace: Path, corpus: Iterable[Mapping[str, Any]] | None = None,
+                 context_window_strategy: str = "relevance", context_budget_enabled: bool = True) -> None:
+        if context_window_strategy not in {"legacy", "relevance"}:
+            raise ValueError("unsupported context window strategy")
         self.case = case
         self.workspace = workspace
+        self.context_window_strategy = context_window_strategy
+        self.context_budget_enabled = bool(context_budget_enabled)
         self.fixture = ProviderFixture(version="fixed-offline-v1", case_id=case.id, limits=case.max_calls)
         self._corpus = tuple(corpus if corpus is not None else load_corpus())
 
@@ -344,6 +371,44 @@ class OfflineChatHarness:
 
         store = _FixtureStore(self._corpus, self.fixture, unavailable=self._retrieval_unavailable())
         ai = _FixtureAI(self.case, self.fixture)
+        rag_qa = RagQA(store, ai, top_k=8, company_code_resolver=lambda _text: None,
+                       context_window_strategy=self.context_window_strategy,
+                       context_budget_enabled=self.context_budget_enabled)
+        original_query = rag_qa._query_with_priority
+        original_context_evidence = rag_qa._context_evidence
+        original_build_citations = rag_qa._build_citations
+
+        def tracked_query(*args: Any, **kwargs: Any):
+            hits = original_query(*args, **kwargs)
+            self.fixture.ranked_evidence_ids.update(
+                str(hit.get("evidence_id") or hit.get("id") or "") for hit in hits
+            )
+            return hits
+
+        def tracked_context_evidence(hits: Any, question: str):
+            evidence = original_context_evidence(hits, question)
+            for hit, item in zip(hits, evidence):
+                passage = rag_qa._selected_passage(hit, question)
+                for claim in self.case.expected_claims:
+                    if (claim.evidence_id == item["id"] and claim.subject in passage
+                            and str(claim.value) in passage):
+                        self.fixture.windowed_evidence_ids.add(claim.evidence_id)
+            return evidence
+
+        def tracked_citations(hits: Any, answer: str, question: str | None = None):
+            import re
+            for number in re.findall(r"\[(\d+)\]", answer or ""):
+                index = int(number) - 1
+                if 0 <= index < len(hits):
+                    hit = hits[index]
+                    self.fixture.cited_evidence_ids.add(
+                        str(hit.get("evidence_id") or hit.get("id") or "")
+                    )
+            return original_build_citations(hits, answer, question)
+
+        rag_qa._query_with_priority = tracked_query
+        rag_qa._context_evidence = tracked_context_evidence
+        rag_qa._build_citations = tracked_citations
         quote_rows = self.case.provider_fixture.get("market") or ()
         scope = self._frozen_scope()
         market_rows = tuple(dict(row) for row in quote_rows if isinstance(row, Mapping))
@@ -363,7 +428,7 @@ class OfflineChatHarness:
             "DATA_DIR": self.workspace,
             "chat_store": _isolated_store(self.workspace),
             "ai_client": ai,
-            "rag_qa": RagQA(store, ai, top_k=8, company_code_resolver=lambda _text: None),
+            "rag_qa": rag_qa,
             "tencent_quote": _FixtureQuote(self.fixture, market_rows),
             "_resolve_scope": frozen_scope,
             "resolve_market_window": frozen_window,
@@ -462,6 +527,8 @@ def _drive(case: RuntimeCase, app: FastAPI, fixture: ProviderFixture) -> Runtime
         raise AssertionError("terminal AnswerRun was not persisted in ChatStore")
     if durable_run.get("status") != status:
         raise AssertionError("terminal SSE status does not match the persisted AnswerRun")
+    from webapp.chat_retrieval_window import diagnose_retrieval
+
     return RuntimeObservation(
         events=tuple(names), persisted_status=status, answer=answer,
         session_id=session_id, run_id=str(run_ids[-1]),
@@ -471,6 +538,18 @@ def _drive(case: RuntimeCase, app: FastAPI, fixture: ProviderFixture) -> Runtime
         facts=tuple(item for item in durable_run.get("facts", []) if isinstance(item, Mapping)),
         artifacts=tuple(item for item in durable_run.get("artifacts", []) if isinstance(item, Mapping)),
         terminal=terminal,
+        prompt_characters=fixture.prompt_characters,
+        prompt_measure="character_estimate",
+        retrieval_diagnostics={
+            claim.evidence_id: diagnose_retrieval(
+                claim.evidence_id,
+                candidate_ids=tuple(fixture.candidate_evidence_ids),
+                ranked_ids=tuple(fixture.ranked_evidence_ids),
+                windowed_ids=tuple(fixture.windowed_evidence_ids),
+                cited_ids=tuple(fixture.cited_evidence_ids),
+            )
+            for claim in case.expected_claims if "#p" in claim.evidence_id
+        },
     )
 
 

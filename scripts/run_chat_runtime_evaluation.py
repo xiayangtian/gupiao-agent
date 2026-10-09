@@ -8,6 +8,7 @@ never reads production credentials or reaches real providers.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -25,8 +26,26 @@ _SANITIZED_KEYS = ("suite_id", "corpus_version", "code_revision", "harness_versi
 
 def _code_revision() -> str:
     try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=PROJECT_ROOT,
-                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        revision = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=PROJECT_ROOT,
+                                  capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        diff = subprocess.run(
+            ["git", "diff", "--binary", "HEAD", "--", ".", ":(exclude)docs/**", ":(exclude)README.md"],
+            cwd=PROJECT_ROOT, capture_output=True, timeout=10, check=True,
+        ).stdout
+        untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                                   cwd=PROJECT_ROOT, capture_output=True, timeout=5, check=True).stdout
+        untracked_paths = [path for path in sorted(filter(None, untracked.split(b"\0")))
+                           if not path.startswith(b"docs/") and path != b"README.md"]
+        if not diff and not untracked_paths:
+            return revision
+        digest = hashlib.sha256()
+        digest.update(diff)
+        for raw_path in untracked_paths:
+            path = PROJECT_ROOT / raw_path.decode("utf-8", errors="surrogateescape")
+            if path.is_file():
+                digest.update(raw_path + b"\0")
+                digest.update(path.read_bytes())
+        return f"{revision}+dirty:{digest.hexdigest()[:12]}"
     except Exception:
         return "unknown"
 
@@ -51,6 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cases", required=True, help="Path to a versioned runtime case manifest.")
     parser.add_argument("--output", required=True, help="Destination JSON report path (isolated, never the quality sidecar).")
     parser.add_argument("--limit", type=int, default=0, help="Optional cap on the number of cases to run (0 = all).")
+    parser.add_argument("--context-window-strategy", choices=("legacy", "relevance"), default="relevance",
+                        help="Evidence passage projection policy for a declared baseline/candidate run.")
+    parser.add_argument("--context-budget", choices=("disabled", "enabled"), default="enabled",
+                        help="Apply the bounded history/evidence projection policy or run the unbounded comparator.")
     return parser
 
 
@@ -79,7 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     results = []
     for case in selected:
         workspace = Path(tempfile.mkdtemp(prefix=f"chat-eval-{case.id}-"))
-        harness = OfflineChatHarness(case, workspace=workspace)
+        harness = OfflineChatHarness(case, workspace=workspace,
+                                     context_window_strategy=args.context_window_strategy,
+                                     context_budget_enabled=args.context_budget == "enabled")
         try:
             observation = harness.run(server.app)
         except AssertionError as exc:
@@ -104,7 +129,12 @@ def main(argv: list[str] | None = None) -> int:
 
     report = build_report(suite.suite_id, suite.corpus_version, _code_revision(), scores,
                           elapsed_seconds=time.perf_counter() - started,
-                          clock=FROZEN_NOW.isoformat())
+                          clock=FROZEN_NOW.isoformat(),
+                          context_window_strategy=args.context_window_strategy,
+                          context_budget=args.context_budget)
+    limits_by_case = {case.id: dict(case.max_calls) for case in selected}
+    for item in report["cases"]:
+        item["call_limits"] = limits_by_case.get(item["case_id"], {})
     harness_errors = sum(1 for item in results if item["status"] == "harness_error")
     payload = {
         **report,
