@@ -74,7 +74,9 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
-from .chat_execution import build_source_runtime, execute_source, project_sources, resolve_answer_status
+from .chat_execution import (
+    build_source_runtime, execute_source, market_task_status, project_sources, resolve_answer_status,
+)
 from .chat_request_resolution import Clarification, ResolvedRequest, resolve_chat_request, serialize_market_window
 from .chat_runs import ChatEventChannel, ChatRunCancelled, ChatRunControl, ChatRunDeadlineExceeded, ChatRunRegistry
 from .source_adapters import SourceAccess
@@ -1937,6 +1939,7 @@ class _RagRunState:
     source_ids: set[str] = field(default_factory=set)
     source_runtime_tool_names: set[str] = field(default_factory=set)
     plan_status: str = ""
+    market_evidence_status: str = ""
 
 
 def _relay_rag_event(
@@ -2881,10 +2884,22 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     yield {"type": "source_result", "result": source}
                 if run_control is not None:
                     run_control.check_active()
+                is_market_request = route.intent in {"market_quote", "market_trend", "market_recap"}
+                if is_market_request:
+                    state.market_evidence_status = market_task_status(
+                        route.intent, scope, market_window, result.context.sources, "passed",
+                    )
+                if is_market_request and state.market_evidence_status == "failed":
+                    yield {"type": "done", "answer": "未取得与本次请求的主体和时间范围匹配的行情数据，因此无法完成行情分析。",
+                           "citations": [], "web_sources": [], "model": ""}
+                    return
+                answer_question = body.question
+                if is_market_request and state.market_evidence_status == "partial":
+                    answer_question += "\n\n服务端限制：行情证据仅覆盖列明的主体、日期和来源；不得推断未覆盖时段或把指数样本表述为整体市场广度。"
                 _supplement_context.current = {"session_id": sid, "payload": None}
                 try:
                     yield from chat_qa.answer_from_context(
-                        body.question, context=result.context, history=history, scope=scope,
+                        answer_question, context=result.context, history=history, scope=scope,
                         run_id=run_id, allow_supplement=(
                             result.context.required_missing
                             and any(step.kind == "retrieve" and step.required for step in planning.plan.steps)
@@ -3132,14 +3147,32 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                         )
                     elif state.verification_report is not None and state.verification_report.status == "partial":
                         answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
+                    verification_status = (state.verification_report.status if state.verification_report
+                                           else "passed" if knowledge_mode else None)
                     status = resolve_answer_status(
                         stopped=False, failed=False, waiting_consent=False,
                         required_missing=state.required_sources_missing,
                         had_source_failure=state.had_external_failure,
                         retrieval_degraded=state.retrieval_degraded,
-                        verification=(state.verification_report.status if state.verification_report
-                                      else "passed" if knowledge_mode else None),
+                        verification=verification_status,
                     )
+                    if route.intent in {"market_quote", "market_trend", "market_recap"}:
+                        state.market_evidence_status = market_task_status(
+                            route.intent, scope, market_window, state.source_results, verification_status,
+                        )
+                        if state.market_evidence_status == "failed":
+                            status = "failed"
+                            if not answer.strip():
+                                answer = "未取得与本次请求的主体和时间范围匹配的行情数据，因此无法完成行情分析。"
+                        elif state.market_evidence_status == "partial":
+                            if status == "completed":
+                                status = "partial"
+                            windows = sorted({item.coverage.data_window for item in state.source_results
+                                              if item.category == "market" and item.coverage.data_window})
+                            coverage_note = ("行情数据覆盖有限" + (f"（实际数据期：{'；'.join(windows)}）" if windows else "")
+                                             + "，未覆盖区间不作推断。")
+                            if coverage_note not in answer:
+                                answer = answer.rstrip() + "\n\n" + coverage_note
                     run = _persist(status, answer)
                     yield _sse("done", {
                         "answer": answer,

@@ -156,6 +156,90 @@ def test_tencent_kline_projection_creates_dated_market_facts_with_source_identit
     assert projection.tool_artifacts[0].source_id == "source-7"
 
 
+def test_market_task_requires_matching_dated_bars_and_never_trusts_empty_verification():
+    from datetime import date
+
+    from webapp.chat_execution import market_task_status
+    from webapp.chat_models import Scope
+    from webapp.chat_time import MarketWindow
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    scope = Scope.company_only("600660", "福耀玻璃")
+    window = MarketWindow("近五交易日", "rolling_trading_days", None, date(2026, 10, 9), 5)
+    rows = tuple({"symbol": "600660", "date": f"2026-10-0{day}", "close": 10 + day}
+                 for day in range(5, 10))
+    complete = SourceResult("k1", "tencent", "kline", "market", "success",
+        as_of="2026-10-09", payload=rows,
+        coverage=SourceCoverage(returned_rows=5, data_window="2026-10-05至2026-10-09"))
+    partial = SourceResult("k2", "tencent", "kline", "market", "partial",
+        as_of="2026-10-09", payload=rows[:2],
+        coverage=SourceCoverage(returned_rows=2, data_window="2026-10-05至2026-10-06"))
+    wrong_company = SourceResult("k3", "tencent", "kline", "market", "success",
+        as_of="2026-10-09", payload=tuple({**row, "symbol": "601288"} for row in rows),
+        coverage=SourceCoverage(returned_rows=5, data_window="2026-10-05至2026-10-09"))
+
+    assert market_task_status("market_trend", scope, window, [complete], "passed") == "completed"
+    assert market_task_status("market_trend", scope, window, [partial], "passed") == "partial"
+    assert market_task_status("market_trend", scope, window, [wrong_company], "passed") == "failed"
+    assert market_task_status("market_trend", scope, window, [], "passed") == "failed"
+
+
+def test_market_quote_requires_matching_company_and_timestamp():
+    from datetime import date
+
+    from webapp.chat_execution import market_task_status
+    from webapp.chat_models import Scope
+    from webapp.chat_time import MarketWindow
+    from webapp.source_runtime import SourceResult
+
+    scope = Scope.company_only("600660", "福耀玻璃")
+    window = MarketWindow("今日", "explicit", date(2026, 10, 9), date(2026, 10, 9), None)
+    quote = SourceResult("q1", "tencent", "quote", "market", "success",
+        as_of="2026-10-09 15:00:00", payload=({"symbol": "sh600660", "code": "600660",
+                                                  "time": "2026-10-09 15:00:00", "price": 10},))
+    stale = SourceResult("q2", "tencent", "quote", "market", "success",
+        as_of="2026-10-08 15:00:00", payload=({"symbol": "sh600660", "time": "2026-10-08 15:00:00"},))
+    foreign = SourceResult("q3", "tencent", "quote", "market", "success",
+        as_of="2026-10-09 15:00:00", payload=({"symbol": "sh601288", "time": "2026-10-09 15:00:00"},))
+
+    assert market_task_status("market_quote", scope, window, [quote], "passed") == "completed"
+    assert market_task_status("market_quote", scope, window, [stale], "passed") == "failed"
+    assert market_task_status("market_quote", scope, window, [foreign], "passed") == "failed"
+
+
+def test_market_recap_requires_four_matching_indices_and_all_three_breadth_calls():
+    from datetime import date
+
+    from webapp.chat_execution import market_task_status
+    from webapp.chat_models import Scope
+    from webapp.chat_time import MarketWindow
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    scope = Scope.whole_corpus()
+    window = MarketWindow("今日", "explicit", date(2026, 10, 9), date(2026, 10, 9), None)
+    symbols = ("sh000001", "sz399001", "sz399006", "sh000688")
+    indices = [SourceResult(f"i{index}", "tencent", "kline", "market", "success",
+        as_of="2026-10-09", payload=({"symbol": symbol, "date": "2026-10-09", "close": 1},),
+        coverage=SourceCoverage(returned_rows=1, data_window="2026-10-09"))
+        for index, symbol in enumerate(symbols)]
+    breadth = [
+        SourceResult("b1", "mcp", "stock_zt_pool", "market", "success", as_of="2026-10-09",
+                     payload=({"date": "2026-10-09", "symbol": "600001"},),
+                     coverage=SourceCoverage(data_window="2026-10-09")),
+        SourceResult("b2", "mcp", "stock_zt_pool", "market", "success", as_of="2026-10-09",
+                     payload=({"date": "2026-10-09", "symbol": "600002"},),
+                     coverage=SourceCoverage(data_window="2026-10-09")),
+        SourceResult("b3", "mcp", "stock_sector_fund_flow_rank", "market", "success", as_of="2026-10-09",
+                     payload=({"date": "2026-10-09", "name": "行业"},),
+                     coverage=SourceCoverage(query_window="今日", data_window="2026-10-09")),
+    ]
+
+    assert market_task_status("market_recap", scope, window, indices, "passed") == "partial"
+    assert market_task_status("market_recap", scope, window, indices + breadth, "passed") == "completed"
+    assert market_task_status("market_recap", scope, window, indices + breadth[:-1], "passed") == "partial"
+    assert market_task_status("market_recap", scope, window, indices + breadth, "partial") == "partial"
+
+
 def test_source_coverage_is_projected_into_bounded_tool_artifact_summary():
     from webapp.chat_execution import project_sources
     from webapp.chat_models import Scope

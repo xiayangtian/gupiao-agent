@@ -536,6 +536,9 @@ def test_market_overview_requires_complete_live_allowlist(
     assert [step["kind"] for step in _event(events, "execution_plan")["steps"]] == [
         "market_indices", "answer",
     ]
+    recap_run = _event(events, "done")["run"]
+    assert recap_run["status"] == "partial"
+    assert "行情数据覆盖有限" in recap_run["content"]
     assert len(index_calls) == 4
     assert mcp_calls == []
 
@@ -572,6 +575,149 @@ def test_market_planner_failure_without_minimum_budget_stops_before_any_source(c
     assert "没有同时满足授权与调用预算" in _event(events, "clarification")["message"]
     assert _event(events, "done")["run"] is None
     assert source_calls == []
+
+
+def test_market_repair_replays_live_sse_routes_and_one_shot_clarification_offline(
+    client, env, monkeypatch, tmp_path,
+):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from financial_report_fetcher.rag.config import RagConfig
+    from financial_report_fetcher.rag.qa import RagQA
+    from webapp.chat_store import ChatStore
+    from webapp.execution_planner import PlanningResult, safe_market_plan
+    from webapp import chat_request_resolution
+    from webapp import chat_time
+
+    store = ChatStore(str(tmp_path / "market-sse-replay.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=False, web_search=False, mcp_max_tool_calls=9,
+    )))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
+    monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_mcp_tool_defs_cache", [])
+    monkeypatch.setattr(server, "mcp_breaker", type("Breaker", (), {"allow": lambda self: False})())
+    fixed_now = datetime(2026, 10, 16, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(chat_request_resolution, "resolve_market_window",
+                        lambda question, _now=None: chat_time.resolve_market_window(question, fixed_now))
+    monkeypatch.setattr(server, "_resolve_scope", lambda body, run_id="", *, requires_company=False, question=None:
+        server.ScopeResolution(server.Scope.company_only("600660", "福耀玻璃")
+                               if requires_company else server.Scope.whole_corpus()))
+    market_calls, pdf_calls, mcp_calls = [], [], []
+    dates = ["2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16"]
+    def fake_kline(symbol, *, period, count, adjust):
+        market_calls.append((symbol, period, count, adjust))
+        return [{"date": day, "close": 10.0 + index} for index, day in enumerate(dates)]
+    monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+    monkeypatch.setattr(server.market_data_mcp, "call_tool", lambda *args, **kwargs: mcp_calls.append(args))
+
+    class FixedPlanner:
+        def __init__(self, *_args): pass
+        def plan(self, question, scope, capabilities, *, authoritative_intent=None, **_kwargs):
+            plan = safe_market_plan(authoritative_intent, capabilities.available_kinds,
+                                    capabilities.max_external_calls)
+            return PlanningResult("validated" if plan else "unavailable", plan)
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            pdf_calls.append("query")
+            raise AssertionError("market request must never retrieve financial PDFs")
+    class AnswerAI:
+        def chat_stream(self, **_kwargs):
+            yield {"type": "done", "answer": "仅依据取得的行情来源作答。", "model": "fixture", "usage": {}}
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+
+    cases = [
+        ("分析今日股票行情", "market_recap", "market_recap"),
+        ("分析福耀玻璃近期行情", "market_trend", "external_market"),
+        ("分析福耀玻璃近5日行情", "market_trend", "external_market"),
+    ]
+    session_id = None
+    replay_runs = []
+    for question, intent, source_mode in cases:
+        events = _read_sse(client.post("/api/chat/stream", json={
+            "question": question, "session_id": session_id, "use_mcp": False,
+        }))
+        session_id = session_id or _event(events, "session")["session_id"]
+        assert _event(events, "execution_plan")["source_mode"] == source_mode
+        replay_run = _event(events, "done")["run"]
+        assert replay_run["tool_artifacts"]
+        assert all(item["tool_name"] == "kline" for item in replay_run["tool_artifacts"])
+        replay_runs.append(replay_run)
+
+    orphan = _read_sse(client.post("/api/chat/stream", json={
+        "question": "近五交易日", "session_id": session_id, "use_mcp": False,
+    }))
+    assert "clarification" in [name for name, _ in orphan]
+    assert _event(orphan, "done")["run"] is None
+    assert "execution_plan" not in [name for name, _ in orphan]
+
+    first_half = _read_sse(client.post("/api/chat/stream", json={
+        "question": "福耀玻璃股价走势", "use_mcp": False,
+    }))
+    clarification_sid = _event(first_half, "session")["session_id"]
+    assert _event(first_half, "done")["run"] is None
+    assert "clarification" in [name for name, _ in first_half]
+    completed = _read_sse(client.post("/api/chat/stream", json={
+        "question": "近五交易日", "session_id": clarification_sid, "use_mcp": False,
+    }))
+    completed_run = _event(completed, "done")["run"]
+
+    assert completed_run["status"] == "completed"
+    assert completed_run["scope"]["companies"][0]["code"] == "600660"
+    assert completed_run["execution_plan"]["source_mode"] == "external_market"
+    assert completed_run["retrieval_report_ids"] == []
+    assert len(market_calls) == 7
+    assert pdf_calls == [] and mcp_calls == []
+    assert all(run["execution_plan"]["source_mode"] in {"market_recap", "external_market"}
+               for run in replay_runs)
+
+
+def test_market_source_failure_persists_failed_run_without_invoking_financial_rag(client, env, monkeypatch, tmp_path):
+    from financial_report_fetcher.rag.config import RagConfig
+    from webapp.chat_store import ChatStore
+    from webapp.execution_plan import ExecutionPlan
+    from webapp.execution_planner import PlanningResult
+
+    monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "failed-market.json")))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=False, web_search=False, mcp_max_tool_calls=3,
+    )))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
+    monkeypatch.setattr(server, "_resolve_scope", lambda body, run_id="", *, requires_company=False, question=None:
+        server.ScopeResolution(server.Scope.company_only("600660", "福耀玻璃")))
+    monkeypatch.setattr(server.tencent_quote, "kline", lambda *_args, **_kwargs: [])
+
+    class FixedPlanner:
+        def __init__(self, *_args): pass
+        def plan(self, *_args, **_kwargs):
+            return PlanningResult("validated", ExecutionPlan.from_dict({
+                "objective": "个股近五日行情", "source_mode": "external_market",
+                "steps": [{"id": "kline", "kind": "market_kline", "required": True},
+                          {"id": "answer", "kind": "answer", "depends_on": ["kline"]}],
+                "acceptance": ["匹配主体和窗口的带日期行情"],
+            }))
+
+    class ForbiddenQA:
+        def answer_from_context(self, *_args, **_kwargs):
+            raise AssertionError("no market evidence must not be filled by financial RAG")
+        def answer_stream(self, *_args, **_kwargs):
+            raise AssertionError("market source failure must not fall back to report retrieval")
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+    monkeypatch.setattr(server, "rag_qa", ForbiddenQA())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "600660近五交易日行情", "use_mcp": False,
+    }))
+
+    run = _event(events, "done")["run"]
+    assert run["status"] == "failed"
+    assert run["retrieval_report_ids"] == []
+    assert "未取得" in run["content"] or "不可用" in run["content"]
 
 
 def test_recap_coverage_marks_fixed_provider_window_mismatch_and_single_day_pool():
@@ -1872,6 +2018,7 @@ class TestChatSessionsApi:
         assert [call[0] for call in mcp_calls] == [
             "stock_zt_pool", "stock_zt_pool", "stock_sector_fund_flow_rank",
         ]
+        assert run["status"] == "completed"
         assert len(run["tool_artifacts"]) == 7
         assert all(item["as_of"] == "2026-09-24" for item in run["tool_artifacts"])
         assert all("实际数据期 2026-09-24" in item["result_summary"] for item in run["tool_artifacts"])
