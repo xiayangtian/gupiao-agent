@@ -76,6 +76,11 @@ def test_market_time_default_does_not_apply_to_financial_questions():
     assert _api().resolve_market_window("农业银行近期营收趋势", NOW) is None
 
 
+def test_financial_period_parser_accepts_two_year_chinese_number():
+    api = _api()
+    assert api.resolve_financial_period("农业银行近两年营收趋势？") == "近两年"
+
+
 def test_market_bar_selection_sorts_deduplicates_and_ignores_outside_dates():
     api = _api()
     window = api.resolve_market_window("上周", NOW)

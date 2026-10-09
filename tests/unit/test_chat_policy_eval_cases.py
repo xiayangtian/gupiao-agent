@@ -201,6 +201,18 @@ def _install_pipeline(monkeypatch, env, tmp_path):  # noqa: F811
             FOCUS_NAME: FOCUS_CODE, "农行": FOCUS_CODE, "长江电力": OTHER_CODE, "长电": OTHER_CODE,
         }.get(value),
     ))
+
+    class FakeTencentQuote:
+        def realtime(self, symbols):
+            from datetime import datetime
+            return [{"symbol": f"sh{FOCUS_CODE}", "code": FOCUS_CODE,
+                     "time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                     "price": 3.2, "change_pct": 1.0}]
+
+        def kline(self, *_args, **_kwargs):
+            return []
+
+    monkeypatch.setattr(server, "tencent_quote", FakeTencentQuote())
     return store, ai, executor
 
 
@@ -224,7 +236,13 @@ def _used_sources(run):
         sources.add("web" if tool["tool_name"] == "web_search" or tool["provider"] == "web_search"
                     else "market_data")
     for fact in run["facts"]:
-        sources.add("web" if fact["source_type"] == "web" else "market_data")
+        category = fact.get("source_category")
+        if category == "local_pdf" or fact.get("source_type") == "pdf":
+            sources.add("local_pdf")
+        elif category == "web" or fact.get("source_type") == "web":
+            sources.add("web")
+        else:
+            sources.add("market_data")
     return sources
 
 

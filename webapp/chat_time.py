@@ -16,7 +16,7 @@ _SINGLE_DATE_RE = re.compile(r"(?<!\d)(?P<date>\d{4}-\d{1,2}-\d{1,2})(?!\d)")
 _FINANCIAL_RANGE_RE = re.compile(
     r"(?P<start>\d{4})\s*年?\s*(?:至|到|~|～|—|-)\s*(?P<end>\d{4})\s*年"
 )
-_ROLLING_YEAR_RE = re.compile(r"(?:近|最近|过去|近来)\s*(?P<count>[一二三四五六七八九十\d]+)\s*年")
+_ROLLING_YEAR_RE = re.compile(r"(?:近|最近|过去|近来)\s*(?P<count>[一二两三四五六七八九十\d]+)\s*年")
 _YEAR_RE = re.compile(r"(?<!\d)(?P<year>\d{4})\s*年(?:度|报|年报|财报)?")
 _QUARTER_RE = re.compile(r"(?P<year>\d{4})\s*年?\s*(?:第\s*)?(?P<quarter>[一二三四1234])\s*季度")
 
@@ -91,7 +91,7 @@ def resolve_financial_period_range(expression: str, now: datetime | None = None)
     date_range = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})至(\d{4})-(\d{2})-(\d{2})", text)
     year_range = re.fullmatch(r"(\d{4})年至(\d{4})年", text)
     year = re.fullmatch(r"(\d{4})年", text)
-    rolling = re.fullmatch(r"近([一二三四五六七八九十\d]+)年", text)
+    rolling = re.fullmatch(r"近([一二两三四五六七八九十\d]+)年", text)
     quarter = re.fullmatch(r"(\d{4})年第([1-4])季度", text)
     if date_range:
         try:
@@ -107,7 +107,7 @@ def resolve_financial_period_range(expression: str, now: datetime | None = None)
         number = int(year.group(1))
         return date(number, 1, 1), date(number, 12, 31)
     if rolling:
-        digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+        digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
         count = min(20, max(1, digits.get(rolling.group(1), int(rolling.group(1)) if rolling.group(1).isdigit() else 1)))
         try:
             start = today.replace(year=today.year - count)

@@ -46,6 +46,17 @@ def test_question_router_separates_quotes_price_trends_recap_and_ambiguity():
     assert ambiguous.intent == "clarification"
 
 
+def test_question_router_preserves_price_quote_and_industry_comparison_routes():
+    from webapp.chat_policy import QuestionRouter
+
+    router = QuestionRouter()
+    price = router.classify("农业银行今天价格与网页口径冲突如何解释？")
+    industry = router.classify("农业银行与同业对比？")
+
+    assert (price.intent, price.requires_company) == ("market_quote", True)
+    assert (industry.intent, industry.requires_company) == ("report_fact", True)
+
+
 def test_question_router_routes_broad_market_without_requesting_a_company():
     from webapp.chat_policy import QuestionRouter
 

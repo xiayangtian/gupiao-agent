@@ -216,7 +216,7 @@ class _FallbackExecutionPlanner:
     def __init__(self, _json_planner):
         pass
 
-    def plan(self, *_args):
+    def plan(self, *_args, **_kwargs):
         return PlanningResult("fallback")
 
 

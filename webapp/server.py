@@ -2668,10 +2668,14 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
     if authoritative_intent is not None:
         kinds = {step.kind for step in planning.plan.steps} if planning.plan else set()
         if route.intent in {"report_fact", "financial_trend"}:
-            decision = IntentDecision(
-                "company_trend" if route.intent == "financial_trend" else "report_fact",
-                "high", True,
-            )
+            legacy_intent = IntentRouter().classify(body.question, scope)
+            if route.intent == "report_fact" and legacy_intent.intent == "industry_benchmark":
+                decision = legacy_intent
+            else:
+                decision = IntentDecision(
+                    "company_trend" if route.intent == "financial_trend" else "report_fact",
+                    "high", True,
+                )
         elif route.intent in {"market_quote", "market_trend", "market_recap"}:
             decision = IntentDecision("realtime_market", "high", False, True, "web_search" in kinds)
         elif knowledge_mode:
