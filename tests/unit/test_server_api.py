@@ -627,9 +627,10 @@ def test_market_repair_replays_live_sse_routes_and_one_shot_clarification_offlin
     class AnswerAI:
         def chat_stream(self, *, messages, **_kwargs):
             question = str(messages[-1].get("content", ""))
-            answer = ("福耀玻璃上涨100%，收盘价为999元/股。" if "福耀玻璃" in question
-                      else "仅依据取得的行情来源作答。")
-            yield {"type": "done", "answer": answer, "model": "fixture", "usage": {}}
+            is_company_market = "福耀玻璃" in question
+            answer = ("福耀玻璃近期行情" if is_company_market else "仅依据取得的行情来源作答。")
+            yield {"type": "done", "answer": answer, "finish_reason": "length" if is_company_market else "stop",
+                   "model": "fixture", "usage": {}}
 
     monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
     monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
@@ -681,8 +682,7 @@ def test_market_repair_replays_live_sse_routes_and_one_shot_clarification_offlin
     assert completed_run["retrieval_report_ids"] == []
     assert len(market_calls) == 7
     assert pdf_calls == [] and mcp_calls == []
-    assert "chat_run_verification_blocked" in caplog.text
-    assert "unsupported_numeric_claim" in caplog.text
+    assert caplog.text.count("verification=passed") >= 3
     assert all(run["execution_plan"]["source_mode"] in {"market_recap", "external_market"}
                for run in replay_runs)
 

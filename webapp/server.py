@@ -2756,6 +2756,30 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             )
             return run
 
+        def _verified_market_fallback() -> str | None:
+            if route.intent not in {"market_quote", "market_trend"}:
+                return None
+            fallback_sources = tuple(
+                replace(source, facts=tuple(
+                    fact for fact in state.facts
+                    if any(evidence_id.startswith(f"{source.call_id}:")
+                           for evidence_id in fact.evidence_ids)
+                ))
+                for source in state.source_results
+            )
+            fallback = market_evidence_fallback(AnswerContext(sources=fallback_sources), scope)
+            if not fallback:
+                return None
+            report = ClaimVerifier().verify(
+                fallback, scope, state.facts, state.evidence_artifacts, state.conflicts,
+                requested_period=verification_period, window=market_window,
+                answer_intent=route.intent,
+            )
+            if report.status != "passed":
+                return None
+            state.verification_report = report
+            return fallback
+
         def _produce() -> Any:
             if knowledge_mode:
                 yield from chat_qa.answer_from_context(
@@ -3114,8 +3138,28 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     })
                     return
                 if state.error_text == "answer_completion_exhausted":
-                    answer = "回答经过补全重试仍未能完整生成，请重试。"
-                    run = _persist("partial", answer)
+                    answer = _verified_market_fallback()
+                    if answer is not None:
+                        status = market_task_status(
+                            route.intent, scope, market_window, state.source_results, "passed",
+                        )
+                        if status == "partial":
+                            windows = sorted({item.coverage.data_window for item in state.source_results
+                                              if item.category == "market" and item.coverage.data_window})
+                            coverage_note = ("行情数据覆盖有限" + (f"（实际数据期：{'；'.join(windows)}）" if windows else "")
+                                             + "，未覆盖区间不作推断。")
+                            answer = answer.rstrip() + "\n\n" + coverage_note
+                        elif status == "failed":
+                            answer = None
+                    if answer is None:
+                        if route.intent in {"market_quote", "market_trend"}:
+                            answer = "回答经过补全重试仍未能完整生成，且未能从已取得的行情事实生成可核验结论。"
+                        else:
+                            answer = "回答经过补全重试仍未能完整生成，请重试。"
+                        status = "partial"
+                    run = _persist(status, answer)
+                    if run.verification_report is not None:
+                        yield _sse("verification", {"verification": run.verification_report.to_dict()})
                     yield _sse("done", {
                         "answer": answer, "citations": [], "session_id": sid,
                         "run": run.to_dict(),
@@ -3163,27 +3207,10 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                             issue_codes = sorted({issue.code for issue in state.verification_report.issues})
                             logger.warning("chat_run_verification_blocked run_id=%s issue_codes=%s",
                                            run_id, ",".join(issue_codes[:8]) or "unknown")
-                        if state.verification_report.status == "blocked" and route.intent in {"market_quote", "market_trend"}:
-                            fallback_sources = tuple(
-                                replace(source, facts=tuple(
-                                    fact for fact in state.facts
-                                    if any(evidence_id.startswith(f"{source.call_id}:")
-                                           for evidence_id in fact.evidence_ids)
-                                ))
-                                for source in state.source_results
-                            )
-                            fallback = market_evidence_fallback(
-                                AnswerContext(sources=fallback_sources), scope,
-                            )
-                            if fallback:
-                                fallback_report = verifier.verify(
-                                    fallback, scope, state.facts, state.evidence_artifacts, state.conflicts,
-                                    requested_period=verification_period, window=market_window,
-                                    answer_intent=route.intent,
-                                )
-                                if fallback_report.status == "passed":
-                                    answer = fallback
-                                    state.verification_report = fallback_report
+                        if state.verification_report.status == "blocked":
+                            fallback = _verified_market_fallback()
+                            if fallback is not None:
+                                answer = fallback
                         if state.verification_report.status == "blocked":
                             if route.intent in {"market_quote", "market_trend", "market_recap"}:
                                 answer = "已取得行情来源数据，但回答未通过数字证据核验，无法可靠生成行情结论。"
