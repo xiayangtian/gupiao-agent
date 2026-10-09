@@ -578,7 +578,7 @@ def test_market_planner_failure_without_minimum_budget_stops_before_any_source(c
 
 
 def test_market_repair_replays_live_sse_routes_and_one_shot_clarification_offline(
-    client, env, monkeypatch, tmp_path,
+    client, env, monkeypatch, tmp_path, caplog,
 ):
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -625,8 +625,11 @@ def test_market_repair_replays_live_sse_routes_and_one_shot_clarification_offlin
             pdf_calls.append("query")
             raise AssertionError("market request must never retrieve financial PDFs")
     class AnswerAI:
-        def chat_stream(self, **_kwargs):
-            yield {"type": "done", "answer": "仅依据取得的行情来源作答。", "model": "fixture", "usage": {}}
+        def chat_stream(self, *, messages, **_kwargs):
+            question = str(messages[-1].get("content", ""))
+            answer = ("福耀玻璃上涨100%，收盘价为999元/股。" if "福耀玻璃" in question
+                      else "仅依据取得的行情来源作答。")
+            yield {"type": "done", "answer": answer, "model": "fixture", "usage": {}}
 
     monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
     monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
@@ -647,6 +650,11 @@ def test_market_repair_replays_live_sse_routes_and_one_shot_clarification_offlin
         replay_run = _event(events, "done")["run"]
         assert replay_run["tool_artifacts"]
         assert all(item["tool_name"] == "kline" for item in replay_run["tool_artifacts"])
+        if intent == "market_trend":
+            assert replay_run["verification_report"]["status"] == "passed"
+            assert "999" not in replay_run["content"]
+            assert "10元/股" in replay_run["content"]
+            assert "行情数据覆盖有限" not in replay_run["content"]
         replay_runs.append(replay_run)
 
     orphan = _read_sse(client.post("/api/chat/stream", json={
@@ -673,6 +681,8 @@ def test_market_repair_replays_live_sse_routes_and_one_shot_clarification_offlin
     assert completed_run["retrieval_report_ids"] == []
     assert len(market_calls) == 7
     assert pdf_calls == [] and mcp_calls == []
+    assert "chat_run_verification_blocked" in caplog.text
+    assert "unsupported_numeric_claim" in caplog.text
     assert all(run["execution_plan"]["source_mode"] in {"market_recap", "external_market"}
                for run in replay_runs)
 

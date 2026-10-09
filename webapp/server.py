@@ -68,6 +68,7 @@ from financial_report_fetcher.rag.qa import (
     SUPPLEMENT_REQUEST_TOOL,
     SUPPLEMENT_REQUEST_TOOL_NAME,
     RagQA,
+    market_evidence_fallback,
 )
 from financial_report_fetcher.rag.store import RagStore
 from financial_report_fetcher.rag.web_search import TavilyWebSearch
@@ -2746,7 +2747,13 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             )
             chat_store.append_turn(sid, question=original_question, run=run)
             saved = True
-            logger.info("chat_run_finished run_id=%s status=%s", run_id, status)
+            verification = run.verification_report
+            issue_codes = sorted({issue.code for issue in verification.issues}) if verification else []
+            logger.info(
+                "chat_run_finished run_id=%s status=%s verification=%s issue_codes=%s",
+                run_id, status, verification.status if verification else "not_run",
+                ",".join(issue_codes[:8]) or "none",
+            )
             return run
 
         def _produce() -> Any:
@@ -3146,20 +3153,48 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     for conflict in state.conflicts:
                         yield _sse("conflict", {"conflict": conflict.to_dict()})
                     if not knowledge_mode:
-                        state.verification_report = ClaimVerifier().verify(
+                        verifier = ClaimVerifier()
+                        state.verification_report = verifier.verify(
                             answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
                             requested_period=verification_period, window=market_window,
                             answer_intent=route.intent,
                         )
+                        if state.verification_report.status == "blocked":
+                            issue_codes = sorted({issue.code for issue in state.verification_report.issues})
+                            logger.warning("chat_run_verification_blocked run_id=%s issue_codes=%s",
+                                           run_id, ",".join(issue_codes[:8]) or "unknown")
+                        if state.verification_report.status == "blocked" and route.intent in {"market_quote", "market_trend"}:
+                            fallback_sources = tuple(
+                                replace(source, facts=tuple(
+                                    fact for fact in state.facts
+                                    if any(evidence_id.startswith(f"{source.call_id}:")
+                                           for evidence_id in fact.evidence_ids)
+                                ))
+                                for source in state.source_results
+                            )
+                            fallback = market_evidence_fallback(
+                                AnswerContext(sources=fallback_sources), scope,
+                            )
+                            if fallback:
+                                fallback_report = verifier.verify(
+                                    fallback, scope, state.facts, state.evidence_artifacts, state.conflicts,
+                                    requested_period=verification_period, window=market_window,
+                                    answer_intent=route.intent,
+                                )
+                                if fallback_report.status == "passed":
+                                    answer = fallback
+                                    state.verification_report = fallback_report
+                        if state.verification_report.status == "blocked":
+                            if route.intent in {"market_quote", "market_trend", "market_recap"}:
+                                answer = "已取得行情来源数据，但回答未通过数字证据核验，无法可靠生成行情结论。"
+                            else:
+                                answer = verifier.degrade_blocked(
+                                    answer, scope, state.facts, requested_period=verification_period,
+                                    window=market_window, answer_intent=route.intent,
+                                )
+                        elif state.verification_report.status == "partial":
+                            answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
                         yield _sse("verification", {"verification": state.verification_report.to_dict()})
-                    if state.verification_report is not None and state.verification_report.status == "blocked":
-                        # 只替换不受支持的数值论断；受支持内容与上下文保留。
-                        answer = ClaimVerifier().degrade_blocked(
-                            answer, scope, state.facts, requested_period=verification_period,
-                            window=market_window, answer_intent=route.intent,
-                        )
-                    elif state.verification_report is not None and state.verification_report.status == "partial":
-                        answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
                     verification_status = (state.verification_report.status if state.verification_report
                                            else "passed" if knowledge_mode else None)
                     status = resolve_answer_status(
@@ -3170,6 +3205,9 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                         verification=verification_status,
                     )
                     if route.intent in {"market_quote", "market_trend", "market_recap"}:
+                        coverage_status = market_task_status(
+                            route.intent, scope, market_window, state.source_results, "passed",
+                        )
                         state.market_evidence_status = market_task_status(
                             route.intent, scope, market_window, state.source_results, verification_status,
                         )
@@ -3180,12 +3218,13 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                         elif state.market_evidence_status == "partial":
                             if status == "completed":
                                 status = "partial"
-                            windows = sorted({item.coverage.data_window for item in state.source_results
-                                              if item.category == "market" and item.coverage.data_window})
-                            coverage_note = ("行情数据覆盖有限" + (f"（实际数据期：{'；'.join(windows)}）" if windows else "")
-                                             + "，未覆盖区间不作推断。")
-                            if coverage_note not in answer:
-                                answer = answer.rstrip() + "\n\n" + coverage_note
+                            if coverage_status == "partial":
+                                windows = sorted({item.coverage.data_window for item in state.source_results
+                                                  if item.category == "market" and item.coverage.data_window})
+                                coverage_note = ("行情数据覆盖有限" + (f"（实际数据期：{'；'.join(windows)}）" if windows else "")
+                                                 + "，未覆盖区间不作推断。")
+                                if coverage_note not in answer:
+                                    answer = answer.rstrip() + "\n\n" + coverage_note
                     run = _persist(status, answer)
                     yield _sse("done", {
                         "answer": answer,

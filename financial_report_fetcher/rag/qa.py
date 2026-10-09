@@ -63,7 +63,7 @@ def _append_answer_continuation(previous: str, continuation: str) -> str:
     return previous + continuation
 
 
-def _market_evidence_fallback(context: AnswerContext, scope: Optional[Scope]) -> Optional[str]:
+def market_evidence_fallback(context: AnswerContext, scope: Optional[Scope]) -> Optional[str]:
     """Create a concise complete market conclusion only from already-normalized daily facts."""
     if scope is None or len(scope.companies) != 1:
         return None
@@ -683,7 +683,7 @@ class RagQA:
                 return {**final_event, "type": "done", "answer": answer_text,
                         "completion_mode": "model", "continuation_count": attempt}
             if attempt == _MAX_ANSWER_CONTINUATIONS:
-                fallback = _market_evidence_fallback(context, scope)
+                fallback = market_evidence_fallback(context, scope)
                 if fallback:
                     return {**final_event, "type": "done", "answer": fallback,
                             "finish_reason": "evidence_fallback", "completion_mode": "evidence_fallback",
@@ -706,7 +706,7 @@ class RagQA:
                         parts.append(event["text"])
                     yield event
                 elif event.get("type") == "error":
-                    fallback = _market_evidence_fallback(context, scope)
+                    fallback = market_evidence_fallback(context, scope)
                     if fallback:
                         return {**final_event, "type": "done", "answer": fallback,
                                 "finish_reason": "evidence_fallback", "completion_mode": "evidence_fallback",
