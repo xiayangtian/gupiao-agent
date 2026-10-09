@@ -83,7 +83,7 @@ from .chat_facts import FactNormalizer, derive_available_facts, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import IntentRouter, QuestionRouter, ToolAvailability, ToolPolicyResolver
 from .execution_plan import ExecutionPlan
-from .execution_planner import ExecutionPlanner, PlanningCapabilities, PlanningResult
+from .execution_planner import ExecutionPlanner, PlanningCapabilities, PlanningResult, safe_market_plan
 from .execution_executor import ExecutionExecutor, market_kline_request_count
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolution, ScopeResolver
@@ -2542,7 +2542,8 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
     chat_qa = _chat_qa_or_degraded()
 
     # Scope 冻结后先用模型生成受限执行计划；计划失败才回退旧规则。
-    tools = _build_chat_tool_defs(RagConfig.load()) if body.use_mcp and not knowledge_mode else None
+    chat_cfg = RagConfig.load()
+    tools = _build_chat_tool_defs(chat_cfg) if body.use_mcp and not knowledge_mode else None
     tool_names = [str(item.get("function", {}).get("name") or "") for item in (tools or [])]
     if route.intent == "general_web" and "web_search" not in tool_names:
         return _chat_preflight_response(
@@ -2558,8 +2559,24 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         available_kinds.add("web_search")
     # 腾讯指数行情是本地受控能力，不依赖 MCP 清单。
     available_kinds.add("market_indices")
-    # 市场概览聚合固定 MCP 调用，模型不接触工具名或参数。
-    if body.use_mcp:
+    # 市场概览只在固定的三项 MCP 操作均由实时清单/白名单授权且熔断器允许时可用。
+    recap_operations = {name for name, _ in market_recap_tool_calls(weekly=True)}
+    listed_operations = set()
+    for item in (_mcp_tool_defs_cache or []):
+        if not isinstance(item, Mapping):
+            continue
+        function = item.get("function")
+        name = function.get("name") if isinstance(function, Mapping) else item.get("name")
+        if isinstance(name, str) and name:
+            listed_operations.add(name)
+    configured_whitelist = set(getattr(chat_cfg, "mcp_tool_whitelist", []) or [])
+    overview_authorized = (
+        body.use_mcp and bool(getattr(chat_cfg, "mcp_tools", False))
+        and mcp_breaker.allow() and recap_operations <= listed_operations
+        and (not configured_whitelist or recap_operations <= configured_whitelist)
+        and recap_operations <= set(tool_names)
+    )
+    if overview_authorized:
         available_kinds.add("market_overview")
     # 腾讯 K 线是冻结公司 Scope 的本地受控能力。
     available_kinds.add("market_kline")
@@ -2608,7 +2625,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             return parse(retry)
     if route.intent == "market_recap":
         try:
-            configured_recap_budget = int(RagConfig.load().mcp_max_tool_calls)
+            configured_recap_budget = int(chat_cfg.mcp_max_tool_calls)
         except Exception:
             configured_recap_budget = 1
         recap_budget = min(9, max(0, configured_recap_budget))
@@ -2629,6 +2646,16 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             authoritative_intent=authoritative_intent,
             authoritative_window=authoritative_window,
         )
+        if planning.plan is None and route.intent in {"market_quote", "market_trend", "market_recap"}:
+            fallback_plan = safe_market_plan(route.intent, available_kinds, recap_budget)
+            if fallback_plan is not None:
+                planning = PlanningResult("safe_fallback", fallback_plan, planning.issues)
+            else:
+                return _chat_preflight_response(
+                    sid, original_question,
+                    "当前没有同时满足授权与调用预算的行情来源，无法核实该行情；本轮未检索财报。",
+                    started_at,
+                )
     if authoritative_intent is not None and planning.plan is None and route.intent not in {
         "report_fact", "financial_trend", "market_quote",
     }:

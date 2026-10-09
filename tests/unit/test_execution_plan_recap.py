@@ -76,10 +76,32 @@ def test_authoritative_market_quote_rejects_rag_even_when_company_scope_exists()
     assert any(issue.code == "intent_source_mismatch" for issue in issues)
 
 
-def test_market_recap_accepts_server_controlled_market_overview_within_step_limit():
-    plan = ExecutionPlan.from_dict({"objective":"今日A股复盘", "source_mode":"market_recap", "steps":[{"id":"overview","kind":"market_overview","required":True},{"id":"answer","kind":"answer","depends_on":["overview"]}], "acceptance":["as_of"]})
-    valid, issues = validate_execution_plan(plan, Scope.whole_corpus(), {"market_overview"}, 1)
+def test_market_recap_requires_indices_and_uses_overview_when_budget_allows():
+    plan = ExecutionPlan.from_dict({"objective":"今日A股复盘", "source_mode":"market_recap", "steps":[
+        {"id":"indices","kind":"market_indices","required":True},
+        {"id":"overview","kind":"market_overview","required":True},
+        {"id":"answer","kind":"answer","depends_on":["indices","overview"]}], "acceptance":["as_of"]})
+    valid, issues = validate_execution_plan(
+        plan, Scope.whole_corpus(), {"market_indices", "market_overview"}, 7,
+        step_costs={"market_indices": 4, "market_overview": 3}, authoritative_intent="market_recap",
+    )
     assert valid == plan and not issues
+
+
+def test_market_plan_cannot_complete_with_answer_only_or_wrong_required_source():
+    for intent, mode, kind, scope in (
+        ("market_quote", "external_market", "answer", Scope.company_only("600660", "福耀玻璃")),
+        ("market_trend", "external_market", "market_quote", Scope.company_only("600660", "福耀玻璃")),
+        ("market_recap", "market_recap", "market_overview", Scope.whole_corpus()),
+    ):
+        plan = ExecutionPlan.from_dict({"objective":"market", "source_mode":mode,
+            "steps":[{"id":"source","kind":kind}, {"id":"answer","kind":"answer"}],
+            "acceptance":["matching market evidence"]})
+        valid, issues = validate_execution_plan(
+            plan, scope, {kind, "market_indices"}, 9, authoritative_intent=intent,
+        )
+        assert valid is None
+        assert any(issue.code == "required_market_source" for issue in issues)
 
 
 def test_recap_plan_cost_matches_indices_mcp_aggregate_and_web_step_budget():

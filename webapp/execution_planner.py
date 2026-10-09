@@ -24,6 +24,45 @@ class PlanningResult:
     issues: tuple[PlanIssue, ...] = ()
 
 
+def safe_market_plan(
+    intent: str, available_kinds: set[str], max_external_calls: int,
+    *, step_costs: Mapping[str, int] | None = None,
+) -> ExecutionPlan | None:
+    """Build a deterministic plan for the frozen market intent, never adding PDF retrieval."""
+    if isinstance(max_external_calls, bool) or not isinstance(max_external_calls, int) or max_external_calls < 0:
+        return None
+    costs = {"market_indices": 4, "market_overview": 3, **dict(step_costs or {})}
+    contracts = {
+        "market_quote": ("external_market", "market_quote"),
+        "market_trend": ("external_market", "market_kline"),
+        "market_recap": ("market_recap", "market_indices"),
+    }
+    contract = contracts.get(intent)
+    if contract is None:
+        return None
+    source_mode, required_kind = contract
+    if required_kind not in available_kinds:
+        return None
+    steps: list[ExecutionStep] = [ExecutionStep(required_kind, required_kind, True)]
+    if (intent == "market_recap" and "market_overview" in available_kinds
+            and max_external_calls >= costs.get("market_indices", 4) + costs.get("market_overview", 3)):
+        steps.append(ExecutionStep("overview", "market_overview", True, (required_kind,)))
+    answer_dependencies = tuple(step.id for step in steps)
+    steps.append(ExecutionStep("answer", "answer", True, answer_dependencies))
+    plan = ExecutionPlan(
+        objective="按已确认的行情对象和时间窗口分析",
+        source_mode=source_mode,
+        steps=tuple(steps),
+        acceptance=("仅依据已取得且与请求对象/时间匹配的市场证据作答",),
+    )
+    scope = Scope.company_only("000000", "company") if intent in {"market_quote", "market_trend"} else Scope.whole_corpus()
+    valid, _ = validate_execution_plan(
+        plan, scope, available_kinds, max_external_calls,
+        step_costs=costs, authoritative_intent=intent,
+    )
+    return valid
+
+
 class ExecutionPlanner:
     """将模型的受限 JSON 输出转换为已验证计划。"""
     def __init__(self, json_planner: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None) -> None:

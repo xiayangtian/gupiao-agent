@@ -112,8 +112,24 @@ def validate_execution_plan(
         issues.append(PlanIssue("general_web_boundary", "非股票问题只允许网页搜索和模型回答。"))
     if plan.source_mode == "market_recap" and "retrieve" in {step.kind for step in plan.steps}:
         issues.append(PlanIssue("market_recap_boundary", "A 股复盘默认不得检索财报。"))
-    external = 0
     costs = step_costs or {}
+    if authoritative_intent in {"market_quote", "market_trend", "market_recap"}:
+        required_kind = {
+            "market_quote": "market_quote",
+            "market_trend": "market_kline",
+            "market_recap": "market_indices",
+        }[authoritative_intent]
+        required_steps = [step for step in plan.steps if step.kind == required_kind and step.required]
+        if not required_steps:
+            issues.append(PlanIssue("required_market_source", "行情计划必须包含对应意图的必需市场来源。"))
+        if authoritative_intent == "market_recap" and "market_overview" in available_kinds:
+            index_cost = costs.get("market_indices", 4)
+            overview_cost = costs.get("market_overview", 3)
+            if index_cost + overview_cost <= max_external_calls and not any(
+                step.kind == "market_overview" and step.required for step in plan.steps
+            ):
+                issues.append(PlanIssue("required_market_source", "预算允许时市场复盘必须尝试已授权的市场概览来源。"))
+    external = 0
     if any(isinstance(cost, bool) or not isinstance(cost, int) or cost < 0 for cost in costs.values()):
         issues.append(PlanIssue("invalid_step_cost", "来源步骤调用成本必须为非负整数。"))
     by_id = {step.id: step for step in plan.steps}

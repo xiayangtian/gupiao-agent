@@ -17,6 +17,19 @@ def test_planner_accepts_model_market_plan_for_unrecognized_wording():
     assert [step.kind for step in result.plan.steps] == ["market_quote", "answer"]
 
 
+def test_safe_market_fallback_builds_only_budgeted_authoritative_steps():
+    from webapp.execution_planner import safe_market_plan
+
+    available = {"market_indices", "market_overview"}
+    full = safe_market_plan("market_recap", available, 7)
+    indices_only = safe_market_plan("market_recap", available, 4)
+
+    assert [step.kind for step in full.steps] == ["market_indices", "market_overview", "answer"]
+    assert [step.kind for step in indices_only.steps] == ["market_indices", "answer"]
+    assert safe_market_plan("market_recap", available, 3) is None
+    assert safe_market_plan("market_trend", {"market_indices"}, 9) is None
+
+
 def test_planner_falls_back_when_model_requests_unavailable_web():
     planner = ExecutionPlanner(json_planner=lambda *_: {
         "objective": "x", "source_mode": "external_market",
@@ -52,7 +65,7 @@ def test_authoritative_window_is_visible_to_planner_but_not_model_selectable():
     planner = ExecutionPlanner(lambda question, snapshot: (
         snapshots.append(dict(snapshot)) or {
             "objective": question, "source_mode": "external_market",
-            "steps": [{"id": "kline", "kind": "market_kline"}, {"id": "answer", "kind": "answer"}],
+            "steps": [{"id": "kline", "kind": "market_kline", "required": True}, {"id": "answer", "kind": "answer"}],
             "acceptance": ["same window"],
         }
     ))

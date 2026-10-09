@@ -171,6 +171,15 @@ def test_quote_family_follows_the_provider_names_not_one_literal(monkeypatch):
     assert set(policy.allowed_tools) == {"get_realtime_quote_v2", "web_search"}
 
 
+def test_realtime_market_policy_does_not_offer_financial_pdf_fallback():
+    decision = IntentRouter().classify("福耀玻璃近期股价走势", _scope())
+    policy = ToolPolicyResolver().resolve(decision, _scope(), ToolAvailability.available())
+
+    assert policy.source_policy.local_pdf is False
+    assert "本地披露为准" not in policy.fallback_message
+    assert "行情" in policy.fallback_message
+
+
 def test_realtime_policy_without_provider_quote_tools_falls_back_to_local_only():
     """只有网页搜索可用时，行情来源不得被标记为可用。"""
     decision = IntentRouter().classify("农业银行今天涨跌如何？", _scope())

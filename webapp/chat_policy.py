@@ -149,7 +149,7 @@ class ToolPolicyResolver:
         del scope
         fallback = "请基于本地可核验财报披露回答。"
         if decision.intent == "realtime_market":
-            fallback = "实时数据暂不可用；请以本地披露为准。"
+            fallback = "行情来源暂不可用，无法核实该行情；本轮不以财报替代行情数据。"
         elif decision.intent == "event_attribution":
             fallback = "外部事件来源暂不可用；不能确认归因。"
         elif decision.intent == "research_task":
@@ -168,7 +168,9 @@ class ToolPolicyResolver:
             max_rounds=2 if external else 0,
             timeout_seconds=self.timeout_seconds,
             source_policy=SourcePolicy(
-                local_pdf=True, historical_analysis=True, market_data=market_data, web=web,
+                local_pdf=decision.intent != "realtime_market",
+                historical_analysis=decision.intent != "realtime_market",
+                market_data=market_data, web=web,
             ),
             fallback_message=fallback,
         )

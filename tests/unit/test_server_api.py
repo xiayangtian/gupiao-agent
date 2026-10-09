@@ -442,6 +442,138 @@ def test_chat_scope_preserves_known_company_when_no_reports_are_indexed(env, mon
     assert resolution.scope.report_ids == ()
 
 
+def test_market_planner_failure_uses_deterministic_index_only_plan_without_pdf(client, env, monkeypatch, tmp_path):
+    from financial_report_fetcher.rag.config import RagConfig
+    from financial_report_fetcher.rag.qa import RagQA
+    from webapp.chat_store import ChatStore
+    from webapp.execution_planner import PlanningResult
+
+    monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "safe-market.json")))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(mcp_tools=False, web_search=False)))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
+    calls = []
+    monkeypatch.setattr(server.tencent_quote, "kline", lambda symbol, **kwargs: (
+        calls.append((symbol, kwargs)) or [{"date": "2026-09-24", "close": 10.0}]
+    ))
+
+    class FailedPlanner:
+        def __init__(self, *_args):
+            pass
+        def plan(self, *_args, **_kwargs):
+            return PlanningResult("fallback", None)
+
+    class AnswerAI:
+        def chat_stream(self, **_kwargs):
+            yield {"type": "done", "answer": "仅依据已取得的指数行情。", "model": "fixture", "usage": {}}
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("market plan must not retrieve PDF evidence")
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FailedPlanner)
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "2026-09-24 A股复盘", "scope_mode": "whole_corpus", "use_mcp": False,
+    }))
+
+    assert [step["kind"] for step in _event(events, "execution_plan")["steps"]] == [
+        "market_indices", "answer",
+    ]
+    assert len(calls) == 4
+    assert all(item[1]["count"] >= 1 for item in calls)
+    assert [step["kind"] for step in _event(events, "done")["run"]["execution_steps"]] == [
+        "market_indices", "answer",
+    ]
+    assert _event(events, "done")["run"]["retrieval_report_ids"] == []
+
+
+@pytest.mark.parametrize(("whitelist", "missing_tool", "breaker_open"), [
+    (["stock_zt_pool", "stock_sector_fund_flow_rank"], "stock_sector_fund_flow_rank", False),
+    (["stock_zt_pool"], None, False),
+    (["stock_zt_pool", "stock_sector_fund_flow_rank"], None, True),
+])
+def test_market_overview_requires_complete_live_allowlist(
+    client, env, monkeypatch, tmp_path, whitelist, missing_tool, breaker_open,
+):
+    from financial_report_fetcher.rag.config import RagConfig
+    from financial_report_fetcher.rag.qa import RagQA
+    from webapp.chat_store import ChatStore
+    from webapp.execution_planner import PlanningResult
+
+    names = ["stock_zt_pool", "stock_sector_fund_flow_rank"]
+    if missing_tool:
+        names.remove(missing_tool)
+    definitions = [{"type": "function", "function": {"name": name}} for name in names]
+    monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / f"mcp-gate-{len(whitelist)}-{breaker_open}.json")))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=True, web_search=False, mcp_max_tool_calls=9, mcp_tool_whitelist=whitelist,
+    )))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: definitions)
+    monkeypatch.setattr(server, "_mcp_tool_defs_cache", definitions)
+    monkeypatch.setattr(server, "mcp_breaker", type("Breaker", (), {"allow": lambda self: not breaker_open})())
+    monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: lambda *_args: "")
+    mcp_calls, index_calls = [], []
+    monkeypatch.setattr(server.market_data_mcp, "call_tool", lambda *args, **kwargs: mcp_calls.append(args))
+    monkeypatch.setattr(server.tencent_quote, "kline", lambda symbol, **kwargs: (
+        index_calls.append(symbol) or [{"date": "2026-09-24", "close": 1.0}]
+    ))
+
+    class FailedPlanner:
+        def __init__(self, *_args): pass
+        def plan(self, *_args, **_kwargs): return PlanningResult("fallback", None)
+    class AnswerAI:
+        def chat_stream(self, **_kwargs):
+            yield {"type": "done", "answer": "仅说明实际指数覆盖。", "model": "fixture", "usage": {}}
+    class NoStore:
+        def query(self, *_args, **_kwargs): raise AssertionError("market recap must not retrieve")
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FailedPlanner)
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "2026-09-24 A股复盘", "scope_mode": "whole_corpus", "use_mcp": True,
+    }))
+
+    assert [step["kind"] for step in _event(events, "execution_plan")["steps"]] == [
+        "market_indices", "answer",
+    ]
+    assert len(index_calls) == 4
+    assert mcp_calls == []
+
+
+def test_market_planner_failure_without_minimum_budget_stops_before_any_source(client, env, monkeypatch, tmp_path):
+    from financial_report_fetcher.rag.config import RagConfig
+    from webapp.chat_store import ChatStore
+    from webapp.execution_planner import PlanningResult
+
+    monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "under-budget.json")))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=False, web_search=False, mcp_max_tool_calls=3,
+    )))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
+    source_calls = []
+    monkeypatch.setattr(server.tencent_quote, "kline", lambda *_args, **_kwargs: source_calls.append("kline"))
+
+    class FailedPlanner:
+        def __init__(self, *_args):
+            pass
+        def plan(self, *_args, **_kwargs):
+            return PlanningResult("fallback", None)
+
+    class ForbiddenQA:
+        def answer_stream(self, *_args, **_kwargs):
+            raise AssertionError("failed market planning must not enter financial RAG")
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FailedPlanner)
+    monkeypatch.setattr(server, "rag_qa", ForbiddenQA())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "2026-09-24 A股复盘", "scope_mode": "whole_corpus", "use_mcp": False,
+    }))
+
+    assert "没有同时满足授权与调用预算" in _event(events, "clarification")["message"]
+    assert _event(events, "done")["run"] is None
+    assert source_calls == []
+
+
 def test_recap_coverage_marks_fixed_provider_window_mismatch_and_single_day_pool():
     from datetime import date
 
@@ -3463,25 +3595,27 @@ def test_company_specific_definition_does_not_use_unretrieved_knowledge(client, 
     assert not any(name == "execution_plan" for name, _ in events)
 
 
-def test_m2_raw_tool_json_does_not_bypass_fact_normalization(client, env, monkeypatch):
+def test_market_request_uses_server_frozen_source_not_model_raw_tool_payload(client, env, monkeypatch):
     class RawToolRag:
         def answer_stream(self, question, **kwargs):
-            yield {"type": "tool_call", "name": "get_quote", "arguments": {"symbol": "601288"}}
-            yield {"type": "tool_result", "name": "get_quote", "ok": True, "summary": json.dumps({
-                "metric": "price", "value": 3.2, "unit": "元/股", "period": "as_of",
-                "company_code": "601288", "as_of": "2026-09-16T10:00:00",
-            })}
-            yield {"type": "done", "answer": "实时数据仅供参考。", "citations": [], "model": "m", "usage": {}, "tools_used": ["get_quote"], "retrieval_report_ids": [], "retrieval_degraded": False}
+            raise AssertionError("frozen market execution must not accept model-selected tool calls")
+
+        def answer_from_context(self, *_args, **_kwargs):
+            yield {"type": "done", "answer": "仅供参考。", "citations": [], "model": "m", "usage": {}, "tools_used": [], "retrieval_report_ids": [], "retrieval_degraded": False}
 
     monkeypatch.setattr(server, "rag_qa", RawToolRag())
+    monkeypatch.setattr(server.tencent_quote, "realtime", lambda _symbols: [])
     events = _read_sse(client.post("/api/chat/stream", json={
         "question": "农业银行今天行情如何？",
         "focus_report": {"code": "601288", "name": "农业银行", "period": "2026-06-30"},
-        "use_mcp": True,
+        "use_mcp": False,
     }))
 
+    assert any(name == "done" for name, _ in events), _event(events, "error")
     run = _event(events, "done")["run"]
     assert run["facts"] == []
+    assert run["execution_plan"]["source_mode"] == "external_market"
+    assert run["execution_steps"][0]["kind"] == "market_quote"
 
 
 def test_pdf_citations_are_projected_to_literal_scoped_facts_before_verification(monkeypatch):
