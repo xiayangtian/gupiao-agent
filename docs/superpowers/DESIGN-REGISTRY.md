@@ -18,6 +18,7 @@
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
 | 智能问答市场链路修复：对象、时间、澄清、来源与终态 | 实施中 | — | [主记录](#chat-market-routing-repair) |
+| 个股与大盘通用期限行情分析 | 实施中 | — | [主记录](#generic-market-horizons) |
 
 ## 全部设计
 
@@ -54,3 +55,4 @@
 | <a id="chat-reliability-p3"></a>智能问答可靠性优化第三阶段：异步规划、即时进度、取消与研究路由 | [P3 详细设计](specs/chat-reliability-p3.md) | [确认实施计划](plans/2026-10-08-chat-p3.md)；[计划边界](specs/2026-09-24-chat-reliability.md#p3-plan) | 已实现 | — | 本地 main 合并 ee3c3d6（实现 105b350、deadline 修复 ee3c3d6）；`python3 -m pytest -q tests/unit/test_chat_runs.py tests/unit/test_chat_policy.py tests/unit/test_server_api.py tests/unit/test_source_runtime.py tests/unit/test_execution_plan.py tests/unit/test_execution_executor.py tests/unit/test_research_agent.py tests/unit/test_research_executor.py tests/unit/test_research_planner.py tests/unit/test_chat_rendering_js.py tests/unit/test_chat_execution_plan.py tests/unit/test_design_registry.py`：282 passed；P3/P2/source-runtime 浏览器回归 7 passed；协作取消、超时步骤边界、来源门控与执行进度均通过隔离替身验证；研究取消/恢复及容量饱和的浏览器端到端覆盖仍可加强；未推送远端；TASK-20260924-005 | 2026-10-08 |
 | <a id="chat-reliability-p4"></a>智能问答可靠性优化第四阶段：真实链路评测、检索质量与上下文压缩 | [P4 详细设计](specs/chat-reliability-p4.md) | [计划](plans/2026-10-08-chat-p4.md)；[计划边界](specs/2026-09-24-chat-reliability.md#p4-plan) | 已实现 | — | 用户授权后于 2026-10-08 本地 fast-forward 合入 `main`（合并 03df820）；聚焦单测 352 passed、P3/P2/source-runtime 浏览器 9 passed，`git diff --check` 通过；`python3 -m pytest -q tests/unit/test_design_registry.py`：9 passed。9 场景相关窗口候选 0 阻断、9/9 终态匹配，目标引用 0/1→1/1；长历史 prompt 字符估计 24,899→15,877。真实提供方未探测，未推送远端；TASK-20260924-006 | 2026-10-08 |
 | <a id="chat-market-routing-repair"></a>智能问答市场链路修复：对象、时间、澄清、来源与终态 | [设计](specs/2026-10-09-chat-market-routing-repair-design.md) | [实施计划](plans/2026-10-09-chat-market-routing-repair.md) | 实施中 | — | 2026-10-09 用户授权开发；功能分支 `feat/chat-market-routing-repair`（基于 `main` `81959c4` 及已确认设计/计划文档提交）；聚焦基线待验证，真实行情/MCP 尚未探测 | 2026-10-09 |
+| <a id="generic-market-horizons"></a>个股与大盘通用期限行情分析 | [设计](specs/2026-10-09-individual-and-market-horizon-analysis-design.md) | [实施计划](plans/2026-10-09-generic-market-horizon-analysis.md) | 实施中 | — | 用户确认通用期限解析、模糊默认映射、大盘指数边界及固定目标 query 矩阵；实施分支 `feat/market-horizon-analysis`，完整测试和 Q1-Q15 本地服务验证待完成 | 2026-10-09 |

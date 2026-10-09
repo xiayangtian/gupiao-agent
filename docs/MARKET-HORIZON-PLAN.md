@@ -1,0 +1,1 @@
+superpowers/plans/2026-10-09-generic-market-horizon-analysis.md
