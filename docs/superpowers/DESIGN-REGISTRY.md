@@ -13,11 +13,11 @@
 
 ## 未完成项目
 
-“待核实”表示缺少可验证的合并记录，并不等于未实现；请打开其主记录查看设计、实施计划和证据。这里仅保留主记录链接，完整字段只在“全部设计”维护。当前没有待实现、实施中或待核实项目；有新的未完成方案时再补充下表。
+“待核实”表示缺少可验证的合并记录，并不等于未实现；请打开其主记录查看设计、实施计划和证据。这里仅保留主记录链接，完整字段只在“全部设计”维护。
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
-
+| 智能问答市场链路修复：对象、时间、澄清、来源与终态 | 待实现 | 可直接执行 | [主记录](#chat-market-routing-repair) |
 
 ## 全部设计
 
@@ -53,3 +53,4 @@
 | <a id="chat-reliability-p2"></a>智能问答可靠性优化第二阶段：公司与时间范围、复盘口径及数字核验 | [P2 设计](specs/chat-reliability-p2.md) | [已确认计划](plans/2026-09-24-chat-p2.md)；[计划边界](specs/2026-09-24-chat-reliability.md#p2-plan) | 已实现 | — | 本地 `main` 合并 d197b1d（分支 5f169d4、151730e、8320d9d、519d733、4d4d5b9、6d71109）；合并后 `python3 -m pytest -q tests/unit/test_chat_scope.py tests/unit/test_chat_models.py tests/unit/test_chat_time.py tests/unit/test_chat_policy.py tests/unit/test_chat_execution.py tests/unit/test_execution_planner.py tests/unit/test_chat_execution_plan.py tests/unit/test_execution_plan_recap.py tests/unit/test_mcp_tools.py tests/unit/test_execution_market_recap.py tests/unit/test_execution_executor.py tests/unit/test_source_runtime.py tests/unit/test_source_adapters.py tests/unit/test_chat_facts.py tests/unit/test_chat_verifier.py tests/unit/test_rag_qa.py tests/unit/test_chat_store.py tests/unit/test_server_api.py tests/unit/test_chat_rendering_js.py tests/unit/test_design_registry.py tests/unit/test_evidence_identity.py tests/unit/test_chat_evidence.py`：462 passed；`python3 -m pytest -q tests/browser/test_chat_reliability_p2.py tests/browser/test_chat_source_runtime.py`：6 passed；`git diff --check` 通过。合并前隔离 `browser_qa` desktop/tablet/mobile 无 console/page errors，仅 favicon.ico 404；390×844 无横向溢出。未测试真实提供方，未推送远端；P3/P4 未实现；TASK-20260924-004 | 2026-10-08 |
 | <a id="chat-reliability-p3"></a>智能问答可靠性优化第三阶段：异步规划、即时进度、取消与研究路由 | [P3 详细设计](specs/chat-reliability-p3.md) | [确认实施计划](plans/2026-10-08-chat-p3.md)；[计划边界](specs/2026-09-24-chat-reliability.md#p3-plan) | 已实现 | — | 本地 main 合并 ee3c3d6（实现 105b350、deadline 修复 ee3c3d6）；`python3 -m pytest -q tests/unit/test_chat_runs.py tests/unit/test_chat_policy.py tests/unit/test_server_api.py tests/unit/test_source_runtime.py tests/unit/test_execution_plan.py tests/unit/test_execution_executor.py tests/unit/test_research_agent.py tests/unit/test_research_executor.py tests/unit/test_research_planner.py tests/unit/test_chat_rendering_js.py tests/unit/test_chat_execution_plan.py tests/unit/test_design_registry.py`：282 passed；P3/P2/source-runtime 浏览器回归 7 passed；协作取消、超时步骤边界、来源门控与执行进度均通过隔离替身验证；研究取消/恢复及容量饱和的浏览器端到端覆盖仍可加强；未推送远端；TASK-20260924-005 | 2026-10-08 |
 | <a id="chat-reliability-p4"></a>智能问答可靠性优化第四阶段：真实链路评测、检索质量与上下文压缩 | [P4 详细设计](specs/chat-reliability-p4.md) | [计划](plans/2026-10-08-chat-p4.md)；[计划边界](specs/2026-09-24-chat-reliability.md#p4-plan) | 已实现 | — | 用户授权后于 2026-10-08 本地 fast-forward 合入 `main`（合并 03df820）；聚焦单测 352 passed、P3/P2/source-runtime 浏览器 9 passed，`git diff --check` 通过；`python3 -m pytest -q tests/unit/test_design_registry.py`：9 passed。9 场景相关窗口候选 0 阻断、9/9 终态匹配，目标引用 0/1→1/1；长历史 prompt 字符估计 24,899→15,877。真实提供方未探测，未推送远端；TASK-20260924-006 | 2026-10-08 |
+| <a id="chat-market-routing-repair"></a>智能问答市场链路修复：对象、时间、澄清、来源与终态 | [设计](specs/2026-10-09-chat-market-routing-repair-design.md) | [实施计划](plans/2026-10-09-chat-market-routing-repair.md) | 待实现 | 可直接执行 | 2026-10-09 用户确认“近期”默认最近五个实际交易日及大盘仅在现有预算内尝试 MCP 广度；设计/计划仅在文档分支，业务代码未修改、未验证实际行情、未合入 main | 2026-10-09 |
