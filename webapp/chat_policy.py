@@ -12,6 +12,7 @@ from financial_report_fetcher.rag.mcp_tools import (
     is_web_search_tool,
 )
 from webapp.chat_models import IntentDecision, Scope, SourcePolicy, ToolPolicy
+from webapp.chat_time import has_market_period_expression, is_fuzzy_market_horizon, is_orphan_market_horizon
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ class QuestionRouter:
     """Deterministic question intent routing, separate from tool authorization."""
 
     _RECAP = ("复盘", "行情回顾", "收盘总结", "大盘总结", "市场回顾")
-    _BROAD_MARKET = ("大盘", "指数", "两市", "A股市场", "全市场", "市场整体")
+    _BROAD_MARKET = ("大盘", "指数", "两市", "A股", "全市场", "市场整体")
     _FINANCIAL = ("营收", "营业收入", "净利润", "净利", "利润", "ROE", "毛利率", "资产负债", "现金流", "财报", "年报", "半年报", "季报")
     _FINANCIAL_TREND = ("趋势", "同比", "环比", "历年", "多年", "增长率", "变化趋势")
     _MARKET = ("股价", "股票", "个股", "K线", "涨跌", "行情", "价格", "报价", "现价", "收盘价", "成交量", "涨跌幅")
@@ -59,6 +60,8 @@ class QuestionRouter:
         broad_market = any(word in text for word in self._BROAD_MARKET) or bool(
             re.fullmatch(r"\s*(?:(?:分析|看看|查看|复盘)\s*)?(?:(?:今日|今天|近期|最近|近五交易日|近5日)\s*)?(?:股票|股市)?行情\s*[？?。]?", text)
         )
+        if is_orphan_market_horizon(text):
+            return QuestionRoute("clarification", False, False)
         if broad_market and any(word in text for word in ("A股", "大盘", "市场", "行情", "指数", "两市")):
             return QuestionRoute("market_recap", False, True)
         if any(word in text for word in self._RECAP) and any(word in text for word in ("A股", "大盘", "市场", "行情", "指数", "复盘")):
@@ -67,12 +70,16 @@ class QuestionRouter:
             if self.is_knowledge_question(text):
                 return QuestionRoute("general_knowledge", False, False)
             return QuestionRoute("clarification", False, False)
-        market = any(word in text for word in self._MARKET)
+        financial = any(word.lower() in text.lower() for word in self._FINANCIAL)
+        market = any(word in text for word in self._MARKET) or (
+            not financial and (has_market_period_expression(text) or is_fuzzy_market_horizon(text))
+            and any(word in text for word in ("走势", "趋势", "表现"))
+        )
         if market:
-            if any(word in text for word in self._MARKET_TREND):
+            if (any(word in text for word in self._MARKET_TREND)
+                    or has_market_period_expression(text) or is_fuzzy_market_horizon(text)):
                 return QuestionRoute("market_trend", True, True)
             return QuestionRoute("market_quote", True, False)
-        financial = any(word.lower() in text.lower() for word in self._FINANCIAL)
         if financial and any(word in text for word in self._FINANCIAL_TREND):
             return QuestionRoute("financial_trend", True, True)
         if financial:

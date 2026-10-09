@@ -19,6 +19,16 @@ _FINANCIAL_RANGE_RE = re.compile(
 _ROLLING_YEAR_RE = re.compile(r"(?:近|最近|过去|近来)\s*(?P<count>[一二两三四五六七八九十\d]+)\s*年")
 _YEAR_RE = re.compile(r"(?<!\d)(?P<year>\d{4})\s*年(?:度|报|年报|财报)?")
 _QUARTER_RE = re.compile(r"(?P<year>\d{4})\s*年?\s*(?:第\s*)?(?P<quarter>[一二三四1234])\s*季度")
+_MARKET_DURATION_RE = re.compile(
+    r"(?:(?:最近|近来|近|过去(?:的)?)\s*)?"
+    r"(?P<count>[0-9零〇一二两三四五六七八九十百千]+)\s*"
+    r"(?P<unit>个?交易日|个?自然日|个?工作日|天|日|个?星期|周|个月|月|个?季度|年)"
+    r"(?:之内|内|以来)?"
+)
+_HALF_YEAR_RE = re.compile(r"(?:(?:最近|近来|近|过去(?:的)?)\s*)?半年(?:之内|内|以来)?")
+_FUZZY_MARKET_HORIZONS = ("短期", "短线", "中期", "中线", "长期", "长线")
+_MAX_MARKET_WINDOW_MONTHS = 800
+_MAX_MARKET_TRADING_DAYS = 800
 
 
 def _parse_date(value: Any) -> date | None:
@@ -37,6 +47,97 @@ def _parse_date(value: Any) -> date | None:
         return date.fromisoformat(text[:10])
     except ValueError:
         return None
+
+
+def _chinese_count(text: str) -> int | None:
+    if text.isdigit():
+        return int(text)
+    digit_values = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3,
+                    "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    unit_values = {"十": 10, "百": 100, "千": 1000}
+    total = section = number = 0
+    for char in text:
+        if char in digit_values:
+            number = digit_values[char]
+        elif char in unit_values:
+            unit = unit_values[char]
+            section += (number or 1) * unit
+            number = 0
+        else:
+            return None
+    return total + section + number
+
+
+def _parse_market_duration(text: str) -> tuple[int, str] | None:
+    if _HALF_YEAR_RE.search(text):
+        return 6, "month"
+    match = _MARKET_DURATION_RE.search(text)
+    if not match:
+        return None
+    count = _chinese_count(match.group("count"))
+    if count is None or count < 1:
+        return None
+    unit_text = match.group("unit")
+    if "交易日" in unit_text or "工作日" in unit_text:
+        return count, "trading_day"
+    if unit_text == "日" and count == 5:
+        return count, "trading_day"  # Keep the existing "近五日/近5日" five-trading-day contract.
+    if unit_text in {"日", "天", "个自然日"}:
+        return count, "day"
+    if "周" in unit_text or "星期" in unit_text:
+        return count, "week"
+    if "季度" in unit_text:
+        return count, "quarter"
+    if unit_text in {"月", "个月"}:
+        return count, "month"
+    return count, "year"
+
+
+def has_market_period_expression(question: str) -> bool:
+    """Recognize explicit horizon syntax, including a validly recognized but over-limit span."""
+    text = question or ""
+    return bool(_HALF_YEAR_RE.search(text) or _MARKET_DURATION_RE.search(text))
+
+
+def is_fuzzy_market_horizon(question: str) -> bool:
+    text = question or ""
+    if has_market_period_expression(text):
+        return False
+    return any(term in text for term in (*_FUZZY_MARKET_HORIZONS, "近期", "最近", "近来"))
+
+
+def is_orphan_market_horizon(question: str) -> bool:
+    text = (question or "").strip()
+    if not text:
+        return False
+    generic = r"(?:(?:短期|短线|中期|中线|长期|长线)|(?:最近|近来|近|过去(?:的)?)?半年(?:之内|内|以来)?|(?:最近|近来|近|过去(?:的)?)?[0-9零〇一二两三四五六七八九十百千]+\s*(?:个?交易日|个?自然日|个?工作日|天|日|个?星期|周|个月|月|个?季度|年)(?:之内|内|以来)?)"
+    return bool(re.fullmatch(rf"(?:(?:分析|看看|查看|请分析)\s*)?{generic}\s*(?:行情|走势|趋势|表现|股价)?[？?。]?", text))
+
+
+def market_window_error(question: str) -> str | None:
+    duration = _parse_market_duration(question or "")
+    if duration is None:
+        return None
+    count, unit = duration
+    months = count * {"year": 12, "quarter": 3, "month": 1}.get(unit, 0)
+    if unit == "trading_day" and count > _MAX_MARKET_TRADING_DAYS:
+        return "market_window_too_long"
+    if unit == "day" and count > _MAX_MARKET_WINDOW_MONTHS * 31:
+        return "market_window_too_long"
+    if unit == "week" and count > _MAX_MARKET_WINDOW_MONTHS * 31 // 7:
+        return "market_window_too_long"
+    if months > _MAX_MARKET_WINDOW_MONTHS:
+        return "market_window_too_long"
+    return None
+
+
+def _subtract_months(day: date, months: int) -> date:
+    month_index = day.year * 12 + day.month - 1 - months
+    year, month_zero = divmod(month_index, 12)
+    month = month_zero + 1
+    next_month = date(year + (month == 12), 1 if month == 12 else month + 1, 1)
+    last_day = (next_month - timedelta(days=1)).day
+    return date(year, month, min(day.day, last_day))
 
 
 def _request_date(now: datetime | None) -> date:
@@ -176,10 +277,29 @@ def resolve_market_window(question: str, now: datetime | None = None) -> MarketW
     if "本周" in text or "这周" in text:
         start = today - timedelta(days=today.weekday())
         return MarketWindow("本周", "calendar_week", start, today, None)
-    if re.search(r"(?:近|最近|过去)\s*(?:五|5)\s*(?:个)?交易日", text):
-        return MarketWindow("近五交易日", "rolling_trading_days", None, today, 5)
-    if re.search(r"(?:近|最近|近来)\s*(?:五|5)\s*(?:个)?日", text):
-        return MarketWindow("近五交易日", "rolling_trading_days", None, today, 5)
+    duration = _parse_market_duration(text)
+    if duration is not None:
+        if market_window_error(text):
+            return None
+        count, unit = duration
+        if unit == "trading_day":
+            return MarketWindow(f"近{count}交易日", "rolling_trading_days", None, today, count)
+        if unit == "day":
+            return MarketWindow(f"近{count}自然日", "explicit", today - timedelta(days=count - 1), today, None)
+        if unit == "week":
+            days = count * 7
+            return MarketWindow(f"近{count}周", "explicit", today - timedelta(days=days - 1), today, None)
+        months = count * {"quarter": 3, "year": 12}.get(unit, 1)
+        return MarketWindow(f"近{count}{'季度' if unit == 'quarter' else '年' if unit == 'year' else '个月'}",
+                            "explicit", _subtract_months(today, months), today, None)
+
+    fuzzy = next((term for term in _FUZZY_MARKET_HORIZONS if term in text), None)
+    if fuzzy:
+        if fuzzy in {"短期", "短线"}:
+            return MarketWindow("短期（近五交易日）", "rolling_trading_days", None, today, 5)
+        months = 6 if fuzzy in {"中期", "中线"} else 36
+        label = "中期（近六个月）" if months == 6 else "长期（近三年）"
+        return MarketWindow(label, "explicit", _subtract_months(today, months), today, None)
     if any(word in text for word in ("近期", "最近", "近来")) and any(word in text for word in market_words):
         return MarketWindow("近五交易日", "rolling_trading_days", None, today, 5)
     return None

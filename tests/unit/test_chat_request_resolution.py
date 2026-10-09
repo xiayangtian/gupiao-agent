@@ -23,7 +23,7 @@ def test_company_recent_market_request_defaults_to_five_trading_days():
     assert isinstance(result, ResolvedRequest)
     assert result.route.intent == "market_trend"
     assert result.market_window.trading_days == 5
-    assert result.window_origin == "recent_default"
+    assert result.window_origin == "fuzzy_default"
     assert "market_kline" in result.allowed_source_kinds
     assert "retrieve" not in result.allowed_source_kinds
 

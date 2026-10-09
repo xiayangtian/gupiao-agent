@@ -7,7 +7,10 @@ from typing import Any, Literal, Mapping
 
 from webapp.chat_policy import QuestionRoute, QuestionRouter
 from webapp.chat_scope import ScopeRequest
-from webapp.chat_time import MarketWindow, resolve_financial_period, resolve_market_window
+from webapp.chat_time import (
+    MarketWindow, has_market_period_expression, is_fuzzy_market_horizon,
+    market_window_error, resolve_financial_period, resolve_market_window,
+)
 
 
 @dataclass(frozen=True)
@@ -27,7 +30,7 @@ class ResolvedRequest:
     effective_question: str
     market_window: MarketWindow | None
     financial_period: str | None
-    window_origin: Literal["explicit", "recent_default", "clarification", "none"]
+    window_origin: Literal["explicit", "fuzzy_default", "clarification", "none"]
     allowed_source_kinds: frozenset[str]
     consumed_pending_version: str | None = None
 
@@ -43,9 +46,6 @@ _SOURCE_KINDS = {
     "research_task": frozenset(),
 }
 _FINANCIAL_TERMS = ("营收", "营业收入", "净利润", "净利", "财报", "年报", "半年报", "季报", "ROE", "毛利率", "现金流")
-_RECENT_TERMS = ("近期", "最近", "近来")
-
-
 def _restore_window(value: Any) -> MarketWindow | None:
     if not isinstance(value, Mapping):
         return None
@@ -122,8 +122,14 @@ def _clarification_for(
         return Clarification("请明确财报期间或趋势范围，例如 2025 年或近三年。",
                              "window", route.intent, question)
     if route.requires_time_window and window is None and route.intent in {"market_trend", "market_recap"}:
-        subject = "请明确行情时间范围，例如今日、近五交易日或具体日期。"
-        return Clarification(subject, "window", route.intent, question,
+        error = market_window_error(question)
+        if error == "market_window_too_long":
+            message = "该行情期限超出当前可查询历史范围（最多800个月），请缩短时间范围。"
+        elif has_market_period_expression(question):
+            message = "无法解析该行情期限，请改用自然日、交易日、周、月或年表达。"
+        else:
+            message = "请明确行情时间范围，例如近五交易日、近半年或具体日期。"
+        return Clarification(message, "window", route.intent, question,
                              company_code=company_code, financial_period=financial_period)
     return None
 
@@ -150,9 +156,13 @@ def resolve_chat_request(
     router = QuestionRouter()
     route = router.classify(text)
     window = resolve_market_window(text, now)
-    financial_period = resolve_financial_period(text)
+    financial_period = (None if route.intent in {"market_quote", "market_trend", "market_recap"}
+                        else resolve_financial_period(text))
     effective_question = text
-    window_origin: Literal["explicit", "recent_default", "clarification", "none"] = "explicit" if window else "none"
+    window_origin: Literal["explicit", "fuzzy_default", "clarification", "none"] = (
+        "fuzzy_default" if window and is_fuzzy_market_horizon(text)
+        else "explicit" if window else "none"
+    )
     consumed_version = None
 
     if isinstance(pending, Mapping) and _pending_is_fresh(pending, now):
@@ -192,8 +202,8 @@ def resolve_chat_request(
     if clarification is not None:
         return clarification
 
-    if route.intent == "market_trend" and any(term in effective_question for term in _RECENT_TERMS):
-        window_origin = "recent_default"
+    if route.intent == "market_trend" and window is not None and is_fuzzy_market_horizon(effective_question):
+        window_origin = "fuzzy_default"
     if consumed_version is not None and window_origin == "explicit":
         window_origin = "clarification"
     return ResolvedRequest(
