@@ -140,8 +140,16 @@ def resolve_financial_period(question: str) -> str | None:
 
 
 def resolve_market_window(question: str, now: datetime | None = None) -> MarketWindow | None:
-    """Resolve only explicit, bounded market periods in Asia/Shanghai local dates."""
+    """Resolve bounded market periods in Asia/Shanghai local dates.
+
+    Vague recent wording defaults to five returned trading days only when the
+    question is about market data; financial periods remain a separate contract.
+    """
     text = question or ""
+    financial_words = ("营收", "营业收入", "净利润", "净利", "财报", "年报", "半年报", "季报", "ROE", "毛利率", "现金流")
+    market_words = ("股价", "股票", "个股", "行情", "走势", "大盘", "指数", "A股", "涨跌", "K线")
+    if any(word.lower() in text.lower() for word in financial_words) and not any(word in text for word in market_words):
+        return None
     today = _request_date(now)
     match = _DATE_RANGE_RE.search(text)
     if match:
@@ -169,6 +177,10 @@ def resolve_market_window(question: str, now: datetime | None = None) -> MarketW
         start = today - timedelta(days=today.weekday())
         return MarketWindow("本周", "calendar_week", start, today, None)
     if re.search(r"(?:近|最近|过去)\s*(?:五|5)\s*(?:个)?交易日", text):
+        return MarketWindow("近五交易日", "rolling_trading_days", None, today, 5)
+    if re.search(r"(?:近|最近|近来)\s*(?:五|5)\s*(?:个)?日", text):
+        return MarketWindow("近五交易日", "rolling_trading_days", None, today, 5)
+    if any(word in text for word in ("近期", "最近", "近来")) and any(word in text for word in market_words):
         return MarketWindow("近五交易日", "rolling_trading_days", None, today, 5)
     return None
 

@@ -62,6 +62,20 @@ def test_explicit_date_range_is_inclusive():
     assert window.end_date == date(2026, 10, 2)
 
 
+@pytest.mark.parametrize("phrase", ["近期", "近5日", "最近五日", "近五交易日", "近5个交易日"])
+def test_recent_market_expressions_default_to_five_actual_trading_days(phrase):
+    window = _api().resolve_market_window(f"福耀玻璃{phrase}行情", NOW)
+
+    assert window is not None
+    assert window.kind == "rolling_trading_days"
+    assert window.trading_days == 5
+    assert window.end_date == NOW.date()
+
+
+def test_market_time_default_does_not_apply_to_financial_questions():
+    assert _api().resolve_market_window("农业银行近期营收趋势", NOW) is None
+
+
 def test_market_bar_selection_sorts_deduplicates_and_ignores_outside_dates():
     api = _api()
     window = api.resolve_market_window("上周", NOW)

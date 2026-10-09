@@ -46,6 +46,32 @@ def test_question_router_separates_quotes_price_trends_recap_and_ambiguity():
     assert ambiguous.intent == "clarification"
 
 
+def test_question_router_routes_broad_market_without_requesting_a_company():
+    from webapp.chat_policy import QuestionRouter
+
+    router = QuestionRouter()
+    for question in ("分析今日股票行情", "今日大盘走势", "A股指数行情"):
+        route = router.classify(question)
+        assert route.intent == "market_recap", question
+        assert route.requires_company is False, question
+
+
+def test_question_router_defaults_recent_company_market_to_bounded_trend():
+    from webapp.chat_policy import QuestionRouter
+
+    route = QuestionRouter().classify("分析福耀玻璃近期行情")
+
+    assert (route.intent, route.requires_company, route.requires_time_window) == ("market_trend", True, True)
+
+
+def test_orphan_market_window_needs_subject_clarification():
+    from webapp.chat_policy import QuestionRouter
+
+    route = QuestionRouter().classify("近五交易日")
+
+    assert route.intent == "clarification"
+
+
 def test_question_router_separates_stable_knowledge_from_current_web_questions():
     router_type = getattr(chat_policy, "QuestionRouter", None)
     assert router_type is not None, "QuestionRouter must be implemented before the planner can route chat"
