@@ -75,6 +75,7 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
 from .chat_execution import build_source_runtime, execute_source, project_sources, resolve_answer_status
+from .chat_request_resolution import Clarification, ResolvedRequest, resolve_chat_request, serialize_market_window
 from .chat_runs import ChatEventChannel, ChatRunCancelled, ChatRunControl, ChatRunDeadlineExceeded, ChatRunRegistry
 from .source_adapters import SourceAccess
 from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceResult
@@ -1429,14 +1430,16 @@ def _build_scope_resolver() -> ScopeResolver:
 
 
 def _resolve_scope(
-    body: StreamChatRequest, run_id: str = "", *, requires_company: bool = False
+    body: StreamChatRequest, run_id: str = "", *, requires_company: bool = False,
+    question: str | None = None,
 ) -> ScopeResolution:
     """Resolve chat scope; an unresolved required company never falls back to whole corpus."""
     resolver = _build_scope_resolver()
     request = ScopeRequest(body.scope_mode, body.focus_report)
     try:
         return resolver.resolve_for_chat(
-            body.question, request, requires_company=requires_company,
+            question if question is not None else body.question,
+            request, requires_company=requires_company,
         )
     except Exception as exc:
         # 异常文本可能携带问题内容；只记录受控错误类型，并对公司型问句 fail-closed。
@@ -1484,12 +1487,16 @@ def _recap_coverage_for_window(result: SourceResult, window: MarketWindow) -> So
 
 def _chat_preflight_response(
     session_id: str, question: str, message: str, started_at: float,
+    *, pending: Mapping[str, Any] | None = None,
 ) -> StreamingResponse:
     """Persist and return a clarification without constructing a planner or source runtime."""
-    chat_store.append_messages(session_id, [
-        {"role": "user", "content": question},
-        {"role": "assistant", "content": message},
-    ])
+    if pending is not None:
+        chat_store.append_clarification(session_id, question, message, pending)
+    else:
+        chat_store.append_messages(session_id, [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": message},
+        ])
 
     async def events():
         yield _sse("session", {"session_id": session_id})
@@ -2442,47 +2449,94 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
     if not body.question.strip():
         raise HTTPException(400, "问题不能为空")
 
+    original_question = body.question
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
     # The shared RagQA context-budget projection owns history truncation; preserve
     # the original session records here so it can keep the most relevant recent turns.
     history = session.get("messages", [])
     run_id = run_id_override or uuid.uuid4().hex
+    request_now = dt.datetime.now(dt.timezone.utc)
+    scope_request = ScopeRequest(body.scope_mode, body.focus_report)
+    pending = session.get("pending_clarification")
+    resolved_request = resolve_chat_request(original_question, scope_request, pending, request_now)
+    if isinstance(pending, Mapping):
+        if isinstance(resolved_request, ResolvedRequest) and resolved_request.consumed_pending_version:
+            consumed = chat_store.consume_pending(
+                sid, now=request_now, expected_version=resolved_request.consumed_pending_version,
+            )
+            if consumed is None:
+                resolved_request = resolve_chat_request(original_question, scope_request, None, request_now)
+        else:
+            chat_store.clear_pending(sid)
 
-    route = QuestionRouter().classify(body.question)
-    knowledge_mode = route.intent == "general_knowledge" and QuestionRouter.is_knowledge_question(body.question)
-    if route.intent == "clarification":
+    def persist_clarification(item: Clarification, *, company_code: str | None = None) -> StreamingResponse:
+        pending_record = None
+        if item.missing_field in {"subject", "window"} and item.intent in {
+            "market_quote", "market_trend", "market_recap", "report_fact", "financial_trend",
+        }:
+            pending_record = {
+                "version": uuid.uuid4().hex,
+                "created_at": request_now.isoformat(),
+                "missing_field": item.missing_field,
+                "intent": item.intent,
+                "company_code": company_code or item.company_code,
+                "market_window": serialize_market_window(item.market_window),
+                "financial_period": item.financial_period,
+                "question": item.question,
+            }
         return _chat_preflight_response(
-            sid, body.question, "请说明你希望分析财报经营指标，还是证券价格走势。", started_at,
+            sid, original_question, item.message, started_at, pending=pending_record,
         )
 
+    if isinstance(resolved_request, Clarification):
+        clarification = resolved_request
+        if clarification.missing_field == "window" and clarification.intent in {"market_trend", "market_quote", "financial_trend"}:
+            scope_check = await asyncio.to_thread(
+                _resolve_scope, body, run_id, requires_company=True, question=clarification.question,
+            )
+            if scope_check.scope is None:
+                clarification = Clarification(
+                    "请明确公司名称或 6 位股票代码后再查询。", "subject",
+                    clarification.intent, clarification.question,
+                    market_window=clarification.market_window,
+                    financial_period=clarification.financial_period,
+                )
+            else:
+                clarification = Clarification(
+                    clarification.message, clarification.missing_field, clarification.intent,
+                    clarification.question, scope_check.scope.companies[0].code,
+                    clarification.market_window, clarification.financial_period,
+                )
+        return persist_clarification(clarification)
+
+    question = resolved_request.effective_question
+    body = body.model_copy(update={"question": question})
+    route = resolved_request.route
+    knowledge_mode = route.intent == "general_knowledge" and QuestionRouter.is_knowledge_question(question)
     resolution = await asyncio.to_thread(
-        _resolve_scope, body, run_id, requires_company=route.requires_company,
+        _resolve_scope, body, run_id, requires_company=route.requires_company, question=question,
     )
     if resolution.scope is None:
-        return _chat_preflight_response(sid, body.question, resolution.clarification, started_at)
+        clarification = Clarification(
+            resolution.clarification, "subject", route.intent, question,
+            market_window=resolved_request.market_window,
+            financial_period=resolved_request.financial_period,
+        )
+        return persist_clarification(clarification)
     scope = resolution.scope
     if knowledge_mode and scope.companies:
         return _chat_preflight_response(
-            sid, body.question, "该问题含公司范围；请明确需要解释通用概念，还是查询有来源支持的公司事实。", started_at,
+            sid, original_question, "该问题含公司范围；请明确需要解释通用概念，还是查询有来源支持的公司事实。", started_at,
         )
 
-    financial_period = resolve_financial_period(body.question)
+    financial_period = resolved_request.financial_period
     financial_period_bounds = resolve_financial_period_range(financial_period) if financial_period else None
     verification_period = (
         f"{financial_period_bounds[0].isoformat()}至{financial_period_bounds[1].isoformat()}"
         if financial_period_bounds else financial_period
     )
-    market_window = resolve_market_window(body.question)
-    if route.requires_time_window:
-        if route.intent == "financial_trend" and financial_period is None:
-            return _chat_preflight_response(
-                sid, body.question, "请明确财报期间或趋势范围，例如 2025 年或近三年。", started_at,
-            )
-        if route.intent in {"market_trend", "market_recap"} and market_window is None:
-            return _chat_preflight_response(
-                sid, body.question, "请明确行情时间范围，例如今日、上周、本周、近五交易日或具体日期。", started_at,
-            )
+    market_window = resolved_request.market_window
 
     _require_ai()
     chat_qa = _chat_qa_or_degraded()
@@ -2656,7 +2710,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 status=status, content=content, supplement=supplement,
                 research_run_id=research_run_id, research_summary=research_summary,
             )
-            chat_store.append_turn(sid, question=body.question, run=run)
+            chat_store.append_turn(sid, question=original_question, run=run)
             saved = True
             logger.info("chat_run_finished run_id=%s status=%s", run_id, status)
             return run
@@ -2943,7 +2997,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     completed_at=dt.datetime.now().isoformat(timespec="seconds"),
                     elapsed_seconds=round(time.perf_counter() - started_at, 3),
                 )
-                chat_store.append_turn(sid, question=body.question, run=run)
+                chat_store.append_turn(sid, question=original_question, run=run)
                 saved = True
                 yield _sse("stopped" if run.status == "stopped" else "done", {
                     "answer": run.content, "citations": [], "session_id": sid,

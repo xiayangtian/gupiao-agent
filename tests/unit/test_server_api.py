@@ -365,6 +365,39 @@ def test_chat_stream_clarifies_unresolved_company_before_planning_or_sources(cli
     assert source_calls == []
 
 
+def test_chat_stream_persists_and_consumes_orphan_window_clarification(client, env, monkeypatch, tmp_path):
+    from webapp.chat_store import ChatStore
+
+    store = ChatStore(str(tmp_path / "pending-market.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    captured = []
+
+    def require_scope(body, run_id="", *, requires_company=False, question=None):
+        captured.append((question or body.question, requires_company))
+        return server.ScopeResolution(None, "请提供公司名称或股票代码。")
+
+    monkeypatch.setattr(server, "_resolve_scope", require_scope)
+    first = _read_sse(client.post("/api/chat/stream", json={
+        "question": "近五交易日", "use_mcp": False,
+    }))
+    sid = _event(first, "session")["session_id"]
+    session = store.get_session(sid)
+    assert "pending_clarification" in session
+    assert session["pending_clarification"]["missing_field"] == "subject"
+    assert _event(first, "done")["run"] is None
+
+    second = _read_sse(client.post("/api/chat/stream", json={
+        "question": "600660", "session_id": sid, "use_mcp": False,
+    }))
+
+    assert captured == [("近五交易日 600660", True)]
+    next_pending = store.get_session(sid)["pending_clarification"]
+    assert next_pending["version"] != session["pending_clarification"]["version"]
+    assert next_pending["missing_field"] == "subject"
+    assert next_pending["market_window"]["trading_days"] == 5
+    assert "clarification" in [name for name, _ in second]
+
+
 def test_chat_stream_clarifies_missing_window_before_planning_or_sources(client, env, monkeypatch):
     planner_calls = []
     source_calls = []
