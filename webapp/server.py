@@ -3106,6 +3106,15 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
                     return
+                if state.error_text == "answer_completion_exhausted":
+                    answer = "回答经过补全重试仍未能完整生成，请重试。"
+                    run = _persist("partial", answer)
+                    yield _sse("done", {
+                        "answer": answer, "citations": [], "session_id": sid,
+                        "run": run.to_dict(),
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                    })
+                    return
                 if state.error_text:
                     run = _persist("failed", "".join(state.answer_parts).strip())
                     yield _sse("error", {
@@ -3505,6 +3514,18 @@ async def resolve_chat_supplement(
                         "answer": answer,
                         "citations": [],
                         "session_id": sid,
+                        "run": run.to_dict(),
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                    })
+                    return
+                if state.error_text == "answer_completion_exhausted":
+                    if supplement_status == "completed":
+                        _advance("failed")
+                        supplement_status = "failed"
+                    answer = "回答经过补全重试仍未能完整生成，请重试。"
+                    run = _persist("partial", answer)
+                    yield _sse("done", {
+                        "answer": answer, "citations": [], "session_id": sid,
                         "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })

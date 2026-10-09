@@ -546,6 +546,7 @@ class AIClient:
         reasoning_parts: List[str] = []
         usage: Dict[str, Any] = {}
         resp_model = request_body["model"]
+        finish_reason: Optional[str] = None
         # 流式 tool_calls 分片累积：delta.tool_calls[index].function.{name,arguments}
         tool_calls_acc: Dict[int, Dict[str, Any]] = {}
         try:
@@ -565,7 +566,10 @@ class AIClient:
                 resp_model = data.get("model", resp_model)
                 if data.get("usage"):
                     usage = data["usage"]
-                delta = choices[0].get("delta") or {}
+                choice = choices[0]
+                if choice.get("finish_reason") is not None:
+                    finish_reason = str(choice["finish_reason"])
+                delta = choice.get("delta") or {}
                 content = delta.get("content")
                 reasoning = delta.get("reasoning_content")
                 if content:
@@ -603,6 +607,7 @@ class AIClient:
             "reasoning": "".join(reasoning_parts),
             "model": resp_model,
             "usage": usage,
+            "finish_reason": finish_reason,
         }
 
 

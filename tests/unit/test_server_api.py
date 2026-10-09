@@ -3723,6 +3723,71 @@ def test_general_knowledge_skips_planner_and_sources_and_persists_unretrieved_la
     assert len(calls) == 1 and calls[0].get("tools") is None
 
 
+def test_stream_waits_for_completed_generation_before_persisting_done(client, env, monkeypatch):
+    from financial_report_fetcher.rag.qa import RagQA
+
+    calls = []
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("knowledge path must not retrieve")
+
+    class InterruptedAnswerAI:
+        def chat_stream(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                yield {"type": "delta", "text": "市盈率反映价格与盈利关系", "reasoning": ""}
+                yield {"type": "done", "answer": "市盈率反映价格与盈利关系", "finish_reason": "length",
+                       "model": "fixture", "usage": {}}
+            else:
+                yield {"type": "delta", "text": "，常用于比较估值水平。", "reasoning": ""}
+                yield {"type": "done", "answer": "，常用于比较估值水平。", "finish_reason": "stop",
+                       "model": "fixture", "usage": {}}
+
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), InterruptedAnswerAI()))
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "什么是市盈率？", "scope_mode": "whole_corpus",
+    }))
+
+    done = _event(events, "done")
+    assert sum(name == "done" for name, _ in events) == 1
+    assert len(calls) == 2
+    assert any(name == "reasoning_stage" and data["message"] == "正在补全回答" for name, data in events)
+    assert done["run"]["status"] == "completed"
+    assert done["run"]["content"] == "市盈率反映价格与盈利关系，常用于比较估值水平。"
+
+
+def test_exhausted_completion_persists_notice_instead_of_partial_fragment(client, env, monkeypatch):
+    from financial_report_fetcher.rag.qa import RagQA
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("knowledge path must not retrieve")
+
+    class AlwaysInterruptedAI:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_stream(self, **_kwargs):
+            self.calls += 1
+            fragment = "答案仍未写完，"
+            yield {"type": "delta", "text": fragment, "reasoning": ""}
+            yield {"type": "done", "answer": fragment, "finish_reason": "length",
+                   "model": "fixture", "usage": {}}
+
+    ai = AlwaysInterruptedAI()
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), ai))
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "什么是市盈率？", "scope_mode": "whole_corpus",
+    }))
+
+    done = _event(events, "done")
+    assert ai.calls == 3
+    assert done["run"]["status"] == "partial"
+    assert done["run"]["content"] == "回答经过补全重试仍未能完整生成，请重试。"
+    assert "答案仍未写完" not in done["run"]["content"]
+
+
 def test_current_policy_without_authorized_web_does_not_claim_latest_knowledge(client, env, monkeypatch):
     monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: [])
     events = _read_sse(client.post("/api/chat/stream", json={

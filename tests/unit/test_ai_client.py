@@ -86,6 +86,32 @@ def test_chat_reasoning_defaults_empty():
     assert result["reasoning"] == ""
 
 
+def test_chat_stream_preserves_terminal_finish_reason():
+    class FakeStreamResp:
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self, decode_unicode=False):
+            assert decode_unicode is True
+            return iter([
+                'data: {"choices":[{"delta":{"content":"部分答案"},"finish_reason":null}]}',
+                'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+                'data: [DONE]',
+            ])
+
+    class FakeSession:
+        def post(self, *_args, **_kwargs):
+            return FakeStreamResp()
+
+    client = AIClient(api_key="sk-test", base_url="https://fake.example/v1")
+    client._session = FakeSession()
+
+    events = list(client.chat_stream([{"role": "user", "content": "分析"}]))
+
+    assert events[-1]["type"] == "done"
+    assert events[-1]["finish_reason"] == "length"
+
+
 def test_chat_passes_thinking_mode_to_api():
     client = _client_with({"choices": [_choice({"content": "{}"})]})
 
