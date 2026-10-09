@@ -60,7 +60,7 @@ def test_recent_company_market_window_is_five_actual_bars():
 
 **Files:** Modify `webapp/chat_store.py`; Test `tests/unit/test_chat_store.py`. 仅服务器信任槽位；此任务不接入 SSE。
 
-**Interfaces:** `save_pending(sid, pending)` 记录 `version`（不可猜的随机 ID）、`created_at`（UTC aware ISO）、`missing_field`（`subject|window|kind`）、`intent`、`company_code`（如已唯一验证）、`question`（原始已持久化用户输入的引用优先）；`consume_pending(sid, *, now, expected_version)` CAS 返回拷贝并**删除**；`clear_pending(sid)` 删除。解析不合法/过期/未知会话统一 `None`，不能继承；创建消息与保存槽位在同一临界区/一次写盘，避免持久化半成品。
+**Interfaces:** `save_pending(sid, pending)` 记录 `version`（不可猜的随机 ID）、`created_at`（UTC aware ISO）、`missing_field`（`subject|window|kind`）、`intent`、`company_code`（如已唯一验证）、`market_window`（可选序列化冻结窗口）、`financial_period`（可选已解析财务期间）、`question`（原始已持久化用户输入的引用优先）；`consume_pending(sid, *, now, expected_version)` CAS 返回拷贝并**删除**；`clear_pending(sid)` 删除。解析不合法/过期/未知会话统一 `None`，不能继承；创建消息与保存槽位在同一临界区/一次写盘，避免持久化半成品。
 
 - [ ] **Step 1 RED：** 固定 `now=datetime(2026,10,9,10,0,tzinfo=timezone.utc)` 创建独立 `ChatStore(tmp_path/'sessions.json')`：保存后重建 store 可读；消费一次、16 分钟过期、错误版本/外会话/并发 `Barrier` 消费至多一次；删除会话/重开不得继承，旧 JSON 无字段仍可读。例如：
 
@@ -75,7 +75,8 @@ def test_pending_slot_is_one_shot_across_restart(tmp_path):
     now = datetime(2026, 10, 9, 10, 0, tzinfo=timezone.utc)
     store.save_pending(sid, {'version': 'server-token', 'created_at': now.isoformat(),
                              'missing_field': 'window', 'intent': 'market_trend',
-                             'company_code': '600660', 'question': '福耀玻璃股价走势'})
+                             'company_code': '600660', 'market_window': None, 'financial_period': None,
+                             'question': '福耀玻璃股价走势'})
     reopened = ChatStore(path)
     assert reopened.consume_pending(sid, now=now, expected_version='server-token')['company_code'] == '600660'
     assert reopened.consume_pending(sid, now=now, expected_version='server-token') is None

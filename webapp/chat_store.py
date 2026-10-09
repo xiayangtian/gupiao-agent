@@ -24,7 +24,7 @@ DEFAULT_PATH = "data/chat_sessions.json"
 # 会话标题取首条用户消息的最大字符数
 TITLE_MAX_CHARS = 24
 PENDING_CLARIFICATION_TTL = timedelta(minutes=15)
-_PENDING_FIELDS = frozenset({"version", "created_at", "missing_field", "intent", "company_code", "question"})
+_PENDING_FIELDS = frozenset({"version", "created_at", "missing_field", "intent", "company_code", "market_window", "financial_period", "question"})
 _PENDING_MISSING_FIELDS = frozenset({"subject", "window", "kind"})
 _PENDING_INTENTS = frozenset({"market_quote", "market_trend", "market_recap", "report_fact", "financial_trend"})
 
@@ -280,6 +280,17 @@ class ChatStore:
         code = record["company_code"]
         if code is not None and (not isinstance(code, str) or len(code) != 6 or not code.isdigit()):
             raise ValueError("pending clarification company code is invalid")
+        window = record["market_window"]
+        if window is not None and (
+            not isinstance(window, Mapping)
+            or set(window) - {"kind", "label", "start_date", "end_date", "trading_days", "timezone"}
+            or window.get("kind") not in {"calendar_week", "rolling_trading_days", "explicit"}
+            or not isinstance(window.get("label"), str)
+        ):
+            raise ValueError("pending clarification market window is invalid")
+        period = record["financial_period"]
+        if period is not None and not isinstance(period, str):
+            raise ValueError("pending clarification financial period is invalid")
         if not isinstance(record["question"], str) or not record["question"].strip():
             raise ValueError("pending clarification question is required")
         try:
@@ -289,7 +300,7 @@ class ChatStore:
         if created.tzinfo is None or created.utcoffset() is None:
             raise ValueError("pending clarification timestamp must include a timezone")
         record["created_at"] = created.astimezone(timezone.utc).isoformat()
-        return record
+        return json.loads(json.dumps(record, ensure_ascii=False))
 
     @staticmethod
     def _utc_now(now: datetime) -> datetime:

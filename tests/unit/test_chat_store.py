@@ -30,6 +30,9 @@ def _pending_clarification(now):
         "missing_field": "window",
         "intent": "market_trend",
         "company_code": "600660",
+        "market_window": {"kind": "rolling_trading_days", "trading_days": 5,
+                          "label": "近五交易日", "end_date": "2026-10-09"},
+        "financial_period": None,
         "question": "福耀玻璃股价走势",
     }
 
@@ -45,6 +48,7 @@ def test_pending_clarification_is_one_shot_across_store_reload(tmp_path):
 
     pending = reopened.consume_pending(sid, now=now, expected_version="pending-v1")
     assert pending["company_code"] == "600660"
+    assert pending["market_window"]["trading_days"] == 5
     assert reopened.consume_pending(sid, now=now, expected_version="pending-v1") is None
 
 
