@@ -48,6 +48,15 @@ def execute_source(runtime: SourceRuntime, call: SourceCall, invoke, *, fetched_
     return runtime.call(call, lambda: normalize_source(call, invoke(), fetched_at=fetched_at))
 
 
+def market_overview_window_compatible(window: MarketWindow | None) -> bool:
+    """MCP breadth snapshots are time-matched only for today or the supported 5TD window."""
+    if window is None:
+        return False
+    return window.label == "今日" or (
+        window.kind == "rolling_trading_days" and window.trading_days == 5
+    )
+
+
 def resolve_answer_status(*, stopped: bool, failed: bool, waiting_consent: bool,
                           required_missing: bool, had_source_failure: bool,
                           retrieval_degraded: bool, verification: str | None) -> str:

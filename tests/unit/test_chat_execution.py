@@ -207,6 +207,19 @@ def test_market_quote_requires_matching_company_and_timestamp():
     assert market_task_status("market_quote", scope, window, [foreign], "passed") == "failed"
 
 
+def test_market_overview_is_advertised_only_for_matching_today_or_five_trading_day_windows():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from webapp.chat_execution import market_overview_window_compatible
+    from webapp.chat_time import resolve_market_window
+
+    now = datetime(2026, 10, 9, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert market_overview_window_compatible(resolve_market_window("今日A股复盘", now))
+    assert market_overview_window_compatible(resolve_market_window("A股近5个交易日整体表现", now))
+    for query in ("大盘半年内主要指数走势", "A股近一年走势", "大盘过去18个月表现", "A股长期走势", "大盘过去5年走势"):
+        assert not market_overview_window_compatible(resolve_market_window(query, now))
+
+
 def test_market_recap_requires_four_matching_indices_and_all_three_breadth_calls():
     from datetime import date
 

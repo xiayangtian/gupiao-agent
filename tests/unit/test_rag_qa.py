@@ -43,6 +43,31 @@ def test_market_fallback_preserves_weekly_sampling_label():
     assert "交易日" not in answer
 
 
+def test_market_recap_fallback_uses_only_index_facts_and_passes_horizon_verification():
+    from datetime import date
+    from financial_report_fetcher.rag.qa import market_evidence_fallback
+    from webapp.chat_models import Fact
+    from webapp.chat_time import MarketWindow
+    from webapp.chat_verifier import ClaimVerifier
+    from webapp.source_runtime import AnswerContext, SourceResult
+
+    facts = tuple(Fact("index_close", value, "点", period, "weekly", "index", "sh000001",
+                       "tool", (f"index:{period}",), "reference", period, source_category="market")
+                  for period, value in (("2021-10-01", 3500.0), ("2026-10-02", 3900.0)))
+    source = SourceResult("indices", "tencent", "kline", "market", "success", as_of="2026-10-02",
+                          facts=facts)
+    scope = Scope.whole_corpus()
+    window = MarketWindow("过去5年", "explicit", date(2021, 10, 1), date(2026, 10, 2), None)
+
+    answer = market_evidence_fallback(AnswerContext(sources=(source,)), scope)
+
+    assert answer is not None
+    assert "上证指数" in answer
+    assert "不含同期全市场广度" in answer
+    assert ClaimVerifier().verify(answer, scope, facts, (), (), window=window,
+                                  answer_intent="market_recap").status == "passed"
+
+
 def test_answer_returns_answer_and_valid_citations(tmp_path, fake_embedder):
     store = RagStore(str(tmp_path), fake_embedder)
     store.upsert([_chunk("营业收入为862亿元"), _chunk("净利润345亿元")])

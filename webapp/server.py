@@ -76,7 +76,8 @@ from financial_report_fetcher.rag.web_search import TavilyWebSearch
 from .autocomplete import StockIndex
 from .chat_evidence import EvidenceNormalizer
 from .chat_execution import (
-    build_source_runtime, execute_source, market_task_status, project_sources, resolve_answer_status,
+    build_source_runtime, execute_source, market_overview_window_compatible,
+    market_task_status, project_sources, resolve_answer_status,
 )
 from .chat_request_resolution import Clarification, ResolvedRequest, resolve_chat_request, serialize_market_window
 from .chat_runs import ChatEventChannel, ChatRunCancelled, ChatRunControl, ChatRunDeadlineExceeded, ChatRunRegistry
@@ -2576,6 +2577,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
     configured_whitelist = set(getattr(chat_cfg, "mcp_tool_whitelist", []) or [])
     overview_authorized = (
         body.use_mcp and bool(getattr(chat_cfg, "mcp_tools", False))
+        and market_overview_window_compatible(market_window)
         and mcp_breaker.allow() and recap_operations <= listed_operations
         and (not configured_whitelist or recap_operations <= configured_whitelist)
         and recap_operations <= set(tool_names)
@@ -2731,7 +2733,10 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         if planning.plan is not None:
             state.execution_plan = {"objective": planning.plan.objective, "source_mode": planning.plan.source_mode,
                                     "steps": [{"id": step.id, "kind": step.kind, "required": step.required} for step in planning.plan.steps],
-                                    "acceptance": list(planning.plan.acceptance)}
+                                    "acceptance": list(planning.plan.acceptance),
+                                    "market_window": serialize_market_window(market_window),
+                                    "window_origin": resolved_request.window_origin,
+                                    "market_grain": market_kline_grain(market_window) if market_window else None}
         normalizer = EvidenceNormalizer()
         pump = _SseEventPump(asyncio.get_running_loop(), "流式问答", run_id=run_id)
         saved = False
@@ -2740,6 +2745,8 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         def _persist(status: str, content: str = "", supplement=None, *, research_run_id: str = "",
                      research_summary=None) -> AnswerRun:
             nonlocal saved
+            if state.execution_plan is not None:
+                state.execution_plan["market_evidence_status"] = state.market_evidence_status
             run = _make_answer_run(
                 state, run_id=run_id, created_at=created_at, started_at=started_at,
                 status=status, content=content, supplement=supplement,
@@ -2757,7 +2764,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             return run
 
         def _verified_market_fallback() -> str | None:
-            if route.intent not in {"market_quote", "market_trend"}:
+            if route.intent not in {"market_quote", "market_trend", "market_recap"}:
                 return None
             fallback_sources = tuple(
                 replace(source, facts=tuple(
@@ -3148,6 +3155,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                         status = market_task_status(
                             route.intent, scope, market_window, state.source_results, "passed",
                         )
+                        state.market_evidence_status = status
                         if status == "partial":
                             windows = sorted({item.coverage.data_window for item in state.source_results
                                               if item.category == "market" and item.coverage.data_window})
@@ -3157,7 +3165,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                         elif status == "failed":
                             answer = None
                     if answer is None:
-                        if route.intent in {"market_quote", "market_trend"}:
+                        if route.intent in {"market_quote", "market_trend", "market_recap"}:
                             answer = "回答经过补全重试仍未能完整生成，且未能从已取得的行情事实生成可核验结论。"
                         else:
                             answer = "回答经过补全重试仍未能完整生成，请重试。"

@@ -63,9 +63,55 @@ def _append_answer_continuation(previous: str, continuation: str) -> str:
     return previous + continuation
 
 
+def _market_indices_fallback(context: AnswerContext) -> Optional[str]:
+    index_names = {
+        "sh000001": "上证指数", "sz399001": "深证成指",
+        "sz399006": "创业板指", "sh000688": "科创50指数",
+    }
+    grouped: dict[str, dict[str, list[Any]]] = {}
+    for source in context.sources:
+        if source.category != "market":
+            continue
+        for fact in source.facts:
+            if (fact.metric == "index_close" and fact.period_kind in {"daily", "weekly", "monthly"}
+                    and fact.unit == "点" and fact.company_code in index_names and fact.period):
+                grouped.setdefault(fact.company_code, {}).setdefault(fact.period, []).append(fact)
+    statements = []
+    cadences = set()
+    for code, periods in grouped.items():
+        if any(len({fact.value for fact in rows}) > 1 for rows in periods.values()):
+            continue
+        rows = [periods[period][0] for period in sorted(periods)]
+        if not rows:
+            continue
+        cadence = {"daily": "日", "weekly": "周", "monthly": "月"}.get(rows[-1].period_kind, "行情")
+        cadences.add(cadence)
+        name = index_names[code]
+        if len(rows) == 1:
+            item = rows[0]
+            statements.append(f"{name}在{item.period}的指数收盘点位为{item.value:g}点")
+        else:
+            first, last = rows[0], rows[-1]
+            statements.append(
+                f"{name}在{first.period}的指数收盘点位为{first.value:g}点；"
+                f"{name}在{last.period}的指数收盘点位为{last.value:g}点"
+            )
+    if not statements:
+        return None
+    cadence_label = "/".join(sorted(cadences))
+    return (
+        "外部参考：" + "；".join(statements) + f"。采样粒度为{cadence_label}线。"
+        "这里只反映实际取得的主要指数，不含同期全市场广度；不能据此推断个股表现或涨跌原因。"
+    )
+
+
 def market_evidence_fallback(context: AnswerContext, scope: Optional[Scope]) -> Optional[str]:
     """Create a concise market conclusion only from already-normalized K-line facts."""
-    if scope is None or len(scope.companies) != 1:
+    if scope is None:
+        return None
+    if scope.mode == "whole_corpus":
+        return _market_indices_fallback(context)
+    if len(scope.companies) != 1:
         return None
     allowed_codes = {company.code for company in scope.companies}
     facts = [
@@ -89,7 +135,7 @@ def market_evidence_fallback(context: AnswerContext, scope: Optional[Scope]) -> 
     company = next((item.name for item in (scope.companies if scope else ()) if item.code == code), code)
     first, last = rows[0], rows[-1]
     if len(rows) < 2:
-        return (f"外部参考：{company}在{last.period}的收盘价为{last.value:g}{last.unit}。"
+        return (f"外部参考：{company}在{last.period}的股价收盘采样为{last.value:g}{last.unit}。"
                 "单个行情采样点不能判断趋势或涨跌原因。")
     change = (last.value / first.value - 1) * 100 if first.value else None
     if change is None:
@@ -104,11 +150,11 @@ def market_evidence_fallback(context: AnswerContext, scope: Optional[Scope]) -> 
     rebound = ""
     if 0 < low_index < len(rows) - 1 and last.value > rows[low_index].value:
         low = rows[low_index]
-        rebound = f"期间于{low.period}收盘采样最低为{low.value:g}{low.unit}，随后回升。"
+        rebound = f"期间于{low.period}（该采样点）股价收盘采样最低为{low.value:g}{low.unit}，随后回升。"
     cadence = {"daily": "交易日", "weekly": "周", "monthly": "月"}.get(last.period_kind, "行情")
     return (
-        f"外部参考：{company}在{first.period}的收盘采样为{first.value:g}{first.unit}；"
-        f"在{last.period}的收盘采样为{last.value:g}{last.unit}。"
+        f"外部参考：{company}在{first.period}的股价收盘采样为{first.value:g}{first.unit}；"
+        f"在{last.period}的股价收盘采样为{last.value:g}{last.unit}。"
         f"区间覆盖{len(rows)}个{cadence}采样点，{movement}，期间存在波动。{rebound}"
         "仅凭价格数据不能判断涨跌原因，采样粒度也限制了区间内波动细节。"
     )
