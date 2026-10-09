@@ -25,6 +25,24 @@ def _chunk(text, section="财务摘要", source="analysis", rid="600900:2025-12-
     return Chunk(report_id=rid, source=source, text=text, section=section, page=None, chunk_index=0)
 
 
+def test_market_fallback_preserves_weekly_sampling_label():
+    from financial_report_fetcher.rag.qa import market_evidence_fallback
+    from webapp.chat_models import Fact
+    from webapp.source_runtime import AnswerContext, SourceResult
+
+    facts = tuple(Fact("price", value, "元/股", period, "weekly", "security", "600900",
+                       "tool", (f"kline:{period}",), "reference", period, source_category="market")
+                  for period, value in (("2025-09-26", 10.0), ("2025-10-03", 11.0)))
+    source = SourceResult("kline", "tencent", "kline", "market", "success", as_of="2025-10-03",
+                          facts=facts)
+
+    answer = market_evidence_fallback(AnswerContext(sources=(source,)), Scope.company_only("600900", "长江电力"))
+
+    assert answer is not None
+    assert "2个周采样点" in answer
+    assert "交易日" not in answer
+
+
 def test_answer_returns_answer_and_valid_citations(tmp_path, fake_embedder):
     store = RagStore(str(tmp_path), fake_embedder)
     store.upsert([_chunk("营业收入为862亿元"), _chunk("净利润345亿元")])

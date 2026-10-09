@@ -92,6 +92,25 @@ def test_market_mcp_coverage_does_not_infer_unknown_totals():
     assert result.coverage.data_window == "2026-10-05"
 
 
+def test_tencent_kline_coverage_records_requested_granularity_and_window():
+    from webapp.source_runtime import SourceCall
+    from webapp.source_adapters import normalize_source
+
+    result = normalize_source(
+        SourceCall("tencent", "kline", "market", {
+            "symbol": "600900", "period": "week", "count": 250, "window": "过去五年",
+        }),
+        {"as_of": "2026-10-02", "bars": [
+            {"symbol": "600900", "date": "2026-09-25", "close": 10.5},
+        ]},
+    )
+
+    assert result.coverage.limit == 250
+    assert result.coverage.query_window == "过去五年"
+    assert result.coverage.data_window == "2026-09-25"
+    assert "来源查询期 过去五年" in result.coverage.summary()
+
+
 def test_market_pool_at_limit_does_not_claim_total_completeness():
     from webapp.source_runtime import SourceCall
     from webapp.source_adapters import normalize_source

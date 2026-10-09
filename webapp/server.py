@@ -87,7 +87,7 @@ from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef
 from .chat_policy import IntentRouter, QuestionRouter, ToolAvailability, ToolPolicyResolver
 from .execution_plan import ExecutionPlan
 from .execution_planner import ExecutionPlanner, PlanningCapabilities, PlanningResult, safe_market_plan
-from .execution_executor import ExecutionExecutor, market_kline_request_count
+from .execution_executor import ExecutionExecutor, market_kline_grain, market_kline_request_count
 from .chat_verifier import ClaimVerifier
 from .chat_scope import ScopeRequest, ScopeResolution, ScopeResolver
 from .chat_time import MarketWindow, resolve_financial_period, resolve_financial_period_range, resolve_market_window, select_market_bars
@@ -2828,24 +2828,28 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 def _kline_source(symbol):
                     if market_window is None:
                         return {"error": "market_window_unavailable"}, None
+                    period = market_kline_grain(market_window)
+                    if period is None:
+                        return {"error": "market_window_too_long"}, None
                     rows = tencent_quote.kline(
-                        symbol, period="day", count=market_kline_request_count(market_window), adjust="none",
+                        symbol, period=period, count=market_kline_request_count(market_window), adjust="none",
                     )
-                    selection = select_market_bars(rows or (), market_window)
+                    selection = select_market_bars(rows or (), market_window, period=period)
                     if not selection.bars:
                         return {"error": "market_window_data_unavailable"}, selection
                     return {
                         "as_of": selection.covered_dates[-1],
-                        "bars": [dict(bar, symbol=symbol) for bar in selection.bars],
+                        "bars": [dict(bar, symbol=symbol, kline_period=period) for bar in selection.bars],
                         "coverage_status": selection.status,
                     }, selection
 
                 def kline(_question, _scope):
                     if not company_code:
                         return runtime.unavailable(SourceCall("tencent", "kline", "market", {}), "scope_missing")
-                    count = market_kline_request_count(market_window) if market_window else 0
+                    period = market_kline_grain(market_window) if market_window else None
+                    count = market_kline_request_count(market_window, period) if market_window else 0
                     call = SourceCall("tencent", "kline", "market", {
-                        "symbol": company_code, "period": "day", "count": count, "adjust": "none",
+                        "symbol": company_code, "period": period or "day", "count": count, "adjust": "none",
                         "window": market_window.label if market_window else "unknown",
                     })
                     selected = {}
@@ -2860,9 +2864,10 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 def indices(_question, _scope):
                     results = []
                     for symbol in ("sh000001", "sz399001", "sz399006", "sh000688"):
-                        count = market_kline_request_count(market_window) if market_window else 0
+                        period = market_kline_grain(market_window) if market_window else None
+                        count = market_kline_request_count(market_window, period) if market_window else 0
                         call = SourceCall("tencent", "kline", "market", {
-                            "symbol": symbol, "period": "day", "count": count, "adjust": "none",
+                            "symbol": symbol, "period": period or "day", "count": count, "adjust": "none",
                             "window": market_window.label if market_window else "unknown",
                         })
                         selected = {}

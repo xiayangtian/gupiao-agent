@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 from typing import Any, Callable
 
 from webapp.chat_models import Scope
@@ -35,24 +36,54 @@ class ExecutionResult:
     context: AnswerContext = AnswerContext()
 
 
-def market_kline_request_count(window: MarketWindow) -> int:
+def market_kline_grain(window: MarketWindow) -> str | None:
+    """Choose the finest Tencent K-line interval that fits the 800-bar provider limit."""
+    if window.kind in {"rolling_trading_days", "calendar_week"}:
+        return "day"
+    if window.start_date is None or window.end_date is None:
+        return "day"
+    days = max(1, (window.end_date - window.start_date).days + 1)
+    if ceil(days * 5 / 7) + 3 <= 800:
+        return "day"
+    if ceil(days / 7) + 3 <= 800:
+        return "week"
+    if ceil(days / 30.4375) + 2 <= 800:
+        return "month"
+    return None
+
+
+def market_kline_request_count(window: MarketWindow, grain: str | None = None) -> int:
+    period = grain or market_kline_grain(window)
     if window.kind == "rolling_trading_days":
         return min(800, max(10, (window.trading_days or 5) * 2))
     if window.kind == "calendar_week":
         return 15
     if window.start_date is None or window.end_date is None:
         return 20
-    return min(800, max(10, (window.end_date - window.start_date).days * 2 + 2))
+    days = max(1, (window.end_date - window.start_date).days + 1)
+    if period == "day":
+        count = ceil(days * 5 / 7) + 3
+    elif period == "week":
+        count = ceil(days / 7) + 3
+    elif period == "month":
+        count = ceil(days / 30.4375) + 2
+    else:
+        count = 800
+    return min(800, max(10, count))
 
 
 def _select_kline(tencent_quote: Any, symbol: str, window: MarketWindow) -> dict[str, Any]:
-    rows = tencent_quote.kline(symbol, period="day", count=market_kline_request_count(window), adjust="none")
-    selection = select_market_bars(rows or (), window)
+    period = market_kline_grain(window)
+    if period is None:
+        raise RuntimeError("请求历史范围超过支持上限")
+    rows = tencent_quote.kline(symbol, period=period, count=market_kline_request_count(window), adjust="none")
+    selection = select_market_bars(rows or (), window, period=period)
     if not selection.bars:
-        raise RuntimeError("腾讯行情未返回请求窗口内的日线")
+        raise RuntimeError("腾讯行情未返回请求窗口内的行情数据")
     return {
-        "symbol": symbol, "period": "day", "window": window.label,
-        "bars": list(selection.bars), "covered_dates": list(selection.covered_dates),
+        "symbol": symbol, "period": period, "window": window.label,
+        "bars": [dict(bar, symbol=symbol, kline_period=period) for bar in selection.bars],
+        "covered_dates": list(selection.covered_dates),
         "status": selection.status,
     }
 

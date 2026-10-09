@@ -314,10 +314,14 @@ def _bar_date(row: Mapping[str, Any]) -> date | None:
     return None
 
 
-def select_market_bars(rows: Sequence[Mapping[str, Any]], window: MarketWindow) -> WindowSelection:
+def select_market_bars(
+    rows: Sequence[Mapping[str, Any]], window: MarketWindow, *, period: str = "day",
+) -> WindowSelection:
     """Filter/sort actual dated bars and describe conservative coverage."""
     if not isinstance(window, MarketWindow):
         raise ValueError("window must be a MarketWindow")
+    if period not in {"day", "week", "month"}:
+        raise ValueError("period must be day, week, or month")
     valid: dict[date, Mapping[str, Any]] = {}
     invalid_seen = False
     for row in rows if isinstance(rows, (list, tuple)) else ():
@@ -343,4 +347,9 @@ def select_market_bars(rows: Sequence[Mapping[str, Any]], window: MarketWindow) 
     else:
         expected = window.trading_days if window.kind == "rolling_trading_days" else 5 if window.kind == "calendar_week" else None
         status = "complete" if (expected is None or len(bars) >= expected) and not invalid_seen else "partial"
+        if status == "complete" and window.kind == "explicit" and window.start_date and window.end_date:
+            tolerance = {"day": 7, "week": 14, "month": 45}[period]
+            first_day, last_day = ordered_days[0], ordered_days[-1]
+            if (first_day - window.start_date).days > tolerance or (window.end_date - last_day).days > tolerance:
+                status = "partial"
     return WindowSelection(bars, window.label, dates, status)

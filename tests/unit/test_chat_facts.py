@@ -211,3 +211,21 @@ def test_tencent_kline_rows_become_market_facts_only_with_bounded_dated_payload(
     assert facts[0].period == "2025-10-02"
     assert facts[0].evidence_ids
     assert facts_from_market_result(result, ToolArtifact("mcp", "kline", as_of="2025-10-02", status="success")) == ()
+
+
+def test_tencent_weekly_and_monthly_kline_rows_keep_their_sampling_granularity():
+    from webapp.chat_facts import facts_from_market_result
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    for granularity, expected in (("week", "weekly"), ("month", "monthly")):
+        result = SourceResult(
+            f"source-{granularity}", "tencent", "kline", "market", "success", as_of="2025-10-02",
+            payload=({"symbol": "600900", "date": "2025-10-02", "close": 10.5,
+                      "kline_period": granularity},),
+            coverage=SourceCoverage(data_window="2025-10-02"),
+        )
+        artifact = ToolArtifact("tencent", "kline", as_of="2025-10-02", status="success",
+                                source_id=f"source-{granularity}")
+        facts = facts_from_market_result(result, artifact)
+        assert len(facts) == 1
+        assert facts[0].period_kind == expected

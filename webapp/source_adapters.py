@@ -116,7 +116,8 @@ def _extract_rows(value: Any) -> tuple[list[dict[str, Any]], str]:
 
 def _request_coverage(call: SourceCall) -> SourceCoverage:
     arguments = call.arguments
-    limit = arguments.get("limit")
+    limit = (arguments.get("count") if call.provider == "tencent" and call.operation == "kline"
+             else arguments.get("limit"))
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
         limit = None
     query_window = None
@@ -126,6 +127,10 @@ def _request_coverage(call: SourceCall) -> SourceCoverage:
             query_window = raw_window
     elif call.operation == "index_prices":
         raw_window = arguments.get("period")
+        if isinstance(raw_window, str) and len(raw_window) <= 40:
+            query_window = raw_window
+    elif call.provider == "tencent" and call.operation == "kline":
+        raw_window = arguments.get("window") or arguments.get("period")
         if isinstance(raw_window, str) and len(raw_window) <= 40:
             query_window = raw_window
     return SourceCoverage(limit=limit, query_window=query_window)
@@ -140,18 +145,18 @@ def _response_coverage(call: SourceCall, value: Any, rows: list[dict[str, Any]],
     if isinstance(total, bool) or not isinstance(total, int) or total < 0:
         total = None
     dates: set[str] = set()
-    if isinstance(value, Mapping):
-        for key in ("as_of", "date", "trade_date"):
-            raw_date = value.get(key)
+    for row in rows:
+        for key in ("date", "trade_date", "as_of", "time"):
+            raw_date = row.get(key)
             if isinstance(raw_date, str):
                 try:
                     dates.add(date.fromisoformat(raw_date[:10]).isoformat())
                     break
                 except ValueError:
                     continue
-    for row in rows:
-        for key in ("date", "trade_date", "as_of", "time"):
-            raw_date = row.get(key)
+    if not dates and isinstance(value, Mapping):
+        for key in ("as_of", "date", "trade_date"):
+            raw_date = value.get(key)
             if isinstance(raw_date, str):
                 try:
                     dates.add(date.fromisoformat(raw_date[:10]).isoformat())

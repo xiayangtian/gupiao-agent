@@ -147,9 +147,9 @@ def _claim_matches(
         matches = [fact for fact in matches if fact.source_category == "local_pdf"]
     elif answer_intent == "market_trend":
         matches = [fact for fact in matches if fact.source_category == "market"]
-    elif answer_intent == "market_quote":
-        matches = [fact for fact in matches if fact.source_category in {"market", "mcp"}]
     elif answer_intent == "market_recap":
+        matches = [fact for fact in matches if fact.source_category in {"market", "mcp"}]
+    elif answer_intent == "market_quote":
         matches = [fact for fact in matches if fact.source_category in {"market", "mcp"}]
     elif answer_intent == "general_web":
         matches = [fact for fact in matches if fact.source_category == "web"]
@@ -185,6 +185,15 @@ def _claim_matches(
         matches = [fact for fact in matches if fact.entity_scope == "consolidated"]
     elif len({fact.entity_scope for fact in matches}) > 1:
         matches = []
+    if (window is not None and answer_intent in {"market_trend", "market_recap"}
+            and any(fact.source_category == "market" for fact in matches)):
+        from webapp.execution_executor import market_kline_grain
+        expected_kind = {"day": "daily", "week": "weekly", "month": "monthly"}.get(
+            market_kline_grain(window)
+        )
+        if expected_kind is not None:
+            matches = [fact for fact in matches
+                       if fact.source_category != "market" or fact.period_kind == expected_kind]
     if window is not None:
         start = getattr(window, "start_date", None)
         end = getattr(window, "end_date", None)

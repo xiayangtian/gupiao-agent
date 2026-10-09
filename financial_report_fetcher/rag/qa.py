@@ -64,14 +64,14 @@ def _append_answer_continuation(previous: str, continuation: str) -> str:
 
 
 def market_evidence_fallback(context: AnswerContext, scope: Optional[Scope]) -> Optional[str]:
-    """Create a concise complete market conclusion only from already-normalized daily facts."""
+    """Create a concise market conclusion only from already-normalized K-line facts."""
     if scope is None or len(scope.companies) != 1:
         return None
     allowed_codes = {company.code for company in scope.companies}
     facts = [
         fact for source in context.sources if source.category == "market"
         for fact in source.facts
-        if fact.metric == "price" and fact.period_kind == "daily"
+        if fact.metric == "price" and fact.period_kind in {"daily", "weekly", "monthly"}
         and fact.source_category == "market" and fact.period
         and fact.company_code in allowed_codes
     ]
@@ -90,7 +90,7 @@ def market_evidence_fallback(context: AnswerContext, scope: Optional[Scope]) -> 
     first, last = rows[0], rows[-1]
     if len(rows) < 2:
         return (f"外部参考：{company}在{last.period}的收盘价为{last.value:g}{last.unit}。"
-                "单日数据不能判断近期趋势或涨跌原因。")
+                "单个行情采样点不能判断趋势或涨跌原因。")
     change = (last.value / first.value - 1) * 100 if first.value else None
     if change is None:
         movement = "区间价格有变化"
@@ -104,12 +104,13 @@ def market_evidence_fallback(context: AnswerContext, scope: Optional[Scope]) -> 
     rebound = ""
     if 0 < low_index < len(rows) - 1 and last.value > rows[low_index].value:
         low = rows[low_index]
-        rebound = f"期间于{low.period}（当日）股价收盘最低为{low.value:g}{low.unit}，随后反弹。"
+        rebound = f"期间于{low.period}收盘采样最低为{low.value:g}{low.unit}，随后回升。"
+    cadence = {"daily": "交易日", "weekly": "周", "monthly": "月"}.get(last.period_kind, "行情")
     return (
-        f"外部参考：{company}在{first.period}的股价收盘为{first.value:g}{first.unit}；"
-        f"在{last.period}的股价收盘为{last.value:g}{last.unit}。"
-        f"近期{len(rows)}个交易日{movement}，期间存在波动。{rebound}"
-        "仅凭短期价格数据不能判断涨跌原因，也不宜外推中长期趋势。"
+        f"外部参考：{company}在{first.period}的收盘采样为{first.value:g}{first.unit}；"
+        f"在{last.period}的收盘采样为{last.value:g}{last.unit}。"
+        f"区间覆盖{len(rows)}个{cadence}采样点，{movement}，期间存在波动。{rebound}"
+        "仅凭价格数据不能判断涨跌原因，采样粒度也限制了区间内波动细节。"
     )
 
 

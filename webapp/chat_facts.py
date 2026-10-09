@@ -305,6 +305,10 @@ def facts_from_market_result(result: SourceResult, artifact: ToolArtifact) -> tu
         if not isinstance(row, dict):
             continue
         symbol, period, close = row.get("symbol"), row.get("date"), row.get("close")
+        kline_period = row.get("kline_period", "day")
+        if kline_period not in {"day", "week", "month"}:
+            continue
+        period_kind = {"day": "daily", "week": "weekly", "month": "monthly"}[kline_period]
         if (not isinstance(symbol, str) or not re.fullmatch(r"(?:\d{6}|(?:sh|sz)\d{6})", symbol, re.IGNORECASE)
                 or not isinstance(period, str) or not _is_iso_date(period)
                 or not coverage_bounds[0] <= date.fromisoformat(period) <= coverage_bounds[1]
@@ -315,7 +319,7 @@ def facts_from_market_result(result: SourceResult, artifact: ToolArtifact) -> tu
         is_index = symbol[:2].casefold() in {"sh", "sz"}
         facts.append(Fact(
             metric="index_close" if is_index else "price", value=float(close),
-            unit="点" if is_index else "元/股", period=period, period_kind="daily",
+            unit="点" if is_index else "元/股", period=period, period_kind=period_kind,
             entity_scope="index" if is_index else "security", company_code=symbol,
             source_type="tool", evidence_ids=(f"{result.call_id}:{symbol}:{period}",),
             verification="reference", as_of=result.as_of, source_category="market",

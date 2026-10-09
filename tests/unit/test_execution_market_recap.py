@@ -2,7 +2,10 @@ from webapp.chat_models import Scope
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from webapp.execution_executor import ExecutionExecutor, a_share_indices_handler, company_kline_handler
+from webapp.execution_executor import (
+    ExecutionExecutor, a_share_indices_handler, company_kline_handler,
+    market_kline_grain, market_kline_request_count,
+)
 from webapp.execution_plan import ExecutionPlan, validate_execution_plan
 from webapp.chat_time import resolve_market_window
 
@@ -111,6 +114,34 @@ def test_market_overview_keeps_successful_artifact_when_other_calls_fail():
     assert all(item.get("error") == "来源调用失败" for item in value["artifacts"][1:])
     assert all(item["window_match"] is False for item in value["artifacts"])
     assert all("provider private failure" not in str(item) for item in value["artifacts"])
+
+
+def test_long_company_kline_uses_weekly_provider_interval_and_limits_request_size():
+    source = FakeTencent()
+    now = datetime(2026, 10, 9, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    window = resolve_market_window("分析长江电力过去5年走势", now)
+    assert window is not None
+    value = company_kline_handler(source, window)("过去5年走势", Scope.company_only("600900", "长江电力"))
+    assert source.calls[0][1] == "week"
+    assert source.calls[0][2] <= 800
+    assert value["period"] == "week"
+    assert value["status"] == "partial"
+
+
+def test_market_kline_granularity_adapts_to_window_without_exceeding_provider_limit():
+    now = datetime(2026, 10, 9, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    one_year = resolve_market_window("过去1年走势", now)
+    five_years = resolve_market_window("过去5年走势", now)
+    thirty_years = resolve_market_window("过去30年走势", now)
+    assert one_year is not None and five_years is not None and thirty_years is not None
+    assert market_kline_grain(one_year) == "day"
+    assert market_kline_request_count(one_year, "day") <= 800
+    assert market_kline_grain(five_years) == "week"
+    assert market_kline_grain(thirty_years) == "month"
+    assert market_kline_request_count(five_years, "week") <= 800
+    assert market_kline_request_count(thirty_years, "month") <= 800
+    over_limit = resolve_market_window("过去999年走势", now)
+    assert over_limit is None
 
 
 def test_company_kline_filters_actual_bars_to_frozen_market_window():

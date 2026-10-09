@@ -226,6 +226,24 @@ def test_rolling_market_window_matches_only_last_actual_trading_days():
                            window=window, answer_intent="market_trend").status == "blocked"
 
 
+def test_market_long_horizon_verifier_requires_the_selected_kline_grain():
+    from datetime import date
+    from webapp.chat_time import MarketWindow
+
+    weekly = Fact("price", 10.5, "元/股", "2025-09-30", "weekly", "security", "601288",
+                  "tool", ("weekly:2025-09-30",), "reference", "2025-09-30", source_category="market")
+    daily = Fact("price", 10.5, "元/股", "2025-09-30", "daily", "security", "601288",
+                 "tool", ("daily:2025-09-30",), "reference", "2025-09-30", source_category="market")
+    window = MarketWindow("过去5年", "explicit", date(2020, 10, 1), date(2025, 10, 1), None)
+    verifier = ClaimVerifier()
+    answer = "股价为 10.5 元/股，外部参考。"
+
+    assert verifier.verify(answer, _scope(), [weekly], (), (), window=window,
+                           answer_intent="market_trend").status == "passed"
+    assert verifier.verify(answer, _scope(), [daily], (), (), window=window,
+                           answer_intent="market_trend").status == "blocked"
+
+
 def test_market_trend_facts_must_match_requested_window_and_degradation_contract():
     from datetime import date
     from webapp.chat_time import MarketWindow
