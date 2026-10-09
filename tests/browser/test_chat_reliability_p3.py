@@ -1,4 +1,4 @@
-"""P3 cancellation UX against an isolated, deterministic FastAPI app."""
+"""P3 cancellation, capacity admission and research-resume UX in isolated browsers."""
 from __future__ import annotations
 
 import json
@@ -43,26 +43,43 @@ def _post_json(url):
         return json.load(response)
 
 
-def test_stop_cancels_inflight_source_without_followup_calls():
+def _start_fixture(scenario):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    process = subprocess.Popen([sys.executable, str(LAUNCHER), str(port)], cwd=ROOT,
+    process = subprocess.Popen([sys.executable, str(LAUNCHER), str(port), scenario], cwd=ROOT,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     url = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        if process.poll() is not None:
+            pytest.fail("P3 fixture exited before startup")
+        try:
+            _get_json(url + "/api/health")
+            return process, url
+        except OSError:
+            time.sleep(.1)
+    process.terminate()
+    pytest.fail("P3 fixture did not become healthy")
+
+
+def _close_fixture(process, sessions):
+    for session in sessions:
+        try:
+            _browser(session, "close")
+        except Exception:
+            pass
+    process.terminate()
+    try:
+        process.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate(timeout=5)
+
+
+def test_stop_cancels_inflight_source_without_followup_calls():
+    process, url = _start_fixture("lifecycle")
     session = "p3-stop-" + uuid.uuid4().hex
     try:
-        for _ in range(100):
-            if process.poll() is not None:
-                pytest.fail("P3 fixture exited before startup")
-            try:
-                _get_json(url + "/api/health")
-                break
-            except OSError:
-                time.sleep(.2)
-        else:
-            pytest.fail("P3 fixture did not become healthy")
-
         _browser(session, "open", url + "/#/chat")
         _browser(session, "fill", "#chat-input", "600519 2026-09-24 股价走势")
         _browser(session, "click", "#chat-send-btn")
@@ -78,7 +95,7 @@ def test_stop_cancels_inflight_source_without_followup_calls():
         assert "market_kline" in json.loads(progress["data"]["result"])[0]
 
         _browser(session, "click", "#chat-send-btn")
-        time.sleep(.2)  # allow the explicit cancel request and stream disconnect to reach the app
+        time.sleep(.2)
         _post_json(url + "/_fixture/p3-release")
         deadline = time.monotonic() + 10
         visible = ""
@@ -98,10 +115,134 @@ def test_stop_cancels_inflight_source_without_followup_calls():
         assert "stopped" in state["saved_statuses"], "cancelled AnswerRun must be persisted as stopped"
         assert _browser(session, "errors")["data"].get("errors", []) == []
     finally:
-        _browser(session, "close")
-        process.terminate()
-        try:
-            process.communicate(timeout=15)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate(timeout=5)
+        _close_fixture(process, [session])
+
+
+def test_four_workers_reject_fifth_request_then_recover_capacity():
+    process, url = _start_fixture("capacity")
+    sessions = []
+    try:
+        for index in range(4):
+            session = f"p3-cap-{index}-" + uuid.uuid4().hex
+            sessions.append(session)
+            _browser(session, "open", url + "/#/chat")
+            _browser(session, "fill", "#chat-input", "600519 2026-09-24 股价走势")
+            _browser(session, "click", "#chat-send-btn")
+        deadline = time.monotonic() + 15
+        state = {}
+        while time.monotonic() < deadline:
+            state = _get_json(url + "/_fixture/p3-state")
+            if state.get("active_runs") == 4 and len(state.get("calls", [])) == 4:
+                break
+            time.sleep(.05)
+        assert state.get("active_runs") == 4, state
+        assert len(state.get("calls", [])) == 4, state
+
+        fifth = "p3-cap-fifth-" + uuid.uuid4().hex
+        sessions.append(fifth)
+        _browser(fifth, "open", url + "/#/chat")
+        _browser(fifth, "fill", "#chat-input", "600519 2026-09-24 股价走势")
+        _browser(fifth, "click", "#chat-send-btn")
+        deadline = time.monotonic() + 8
+        visible = ""
+        while time.monotonic() < deadline:
+            payload = _browser(fifth, "eval", "document.querySelector('#chat-history')?.innerText || ''")
+            visible = payload.get("data", {}).get("result", "")
+            if "当前问答任务较多" in visible:
+                break
+            time.sleep(.1)
+        assert "当前问答任务较多" in visible
+        assert _get_json(url + "/_fixture/p3-state")["active_runs"] == 4
+
+        _post_json(url + "/_fixture/p3-release")
+        deadline = time.monotonic() + 12
+        state = {}
+        while time.monotonic() < deadline:
+            state = _get_json(url + "/_fixture/p3-state")
+            if state.get("active_runs") == 0:
+                break
+            time.sleep(.05)
+        assert state.get("active_runs") == 0, state
+        assert len(state.get("calls", [])) == 4
+
+        recovered = "p3-cap-recovered-" + uuid.uuid4().hex
+        sessions.append(recovered)
+        _browser(recovered, "open", url + "/#/chat")
+        _browser(recovered, "fill", "#chat-input", "600519 2026-09-24 股价走势")
+        _browser(recovered, "click", "#chat-send-btn")
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            state = _get_json(url + "/_fixture/p3-state")
+            if len(state.get("calls", [])) == 5:
+                break
+            time.sleep(.05)
+        assert len(state.get("calls", [])) == 5, state
+        assert state.get("active_runs", 0) <= 1
+        assert _browser(recovered, "errors")["data"].get("errors", []) == []
+    finally:
+        _post_json(url + "/_fixture/p3-release")
+        _close_fixture(process, sessions)
+
+
+def test_stopped_research_resume_does_not_repeat_completed_retrieval():
+    process, url = _start_fixture("research-resume")
+    session = "p3-research-resume-" + uuid.uuid4().hex
+    try:
+        _browser(session, "open", url + "/#/chat")
+        _browser(session, "fill", "#chat-input", "研究计划停止验收 601288 2026年半年报财报")
+        _browser(session, "click", "#chat-send-btn")
+        deadline = time.monotonic() + 12
+        state = {}
+        while time.monotonic() < deadline:
+            state = _get_json(url + "/_fixture/p3-state")
+            if state.get("normalize_started"):
+                break
+            time.sleep(.05)
+        if not state.get("normalize_started"):
+            state["dom"] = _browser(session, "eval", "document.querySelector('#chat-history')?.innerText || ''").get("data", {}).get("result", "")
+            state["browser_errors"] = _browser(session, "errors")["data"].get("errors", [])
+        assert state.get("normalize_started"), json.dumps(state, ensure_ascii=False)
+        assert state.get("retrieval_calls") == 1, state
+
+        _browser(session, "click", "#chat-send-btn")
+        _post_json(url + "/_fixture/p3-release")
+        deadline = time.monotonic() + 12
+        state = {}
+        visible = ""
+        while time.monotonic() < deadline:
+            state = _get_json(url + "/_fixture/p3-state")
+            payload = _browser(session, "eval", "document.querySelector('#chat-history')?.innerText || ''")
+            visible = payload.get("data", {}).get("result", "")
+            if state.get("research_status") == "stopped":
+                break
+            time.sleep(.1)
+        assert state.get("research_status") == "stopped", state
+        completed_before_resume = state.get("completed_step_ids", [])
+        assert completed_before_resume in (["retrieve"], ["retrieve", "normalize"]), state
+        # The in-flight DOM only has the pre-stop run snapshot; reload the persisted
+        # history so the recovery action uses the server's terminal research state.
+        _browser(session, "reload")
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            payload = _browser(session, "eval", "document.querySelector('#chat-history')?.innerText || ''")
+            visible = payload.get("data", {}).get("result", "")
+            if "继续研究" in visible:
+                break
+            time.sleep(.1)
+        assert "继续研究" in visible, json.dumps(state, ensure_ascii=False)
+        assert state.get("retrieval_calls") == 1, state
+
+        _browser(session, "click", '[data-chat-action="resume-research"]')
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            state = _get_json(url + "/_fixture/p3-state")
+            if state.get("research_status") == "completed":
+                break
+            time.sleep(.1)
+        assert state.get("research_status") == "completed", state
+        assert state.get("completed_step_ids") == ["retrieve", "normalize", "compare", "verify", "answer"]
+        assert state.get("retrieval_calls") == 1, "resuming must reuse persisted completed retrieval"
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _post_json(url + "/_fixture/p3-release")
+        _close_fixture(process, [session])
