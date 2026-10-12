@@ -884,10 +884,11 @@ def test_append_assistant_run_places_market_table_inside_answer_bubble():
         const start = src.indexOf('function appendAssistantRun(sel, message) {{');
         const end = src.indexOf('// analysis 来源引用', start);
         const wrapper = {{className:'', innerHTML:'', insertAdjacentHTML() {{}}}};
-        const box = {{appendChild(node) {{ this.child = node; }}, scrollHeight:0}};
+        const events = [];
+        const box = {{appendChild(node) {{ this.child = node; events.push('append'); }}, scrollHeight:0}};
         const empty = () => '';
         const sandbox = {{
-          window:{{ChatRendering:{{
+          window:{{ChatMarketCharts:{{mount(container) {{ events.push(box.child === container ? 'mount-after-append' : 'mount-before-append'); }}}}, ChatRendering:{{
             normalizeAssistantMarkdown:value => value, renderScope:empty, renderExecutionSummary:empty,
             renderInlineMarketFacts:() => '<section class="chat-inline-market">逐日行情</section>',
             renderResearchPlan:empty, renderResearchSteps:empty, renderPolicy:empty,
@@ -900,7 +901,133 @@ def test_append_assistant_run_places_market_table_inside_answer_bubble():
         }};
         vm.createContext(sandbox);
         vm.runInContext(src.slice(start, end) + '; appendAssistantRun("#chat-history", {{content:"短期结论", run:{{}}}});', sandbox);
-        console.log(JSON.stringify(wrapper.innerHTML));
+        console.log(JSON.stringify({{html:wrapper.innerHTML, events}}));
         """
     )
-    assert '<p>短期结论</p><section class="chat-inline-market">逐日行情</section>' in result
+    assert '<p>短期结论</p><section class="chat-inline-market">逐日行情</section>' in result['html']
+    assert result['events'] == ['append', 'mount-after-append']
+
+
+def test_market_index_chart_data_aligns_four_indices_and_normalizes_to_common_start():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const facts = [
+          ['sh000001','上证指数',[3000,3060,3030]],
+          ['sz399001','深证成指',[10000,10100,9900]],
+          ['sz399006','创业板指',[2000,1980,2100]],
+          ['sh000688','科创50指数',[1000,1050,1025]]
+        ].flatMap(([code, _name, closes]) => closes.map((value, i) => ({{
+          metric:'index_close', value, unit:'点', period:['2026-01-05','2026-01-06','2026-01-07'][i],
+          period_kind:'daily', entity_scope:'index', company_code:code, source_type:'tool', source_category:'market',
+          verification:'reference', as_of:'2026-01-07'
+        }})));
+        const run = {{execution_plan:{{source_mode:'market_recap'}}, facts}};
+        const available = typeof r.marketIndexChartData === 'function';
+        console.log(JSON.stringify({{available, data:available ? r.marketIndexChartData(run) : null}}));
+        """
+    )
+    assert result['available'] is True
+    data = result['data']
+    assert data['periods'] == ['2026-01-05', '2026-01-06', '2026-01-07']
+    assert [series['code'] for series in data['series']] == [
+        'sh000001', 'sz399001', 'sz399006', 'sh000688'
+    ]
+    assert data['series'][0]['label'].startswith('上证指数')
+    assert data['series'][0]['closeValues'] == [3000, 3060, 3030]
+    assert data['series'][0]['changePctValues'] == pytest.approx([0, 2, 1])
+    assert data['series'][1]['changePctValues'] == pytest.approx([0, 1, -1])
+
+
+def test_market_index_chart_data_excludes_conflicting_or_unaligned_facts():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const fact = (code, period, value, extra={{}}) => ({{
+          metric:'index_close', value, unit:'点', period, period_kind:'daily', company_code:code,
+          source_type:'tool', source_category:'market', verification:'reference', entity_scope:'index', as_of:'2026-01-06', ...extra
+        }});
+        const daily = [
+          fact('sh000001','2026-01-05',3000), fact('sh000001','2026-01-05',3001), fact('sh000001','2026-01-06',3030),
+          fact('sz399001','2026-01-05',10000), fact('sz399001','2026-01-06',10100),
+          fact('sz399006','2026-01-05',2000), fact('sz399006','2026-01-06',2200),
+          fact('badcode','2026-01-05',100), fact('badcode','2026-01-06',110),
+          fact('sh000688','2026-01-05',1000,{{source_category:'web'}}),
+          fact('sh000688','2026-01-06',1050,{{source_category:'web'}})
+        ];
+        const conflictRun = {{execution_plan:{{source_mode:'market_recap'}}, facts:daily}};
+        const mixedRun = {{execution_plan:{{source_mode:'market_recap'}}, facts:[
+          fact('sh000001','2026-01-05',3000), fact('sh000001','2026-01-06',3030),
+          fact('sz399001','2026-01-05',10000), fact('sz399001','2026-01-06',10100),
+          fact('sz399006','2026-01-05',2000,{{period_kind:'weekly'}}),
+          fact('sz399006','2026-01-06',2200,{{period_kind:'weekly'}})
+        ]}};
+        const oneIndex = {{execution_plan:{{source_mode:'market_recap'}}, facts:[
+          fact('sh000001','2026-01-05',3000), fact('sh000001','2026-01-06',3030)
+        ]}};
+        const oneSharedDate = {{execution_plan:{{source_mode:'market_recap'}}, facts:[
+          fact('sh000001','2026-01-05',3000), fact('sh000001','2026-01-06',3030),
+          fact('sz399001','2026-01-06',10100), fact('sz399001','2026-01-07',10200)
+        ]}};
+        const nonMarket = {{execution_plan:{{source_mode:'general_web'}}, facts:daily}};
+        const available = typeof r.marketIndexChartData === 'function';
+        const data = available ? r.marketIndexChartData(conflictRun) : null;
+        console.log(JSON.stringify({{available, data, mixed:available ? r.marketIndexChartData(mixedRun) : null,
+          oneIndex:available ? r.marketIndexChartData(oneIndex) : null,
+          oneSharedDate:available ? r.marketIndexChartData(oneSharedDate) : null,
+          nonMarket:available ? r.marketIndexChartData(nonMarket) : null}}));
+        """
+    )
+    assert result['available'] is True
+    assert [series['code'] for series in result['data']['series']] == ['sz399001', 'sz399006']
+    assert result['data']['periods'] == ['2026-01-05', '2026-01-06']
+    assert result['mixed'] is None
+    assert result['oneIndex'] is None
+    assert result['oneSharedDate'] is None
+    assert result['nonMarket'] is None
+
+
+def test_render_inline_market_facts_places_accessible_index_chart_before_point_tables():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const facts = ['sh000001','sz399001'].flatMap((code, index) => [
+          {{metric:'index_close', value:index ? 10000 : 3000, unit:'点', period:'2026-01-05', period_kind:'daily', entity_scope:'index', company_code:code, source_type:'tool', source_category:'market', verification:'reference'}},
+          {{metric:'index_close', value:index ? 10100 : 3030, unit:'点', period:'2026-01-06', period_kind:'daily', entity_scope:'index', company_code:code, source_type:'tool', source_category:'market', verification:'reference'}}
+        ]);
+        const run = {{execution_plan:{{source_mode:'market_recap', market_window:{{label:'近5交易日'}}}}, facts}};
+        const html = r.renderInlineMarketFacts(run);
+        const oneIndex = r.renderInlineMarketFacts({{execution_plan:run.execution_plan, facts:facts.filter(f => f.company_code === 'sh000001')}});
+        console.log(JSON.stringify({{html, oneIndex}}));
+        """
+    )
+    html = result['html']
+    assert '<figure class="chat-market-chart"' in html
+    assert 'data-chat-market-chart' in html
+    assert '上证指数' in html and '深证成指' in html
+    assert '共同基准点' in html and '0%' in html
+    assert html.index('<figure class="chat-market-chart"') < html.index('chat-inline-market-object')
+    assert 'chat-inline-market-object' in result['oneIndex']
+    assert 'data-chat-market-chart' not in result['oneIndex']
+
+
+def test_clear_chat_history_destroys_market_charts_before_clearing_dom():
+    result = _run_node(
+        f"""
+        const fs = require('fs'), vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('function clearChatHistory() {{');
+        const end = src.indexOf('async function deleteSelectedChatSessions', start);
+        const events = [];
+        const box = {{set innerHTML(value) {{ if (value === '') events.push('clear'); }}}};
+        const sandbox = {{window:{{ChatMarketCharts:{{destroyAll() {{ events.push('destroy'); }}}}}}, $:() => box}};
+        vm.createContext(sandbox);
+        if (start < 0 || end < 0) {{ console.log(JSON.stringify({{available:false, events}})); }}
+        else {{
+          vm.runInContext(src.slice(start, end) + '; clearChatHistory();', sandbox);
+          console.log(JSON.stringify({{available:true, events}}));
+        }}
+        """
+    )
+    assert result['available'] is True
+    assert result['events'] == ['destroy', 'clear']

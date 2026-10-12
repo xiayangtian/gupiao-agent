@@ -328,6 +328,61 @@ def _overflow_script(session_id: str) -> str:
 """
 
 
+def _multi_index_chart_script(session_id: str, run: dict) -> str:
+    return f"""
+(async () => {{
+  await openChatSession({json.dumps(session_id)});
+  const fixtureRun = {json.dumps(run, ensure_ascii=False)};
+  let fetchCount = 0;
+  const originalFetch = window.fetch;
+  window.fetch = function (...args) {{ fetchCount += 1; return originalFetch.apply(this, args); }};
+  window.appendAssistantRun('#chat-history', {{content:'多指数行情图表浏览器测试。', run:fixtureRun}});
+  window.fetch = originalFetch;
+  const deadline = Date.now() + 5000;
+  let canvas = document.querySelector('#chat-history .chat-market-chart canvas');
+  let chart = null;
+  while (canvas && Date.now() < deadline) {{
+    chart = window.Chart && typeof window.Chart.getChart === 'function' ? window.Chart.getChart(canvas) : null;
+    if (!chart && window.Chart && window.Chart.instances) {{
+      chart = Object.values(window.Chart.instances).find(instance => instance.canvas === canvas) || null;
+    }}
+    if (chart) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }}
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const figure = document.querySelector('#chat-history .chat-market-chart');
+  const fallback = figure && figure.querySelector('.chat-market-chart-fallback');
+  const pointTablePresent = !!document.querySelector('#chat-history .chat-inline-market-object table');
+  const bounds = selector => {{ const element = document.querySelector(selector); return element ? element.getBoundingClientRect().bottom : null; }};
+  const chartLayout = {{
+    scrollWidth:document.documentElement.scrollWidth, innerWidth:window.innerWidth,
+    innerHeight:window.innerHeight, chatHistoryBottom:bounds('#chat-history'),
+    chatPageBottom:bounds('#page-chat'), inputBottom:bounds('.chat-input-row')
+  }};
+  const oldCanvas = canvas;
+  const otherSession = [...document.querySelectorAll('.chat-session-item')]
+    .find(item => item.dataset.sid !== {json.dumps(session_id)});
+  let switchCleared = false;
+  if (otherSession) {{
+    await openChatSession(otherSession.dataset.sid);
+    const staleChart = window.Chart && typeof window.Chart.getChart === 'function'
+      ? window.Chart.getChart(oldCanvas) : null;
+    switchCleared = !staleChart && document.querySelectorAll('#chat-history .chat-market-chart').length === 0;
+  }}
+  return JSON.stringify({{
+    chartRendered:!!chart, datasetCount:chart ? chart.data.datasets.length : 0,
+    baselineValues:chart ? chart.data.datasets.map(dataset => dataset.data[0]) : [],
+    labels:chart ? chart.data.labels : [],
+    legendCount:figure ? figure.querySelectorAll('.chat-market-chart-legend li').length : 0,
+    pointTablePresent, fallbackHidden:fallback ? fallback.hidden : null, fetchCount, switchCleared,
+    scrollWidth:chartLayout.scrollWidth, innerWidth:chartLayout.innerWidth,
+    innerHeight:chartLayout.innerHeight, chatHistoryBottom:chartLayout.chatHistoryBottom,
+    chatPageBottom:chartLayout.chatPageBottom, inputBottom:chartLayout.inputBottom
+  }});
+}})()
+"""
+
+
 def test_chat_history_reopens_with_scope_and_pdf_page_link(browser_session, actual_app_url):
     """company_only Scope 与第 40 页 PDF/网页证据在历史重开后完整保留且 URL 安全。"""
     session_id, run = _create_completed_chat(actual_app_url, question="农业银行经营现金流如何？")
@@ -430,6 +485,50 @@ def test_chat_layout_has_no_horizontal_overflow_across_viewports(browser_session
         f"{viewport} 视口横向溢出：scrollWidth={rendered['scrollWidth']} > innerWidth={rendered['innerWidth']}"
     )
     assert rendered["overflow"] is False
+    if viewport[0] <= 640:
+        assert rendered["chatHistoryBottom"] <= rendered["chatPageBottom"] + 1
+        assert rendered["inputBottom"] <= rendered["innerHeight"] + 1
+    assert _console_errors(browser_session) == []
+    assert _page_errors(browser_session) == []
+
+
+@pytest.mark.parametrize("viewport", [(1280, 900), (768, 1000), (390, 844)])
+def test_multi_index_chart_renders_in_actual_app_without_fetch_or_overflow(browser_session, actual_app_url, viewport):
+    """多指数图表只消费当前 run facts，保留表格并适配桌面/平板/移动布局。"""
+    session_id, _ = _create_completed_chat(actual_app_url, question="农业银行经营现金流如何？")
+    run = {
+        "status": "completed",
+        "intent_decision": {"intent": "market_recap"},
+        "execution_plan": {"source_mode": "market_recap", "market_window": {"label": "近5个交易日"}},
+        "facts": [
+            {
+                "metric": "index_close", "value": close, "unit": "点", "period": day,
+                "period_kind": "daily", "entity_scope": "index", "company_code": code,
+                "source_type": "tool", "source_category": "market", "verification": "reference",
+            }
+            for code, values in {
+                "sh000001": [3000, 3030, 3015], "sz399001": [10000, 10100, 10050],
+                "sz399006": [2000, 2050, 2030], "sh000688": [1000, 1020, 1010],
+            }.items()
+            for day, close in zip(["2026-09-29", "2026-09-30", "2026-10-12"], values)
+        ],
+    }
+    script = _multi_index_chart_script(session_id, run)
+    _run_browser(browser_session, "set", "viewport", str(viewport[0]), str(viewport[1]))
+    _run_browser(browser_session, "open", f"{actual_app_url}/#/chat")
+    _start_observing(browser_session)
+    rendered = _eval(browser_session, script)
+
+    assert rendered["chartRendered"] is True
+    assert rendered["datasetCount"] == 4
+    assert rendered["baselineValues"] == [0, 0, 0, 0]
+    assert rendered["labels"] == ["2026-09-29", "2026-09-30", "2026-10-12"]
+    assert rendered["legendCount"] == 4
+    assert rendered["pointTablePresent"] is True
+    assert rendered["fallbackHidden"] is True
+    assert rendered["fetchCount"] == 0, "图表不得发起新数据请求"
+    assert rendered["switchCleared"] is True, "切换会话后不得残留旧图表实例"
+    assert rendered["scrollWidth"] <= rendered["innerWidth"]
     if viewport[0] <= 640:
         assert rendered["chatHistoryBottom"] <= rendered["chatPageBottom"] + 1
         assert rendered["inputBottom"] <= rendered["innerHeight"] + 1

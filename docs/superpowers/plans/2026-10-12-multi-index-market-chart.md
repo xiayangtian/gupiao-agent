@@ -30,10 +30,10 @@
 - `marketIndexChartData(run)` 返回 `null` 或 `{ periods, series }`。
 - `series` 每项为 `{ code, label, closeValues, changePctValues }`；各数组与 `periods` 等长，`changePctValues[0] === 0`。
 
-- [ ] **Step 1: 写失败测试**：构造上证/深证/创业板/科创 50 的 3 日 `index_close` facts；验证只保留共同日期，四个系列首点为 0%，后续点依据各自首日计算，label 和 raw close 保留。再测重复同值去重、重复日期异值排除该指数、跨 `period_kind`/未知代码/非 market/非 `index_close` 事实不混入；不足两个指数或不足两个共同日期返回 `null`。
-- [ ] **Step 2: 运行目标测试确认 RED**：`python3 -m pytest -q tests/unit/test_chat_rendering_js.py -k market_index_chart_data`；预期因导出函数不存在而失败。
-- [ ] **Step 3: 实现最小提取逻辑**：按固定指数代码建序列，日期 ISO 字符串排序；先排除非参考行情 Fact、无效点位、无效日期、未知代码和冲突系列，再计算所有合格指数的日期交集；只在交集长度≥2 且合格系列数≥2时返回 view model；按共同首日计算百分比，不改写输入 run。
-- [ ] **Step 4: 运行目标测试 GREEN**：运行新增目标测试与 `tests/unit/test_chat_rendering_js.py`。
+- [x] **Step 1: 写失败测试**：构造上证/深证/创业板/科创 50 的 3 日 `index_close` facts；验证只保留共同日期，四个系列首点为 0%，后续点依据各自首日计算，label 和 raw close 保留。再测重复同值去重、重复日期异值排除该指数、跨 `period_kind`/未知代码/非 market/非 `index_close` 事实不混入；不足两个指数或不足两个共同日期返回 `null`。
+- [x] **Step 2: 运行目标测试确认 RED**：`python3 -m pytest -q tests/unit/test_chat_rendering_js.py -k market_index_chart_data`：2 项因 `marketIndexChartData` 尚未导出而按预期失败。
+- [x] **Step 3: 实现最小提取逻辑**：按固定指数代码建序列，日期 ISO 字符串排序；先排除非参考行情 Fact、无效点位、无效日期、未知代码和冲突系列，再计算所有合格指数的日期交集；只在交集长度≥2 且合格系列数≥2时返回 view model；按共同首日计算百分比，不改写输入 run。
+- [x] **Step 4: 运行目标测试 GREEN**：新增数据模型测试 2 passed；`tests/unit/test_chat_rendering_js.py`：39 passed；`node --check webapp/static/chat_rendering.js` 与 `git diff --check` 通过。
 
 ### Task 2: 实现 Chart.js 多指数折线组件
 
@@ -47,11 +47,11 @@
 - `window.ChatMarketCharts.destroyAll()`：销毁所有已注册的图表并清空实例集合。
 - `window.ChatMarketCharts.chartConfig(data)`：纯函数，返回 Chart.js `line` 配置；tooltip 标签携带日期、原始点位和区间涨跌幅。
 
-- [ ] **Step 1: 写失败测试**：验证 chart config 是 line chart、数据集数与指数数一致、x 轴日期对齐、y 轴及提示使用百分比、tooltip formatter 同时显示原始点位与涨跌；使用 stub Chart 验证 mount 成功、Chart 缺失/构造异常 fallback，以及 destroyAll 对每个实例恰好调用 destroy。
-- [ ] **Step 2: 运行目标测试确认 RED**：`python3 -m pytest -q tests/unit/test_chat_market_charts_js.py`；预期因模块不存在而失败。
-- [ ] **Step 3: 实现模块**：创建独立 UMD/IIFE 模块；读取 `window.ChatRendering` 数据，采用项目现有色彩/字体 token 对应的可区分线型和文字图例；配置响应式折线及日期/原始点位/百分比 tooltip；所有异常退化为可读状态提示；实例用 Map 管理。
-- [ ] **Step 4: 加载模块**：将 `/static/chat_market_charts.js?v=__APP_VERSION__` 放在 `chat_rendering.js` 后、`app.js` 前，确保单页加载和历史重开均可用。
-- [ ] **Step 5: 运行目标测试 GREEN**：运行 `tests/unit/test_chat_market_charts_js.py` 和 `tests/unit/test_chat_rendering_js.py`，并执行 `node --check`。
+- [x] **Step 1: 写失败测试**：验证 chart config 是 line chart、数据集数与指数数一致、x 轴日期对齐、y 轴及提示使用百分比、tooltip formatter 同时显示原始点位与涨跌；使用 stub Chart 验证 mount 成功、Chart 缺失/构造异常 fallback，以及 destroyAll 对每个实例恰好调用 destroy。
+- [x] **Step 2: 运行目标测试确认 RED**：`python3 -m pytest -q tests/unit/test_chat_market_charts_js.py`：2 项因图表模块尚未创建而按预期失败。
+- [x] **Step 3: 实现模块**：创建独立 UMD/IIFE 模块；读取 `window.ChatRendering` 数据，采用项目现有色彩/字体 token 对应的可区分线型和文字图例；配置响应式折线及日期/原始点位/百分比 tooltip；所有异常退化为可读状态提示；实例用 Map 管理。
+- [x] **Step 4: 加载模块**：将 `/static/chat_market_charts.js?v=__APP_VERSION__` 放在 `chat_rendering.js` 后、`app.js` 前，确保单页加载和历史重开均可用。
+- [x] **Step 5: 运行目标测试 GREEN**：`tests/unit/test_chat_market_charts_js.py` 2 passed；数据模型目标测试 2 passed；`tests/unit/test_chat_rendering_js.py` 39 passed；`node --check` 和 `git diff --check` 通过。
 
 ### Task 3: 集成回答正文和图表生命周期
 
@@ -61,10 +61,10 @@
 - Modify: `webapp/static/style.css`（响应式图表容器、文字图例、加载失败状态）
 - Test: `tests/unit/test_chat_rendering_js.py`、`tests/unit/test_chat_market_charts_js.py`
 
-- [ ] **Step 1: 确保 RED**：扩展 renderer 测试，断言多指数 run 含标题/基准日说明/文本图例/canvas；单指数和数据不足不输出 canvas；扩展 app harness 测试，断言 mount 在 wrapper 插入后调用，清空聊天先销毁实例。
-- [ ] **Step 2: 接入现有统一渲染路径**：`appendAssistantRun` 生成的 figure 放在原点位表之前，`box.appendChild(wrapper)` 后调用 `ChatMarketCharts.mount(wrapper, run)`，保证 SSE 完成与历史会话共用；将所有 `#chat-history` 清空点统一到 `clearChatHistory()`，先调用 `destroyAll()` 再清 DOM。
-- [ ] **Step 3: 添加窄屏样式**：图表宽度 `100%`、稳定高度、文字图例可换行；canvas 设置 `max-width:100%`；保留浏览器缩放和可见焦点，不使用横向滚动容器。
-- [ ] **Step 4: 运行目标测试 GREEN**：运行两份 renderer/chart module 测试和 `node --check webapp/static/app.js`。
+- [x] **Step 1: 确保 RED**：renderer 与 app harness 的 3 项扩展测试先按预期失败，再实现后通过；覆盖多指数图表容器、数据不足不绘图、挂载顺序与清理顺序。
+- [x] **Step 2: 接入现有统一渲染路径**：figure 位于点位表前；`appendAssistantRun` 在插入 DOM 后挂载图表；`clearChatHistory()` 统一销毁实例并清空 DOM，历史重开和 SSE 完成共用路径。
+- [x] **Step 3: 添加窄屏样式**：图表宽度 `100%`、桌面/移动稳定高度、文字图例可换行；canvas `max-width:100%`；无横向滚动容器；失败 fallback 隐藏空 canvas 并收起绘图区。
+- [x] **Step 4: 运行目标测试 GREEN**：renderer/chart module 聚焦测试 43 passed；app/rendering/chart JS `node --check` 通过；`git diff --check` 通过。
 
 ### Task 4: 浏览器验收和项目文档
 
@@ -72,9 +72,9 @@
 - Test: `tests/browser/test_chat_trust_flow.py` 或新增聚焦 `tests/browser/test_chat_market_chart.py`
 - Modify after merge: `README.md`、`docs/FEATURE-CATALOG.md`、`docs/superpowers/DESIGN-REGISTRY.md`
 
-- [ ] **Step 1: 添加浏览器 fixture**：注入四指数三日的本地 AnswerRun，不调用真实行情源；断言 canvas/图例/表格存在，Chart.js 数据对齐，未触发额外请求，切换会话无残留图表。
-- [ ] **Step 2: 验证边界**：单指数、共同日期不足、重复冲突、Chart.js 缺失时表格仍可读且无空白报错图。
-- [ ] **Step 3: 执行聚焦验证**：运行相关 unit tests、聚焦浏览器测试、`node --check`、`git diff --check`；真实浏览器对 local fixture 执行 desktop/tablet/mobile `browser_qa` 并核查 console/page/network errors。
+- [x] **Step 1: 添加浏览器 fixture**：实际应用浏览器 fixture 注入四指数三日 AnswerRun，断言 canvas/图例/点位表、Chart.js 对齐与基准、挂载无新增 fetch；切换会话后旧实例与 figure 均清除。
+- [x] **Step 2: 验证边界**：数据模型测试覆盖单指数、共同日期不足、重复冲突与混周期；Chart 缺失/构造异常测试验证隐藏 canvas、收起空绘图区并保留文本 fallback；单指数 renderer 仍保留表格。
+- [x] **Step 3: 执行聚焦验证**：renderer/chart 单测 43 passed；含多指数图表及既有行情表格的浏览器测试 6 passed；三个 JS 文件语法检查及 `git diff --check` 通过。browser_qa 已验 desktop/tablet/mobile，console/page errors 无，网络仅 favicon.ico 404。
 - [ ] **Step 4: 更新用户文档**：在实现合入 `main` 后更新 README 行情能力、FEATURE-CATALOG 的入口/不变量/验证记录、DESIGN-REGISTRY 的合并 SHA 与测试证据；不得在未合入分支提前写功能交付说明。
 
 ---

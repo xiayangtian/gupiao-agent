@@ -430,6 +430,89 @@
       : '');
   }
 
+  function marketIndexChartData(run) {
+    if (!run || typeof run !== 'object') return null;
+    var plan = run.execution_plan && typeof run.execution_plan === 'object' ? run.execution_plan : {};
+    if (String(plan.source_mode || '') !== 'market_recap') return null;
+
+    var labels = {
+      sh000001: '上证指数', sz399001: '深证成指',
+      sz399006: '创业板指', sh000688: '科创50指数'
+    };
+    var orderedCodes = ['sh000001', 'sz399001', 'sz399006', 'sh000688'];
+    var groupsByCode = {};
+    (Array.isArray(run.facts) ? run.facts : []).forEach(function (fact) {
+      if (!fact || fact.source_category !== 'market' || fact.metric !== 'index_close'
+        || fact.unit !== '点' || fact.source_type !== 'tool' || fact.verification !== 'reference'
+        || fact.entity_scope !== 'index' || !labels[String(fact.company_code || '')]
+        || typeof fact.value !== 'number' || !Number.isFinite(fact.value) || fact.value <= 0
+        || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(String(fact.period || ''))
+        || !['daily', 'weekly', 'monthly'].includes(String(fact.period_kind || ''))) return;
+      var periodDate = new Date(String(fact.period) + 'T00:00:00Z');
+      if (!Number.isFinite(periodDate.getTime()) || periodDate.toISOString().slice(0, 10) !== fact.period) return;
+      var code = String(fact.company_code);
+      var group = groupsByCode[code];
+      if (!group) {
+        group = { code: code, periodKind: String(fact.period_kind), values: {}, conflict: false, mixedPeriod: false };
+        groupsByCode[code] = group;
+      }
+      if (group.periodKind !== String(fact.period_kind)) group.mixedPeriod = true;
+      var period = String(fact.period);
+      if (Object.prototype.hasOwnProperty.call(group.values, period)) {
+        if (group.values[period] !== fact.value) group.conflict = true;
+      } else {
+        group.values[period] = fact.value;
+      }
+    });
+
+    var groups = orderedCodes.map(function (code) { return groupsByCode[code]; })
+      .filter(function (group) { return group && !group.conflict && !group.mixedPeriod; });
+    if (groups.length < 2) return null;
+    var periodKinds = {};
+    groups.forEach(function (group) { periodKinds[group.periodKind] = true; });
+    if (Object.keys(periodKinds).length !== 1) return null;
+
+    var periods = Object.keys(groups[0].values).filter(function (period) {
+      return groups.every(function (group) {
+        return Object.prototype.hasOwnProperty.call(group.values, period);
+      });
+    }).sort();
+    if (periods.length < 2) return null;
+
+    return {
+      periods: periods,
+      periodKind: groups[0].periodKind,
+      series: groups.map(function (group) {
+        var closeValues = periods.map(function (period) { return group.values[period]; });
+        var baseline = closeValues[0];
+        return {
+          code: group.code,
+          label: labels[group.code],
+          closeValues: closeValues,
+          changePctValues: closeValues.map(function (value) { return (value / baseline - 1) * 100; })
+        };
+      })
+    };
+  }
+
+  function renderMarketIndexChart(data) {
+    if (!data || !Array.isArray(data.periods) || !Array.isArray(data.series)) return '';
+    var baseline = String(data.periods[0] || '');
+    var names = data.series.map(function (series) { return String(series.label || series.code || '指数'); });
+    var legend = data.series.map(function (series, index) {
+      return '<li><span class="chat-market-chart-swatch chat-market-chart-swatch-' + (index % 4)
+        + '" aria-hidden="true"></span><span>' + escapeHtml(series.label || series.code || '指数') + '</span></li>';
+    }).join('');
+    var chartLabel = '多指数区间涨跌幅折线图，包含：' + names.join('、');
+    return '<figure class="chat-market-chart" aria-label="多指数区间走势比较">'
+      + '<figcaption><h4>多指数区间走势</h4><p>以 ' + escapeHtml(baseline)
+      + ' 为共同基准点（0%）；悬停可查看原始收盘点位与区间涨跌，下方表格保留收盘点位。</p></figcaption>'
+      + '<div class="chat-market-chart-plot"><canvas data-chat-market-chart role="img" aria-label="'
+      + escapeHtml(chartLabel) + '"></canvas><p class="chat-market-chart-fallback" role="status"'
+      + ' aria-live="polite" hidden></p></div>'
+      + '<ul class="chat-market-chart-legend" aria-label="指数图例">' + legend + '</ul></figure>';
+  }
+
   function renderInlineMarketFacts(run) {
     if (!run || typeof run !== 'object') return '';
     var plan = run.execution_plan && typeof run.execution_plan === 'object' ? run.execution_plan : {};
@@ -489,6 +572,7 @@
     }
 
     var label = plan.market_window && String(plan.market_window.label || '') || '行情采样区间';
+    var indexChartHtml = renderMarketIndexChart(marketIndexChartData(run));
     var sections = groups.map(function (group) {
       var rows = group.rows;
       var overall = percent(rows[rows.length - 1].value, rows[0].value);
@@ -505,7 +589,7 @@
     return '<section class="chat-inline-market" aria-label="' + escapeHtml(label + '行情数据') + '">'
       + '<h3>' + escapeHtml(label + '行情数据') + '</h3>'
       + '<p class="chat-inline-market-note">外部参考采样；涨跌幅按表内相邻收盘值计算。</p>'
-      + sections + '</section>';
+      + indexChartHtml + sections + '</section>';
   }
 
   function renderToolSourceGroup(group, run) {
@@ -818,6 +902,7 @@
     renderDeleteResult: renderDeleteResult,
     renderRunArtifacts: renderRunArtifacts,
     renderInlineMarketFacts: renderInlineMarketFacts,
+    marketIndexChartData: marketIndexChartData,
     renderPolicy: renderPolicy,
     renderFactsAndConflicts: renderFactsAndConflicts,
     renderVerification: renderVerification,

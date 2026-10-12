@@ -2465,7 +2465,14 @@ function bindChatSessionList() {
   });
 }
 
-// 重命名历史会话（prompt 输入新标题）
+// 清理聊天 DOM 前先销毁其挂载的 Chart.js 实例。
+function clearChatHistory() {
+  var charts = window.ChatMarketCharts;
+  if (charts && typeof charts.destroyAll === 'function') charts.destroyAll();
+  var box = $('#chat-history');
+  if (box) box.innerHTML = '';
+}
+
 async function deleteSelectedChatSessions() {
   var ids = Array.from(selectedChatSessionIds);
   if (!ids.length || !confirm('确定删除所选 ' + ids.length + ' 个历史会话？删除后不可恢复。')) return;
@@ -2474,7 +2481,7 @@ async function deleteSelectedChatSessions() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     var result = await res.json();
     ids.forEach(function(sid) { var st = chatStreams[sid]; if (st && st.reader) st.reader.cancel().catch(function() {}); delete chatStreams[sid]; });
-    if (ids.indexOf(chatSessionId) >= 0) { chatSessionId = null; var box = $('#chat-history'); if (box) box.innerHTML = ''; }
+    if (ids.indexOf(chatSessionId) >= 0) { chatSessionId = null; clearChatHistory(); }
     selectedChatSessionIds.clear();
     await loadChatSessions();
     if (result.deleted_session_ids.length) alert('已删除 ' + result.deleted_session_ids.length + ' 个会话。');
@@ -2513,8 +2520,7 @@ async function deleteChatSession(sid) {
     delete chatStreams[sid];
     if (chatSessionId === sid) {
       chatSessionId = null;
-      var box = $('#chat-history');
-      if (box) box.innerHTML = '';
+      clearChatHistory();
     }
     await loadChatSessions();
     var deleteNotice = window.ChatRendering ? window.ChatRendering.renderDeleteResult(deleteResult) : '';
@@ -2532,7 +2538,7 @@ async function openChatSession(sid) {
   chatSessionId = sid;
   renderChatSessionList();
   var box = $('#chat-history');
-  if (box) box.innerHTML = '';
+  clearChatHistory();
   updateChatSendBtn();
   // 该会话若有进行中的流：显示「生成中」+ 已累积部分（流在后台继续）
   var st = chatStreams[sid];
@@ -2585,8 +2591,7 @@ function newChatSession() {
   }
   // 无空会话：创建新空会话（历史列表新增一条）
   chatSessionId = null;
-  var box = $('#chat-history');
-  if (box) box.innerHTML = '';
+  clearChatHistory();
   renderChatSessionList();
   updateChatSendBtn();
   fetch('/api/chat/sessions', { method: 'POST' })
@@ -3461,6 +3466,9 @@ function appendAssistantRun(sel, message) {
   var reuseHtml = rendering && rendering.renderRunReuseActions ? rendering.renderRunReuseActions(run) : '';
   if (reuseHtml) wrapper.insertAdjacentHTML('beforeend', reuseHtml);
   box.appendChild(wrapper);
+  if (window.ChatMarketCharts && typeof window.ChatMarketCharts.mount === 'function') {
+    window.ChatMarketCharts.mount(wrapper, run);
+  }
   box.scrollTop = box.scrollHeight;
 }
 
