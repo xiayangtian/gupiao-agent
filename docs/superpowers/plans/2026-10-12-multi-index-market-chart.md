@@ -75,7 +75,7 @@
 - [x] **Step 1: 添加浏览器 fixture**：实际应用浏览器 fixture 注入四指数三日 AnswerRun，断言 canvas/图例/点位表、Chart.js 对齐与基准、挂载无新增 fetch；切换会话后旧实例与 figure 均清除。
 - [x] **Step 2: 验证边界**：数据模型测试覆盖单指数、共同日期不足、重复冲突与混周期；Chart 缺失/构造异常测试验证隐藏 canvas、收起空绘图区并保留文本 fallback；单指数 renderer 仍保留表格。
 - [x] **Step 3: 执行聚焦验证**：renderer/chart 单测 43 passed；含多指数图表及既有行情表格的浏览器测试 6 passed；三个 JS 文件语法检查及 `git diff --check` 通过。browser_qa 已验 desktop/tablet/mobile，console/page errors 无，网络仅 favicon.ico 404。
-- [ ] **Step 4: 更新用户文档**：在实现合入 `main` 后更新 README 行情能力、FEATURE-CATALOG 的入口/不变量/验证记录、DESIGN-REGISTRY 的合并 SHA 与测试证据；不得在未合入分支提前写功能交付说明。
+- [x] **Step 4: 更新用户文档**：合并 1188365 后更新 README 行情能力、FEATURE-CATALOG 的实现入口/不变量/验证记录，以及 DESIGN-REGISTRY 的合并 SHA 与测试证据。
 
 ---
 
