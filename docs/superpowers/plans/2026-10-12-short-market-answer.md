@@ -61,7 +61,7 @@
 - [x] **Step 1: 写回归断言**：精确断言“分析A股近5个交易日整体表现”解析为 `market_recap`、`requires_company=False`，并解析近5交易日窗口。
 - [x] **Step 2: 运行回归观察**：断言通过，证明当前磁盘 resolver 正确；历史失败发生在尚未加载此前路由修复的旧服务进程中。未把无关的历史运行归因为行情数据缺失。
 - [x] **Step 3: 聚焦验证**：125 项聚焦单测通过；含行情表格的 desktop/tablet/mobile 浏览器布局回归 3 项通过；`browser_qa` URL `http://127.0.0.1:8129/#/chat` 三视口无控制台/页面错误，网络仅有预期的 `favicon.ico` 404。
-- [ ] **Step 4: 重启本地 127.0.0.1:8000 服务**：仅在当前分支已合并 `main` 后执行，确认进程加载新代码并完成不触发生产行情请求的本地健康/路由验证。
+- [x] **Step 4: 重启本地 127.0.0.1:8000 服务**：合并后重启，旧 PID 39237 由 PID 72424 替换（2026-10-12 15:55:06）；`GET /api/health` 返回 200，`test_chat_request_resolution.py -k broad_market_request`：1 passed；未触发外部行情请求。
 
 ---
 
