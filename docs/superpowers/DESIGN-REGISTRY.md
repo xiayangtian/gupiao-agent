@@ -17,7 +17,7 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
-| 多指数行情图表 | 待实现 | 可直接执行 | [主记录](#multi-index-market-chart) |
+| 多指数行情图表 | 实施中 | — | [主记录](#multi-index-market-chart) |
 
 ## 全部设计
 
@@ -57,4 +57,4 @@
 | <a id="generic-market-horizons"></a>个股与大盘通用期限行情分析 | [设计](specs/2026-10-09-individual-and-market-horizon-analysis-design.md) | [实施计划](plans/2026-10-09-generic-market-horizon-analysis.md) | 已实现 | — | 用户授权 2026-10-12 合入 main，合并 536043d。聚焦验证：`python3 -m pytest -q tests/unit/test_rag_qa.py tests/unit/test_server_api.py tests/unit/test_chat_execution.py tests/unit/test_chat_verifier.py`：296 passed；本地接口 Q1-Q8 completed 且核验通过，Q9因广度 MCP 不可用、Q10-Q14因仅指数范围均为核验通过的 partial，Q15因区间首端数据缺失为 partial。全量 `python3 -m pytest -q`：1416 passed、1 skipped、10 failed；10项在基线 `main` `0e563c4` 已复现，用户明确授权在此结果下合入。 | 2026-10-12 |
 | <a id="chat-external-reference-display"></a>智能问答外部参考折叠与分组展示 | [设计](specs/2026-10-12-ref-display.md) | [实施计划](plans/2026-10-12-ref-display.md) | 已实现 | — | 用户确认后 fast-forward 合并 070002f 至 main；聚焦验证：`python3 -m pytest -q tests/unit/test_chat_rendering_js.py tests/unit/test_design_registry.py`：43 passed；来源失败场景浏览器回归 1 passed，聊天布局 desktop/tablet/mobile 3 passed；browser_qa `http://127.0.0.1:8127` 三视口无 console/page errors，只有 favicon.ico 404；25 条本地渲染 fixture 验证默认折叠、20+5 展开、浮点显示及 390/834/1440px 无页面横向溢出。两个既有来源终态断言与一个来源标题编码断言在基线 `43db423` 可复现，未混作本次回归 | 2026-10-12 |
 | <a id="short-market-answer-formatting"></a>短期行情答案直观展示 | [设计](specs/2026-10-12-short-market-answer.md) | [实施计划](plans/2026-10-12-short-market-answer.md) | 已实现 | — | 本地 `main` fast-forward 合并 4d79eb8；`python3 -m pytest -q tests/unit/test_chat_rendering_js.py tests/unit/test_chat_request_resolution.py tests/unit/test_chat_policy.py tests/unit/test_rag_qa.py tests/unit/test_design_registry.py`：125 passed；含行情表格的桌面/平板/移动布局浏览器回归：3 passed；browser_qa `http://127.0.0.1:8129/#/chat` 三视口无 console/page errors，仅 favicon.ico 404；旧服务 PID 39237 已于 15:55 重启为 72424，健康接口 200，精准 broad-market 路由回归 1 passed；未推送远端 | 2026-10-12 |
-| <a id="multi-index-market-chart"></a>多指数行情图表 | [设计](specs/2026-10-12-multi-index-market-chart-design.md) | [实施计划](plans/2026-10-12-multi-index-market-chart.md) | 待实现 | 可直接执行 | 用户确认：按共同日期的区间涨跌幅比较多指数；先首个共同日为 0%，提示显示原始点位；无新数据调用，保留事实表与来源。文案调整不在本项范围 | 2026-10-12 |
+| <a id="multi-index-market-chart"></a>多指数行情图表 | [设计](specs/2026-10-12-multi-index-market-chart-design.md) | [实施计划](plans/2026-10-12-multi-index-market-chart.md) | 实施中 | — | 用户确认设计与实施计划；隔离分支 `feat/multi-index-market-chart`，按本计划执行；不含已取消的交互文案调整 | 2026-10-12 |
