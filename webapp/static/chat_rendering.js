@@ -430,6 +430,84 @@
       : '');
   }
 
+  function renderInlineMarketFacts(run) {
+    if (!run || typeof run !== 'object') return '';
+    var plan = run.execution_plan && typeof run.execution_plan === 'object' ? run.execution_plan : {};
+    var intent = run.intent_decision && String(run.intent_decision.intent || '');
+    var marketMode = ['external_market', 'market_recap'].indexOf(String(plan.source_mode || '')) !== -1;
+    if (!marketMode && intent !== 'realtime_market') return '';
+
+    var groupsByKey = {};
+    var groups = [];
+    (Array.isArray(run.facts) ? run.facts : []).forEach(function (fact) {
+      if (!fact || fact.source_category !== 'market'
+        || ['price', 'index_close'].indexOf(String(fact.metric || '')) === -1
+        || typeof fact.value !== 'number' || !Number.isFinite(fact.value)
+        || !fact.company_code || !fact.period) return;
+      var key = JSON.stringify([String(fact.company_code), String(fact.metric), String(fact.unit || '')]);
+      var group = groupsByKey[key];
+      if (!group) {
+        group = { code: String(fact.company_code), metric: String(fact.metric), unit: String(fact.unit || ''),
+          periods: {}, conflict: false };
+        groupsByKey[key] = group;
+        groups.push(group);
+      }
+      var period = String(fact.period);
+      if (Object.prototype.hasOwnProperty.call(group.periods, period)) {
+        if (group.periods[period] !== fact.value) group.conflict = true;
+      } else {
+        group.periods[period] = fact.value;
+      }
+    });
+
+    groups = groups.map(function (group) {
+      group.rows = Object.keys(group.periods).sort().map(function (period) {
+        return { period: period, value: group.periods[period] };
+      });
+      return group;
+    }).filter(function (group) { return !group.conflict && group.rows.length >= 2; });
+    if (!groups.length) return '';
+
+    function percent(value, previous) {
+      if (!Number.isFinite(value) || !Number.isFinite(previous) || previous === 0) return '—';
+      var change = (value / previous - 1) * 100;
+      return (change > 0 ? '+' : '') + change.toFixed(2) + '%';
+    }
+    function table(group, items, offset) {
+      var body = items.map(function (row, index) {
+        var absoluteIndex = offset + index;
+        var previous = absoluteIndex > 0 ? group.rows[absoluteIndex - 1].value : null;
+        return '<tr><td>' + escapeHtml(row.period) + '</td><td class="chat-inline-market-value">'
+          + escapeHtml(formatFactValue(row.value)) + (group.unit ? ' ' + escapeHtml(group.unit) : '')
+          + '</td><td>' + (previous == null ? '—' : escapeHtml(percent(row.value, previous))) + '</td></tr>';
+      }).join('');
+      var closeLabel = group.metric === 'index_close' ? '收盘点位' : '收盘价';
+      return '<div class="chat-inline-market-table-wrap"><table class="chat-inline-market-table" aria-label="'
+        + escapeHtml(factObjectLabel({company_code: group.code}, run) + '行情采样') + '">'
+        + '<thead><tr><th scope="col">日期</th><th scope="col">' + closeLabel + '</th><th scope="col">较前一采样</th></tr></thead>'
+        + '<tbody>' + body + '</tbody></table></div>';
+    }
+
+    var label = plan.market_window && String(plan.market_window.label || '') || '行情采样区间';
+    var sections = groups.map(function (group) {
+      var rows = group.rows;
+      var overall = percent(rows[rows.length - 1].value, rows[0].value);
+      var head = '<h4>' + escapeHtml(factObjectLabel({company_code: group.code}, run))
+        + ' · 区间变化 ' + escapeHtml(overall) + '</h4>';
+      var first = rows.slice(0, 20);
+      var remaining = rows.slice(20);
+      return '<section class="chat-inline-market-object">' + head + table(group, first, 0)
+        + (remaining.length
+          ? '<details class="chat-inline-market-more"><summary>展开剩余 ' + remaining.length + ' 条</summary>'
+            + table(group, remaining, first.length) + '</details>'
+          : '') + '</section>';
+    }).join('');
+    return '<section class="chat-inline-market" aria-label="' + escapeHtml(label + '行情数据') + '">'
+      + '<h3>' + escapeHtml(label + '行情数据') + '</h3>'
+      + '<p class="chat-inline-market-note">外部参考采样；涨跌幅按表内相邻收盘值计算。</p>'
+      + sections + '</section>';
+  }
+
   function renderToolSourceGroup(group, run) {
     var title = sourceProviderLabel(group.provider) + ' · ' + sourceToolLabel(group.toolName);
     var meta = ['状态：' + sourceStatusLabel(group.status)];
@@ -739,6 +817,7 @@
     renderExportState: renderExportState,
     renderDeleteResult: renderDeleteResult,
     renderRunArtifacts: renderRunArtifacts,
+    renderInlineMarketFacts: renderInlineMarketFacts,
     renderPolicy: renderPolicy,
     renderFactsAndConflicts: renderFactsAndConflicts,
     renderVerification: renderVerification,

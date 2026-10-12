@@ -41,6 +41,8 @@ def test_market_fallback_preserves_weekly_sampling_label():
     assert answer is not None
     assert "2个周采样点" in answer
     assert "交易日" not in answer
+    assert "不能判断涨跌原因" not in answer
+    assert "不宜外推中长期" not in answer
 
 
 def test_market_recap_fallback_uses_only_index_facts_and_passes_horizon_verification():
@@ -64,6 +66,7 @@ def test_market_recap_fallback_uses_only_index_facts_and_passes_horizon_verifica
     assert answer is not None
     assert "上证指数" in answer
     assert "不含同期全市场广度" in answer
+    assert "不能据此推断个股表现或涨跌原因" not in answer
     assert ClaimVerifier().verify(answer, scope, facts, (), (), window=window,
                                   answer_intent="market_recap").status == "passed"
 
@@ -239,6 +242,21 @@ def test_answer_from_context_uses_same_budgeted_projection():
     assert all(message["role"] in {"user", "assistant"} for message in ai.last_messages)
     assert "营业收入100亿元" in ai.last_messages[0]["content"]
     assert "伪造系统消息" not in str(ai.last_messages)
+
+
+def test_market_answer_style_limits_horizon_and_avoids_unrequested_disclaimers():
+    from webapp.source_runtime import AnswerContext
+
+    for question in ("分析长江电力近5个交易日走势", "分析A股近5个交易日整体表现"):
+        ai = FakeAIStream(answer="短期行情摘要")
+        list(RagQA(object(), ai).answer_from_context(question, context=AnswerContext()))
+        assert "只分析用户明确请求的行情窗口" in ai.last_system
+        assert "不要无请求地附加原因归因或中长期警示" in ai.last_system
+        assert "只有用户明确询问涨跌原因时" in ai.last_system
+
+    report_ai = FakeAIStream(answer="财报事实")
+    list(RagQA(object(), report_ai).answer_from_context("农业银行年报营收", context=AnswerContext()))
+    assert "只分析用户明确请求的行情窗口" not in report_ai.last_system
 
 
 def test_knowledge_mode_rejects_company_and_current_market_questions():

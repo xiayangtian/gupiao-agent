@@ -816,3 +816,91 @@ def test_run_reuse_actions_reuse_existing_run_identity_without_new_privileges():
     assert '编辑重问' in result['run'] and '分支追问' in result['run']
     assert result['legacy'] == ''
     assert result['missing'] == ''
+
+
+def test_inline_market_facts_render_daily_and_period_changes_from_saved_facts():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const facts = [
+          ['2026-09-29', 28.38], ['2026-09-30', 28.54], ['2026-10-08', 28.90],
+          ['2026-10-09', 28.99], ['2026-10-12', 29.38]
+        ].map(([period, value]) => ({{
+          metric:'price', value, unit:'元/股', period, period_kind:'daily', company_code:'600900',
+          source_type:'tool', source_category:'market', verification:'reference', as_of:'2026-10-12'
+        }}));
+        const html = r.renderInlineMarketFacts({{
+          intent_decision:{{intent:'realtime_market'}},
+          execution_plan:{{source_mode:'external_market', market_window:{{label:'近5交易日'}}}},
+          scope:{{companies:[{{code:'600900', name:'长江电力'}}]}}, facts
+        }});
+        console.log(JSON.stringify(html));
+        """
+    )
+    assert 'chat-inline-market' in result
+    assert '近5交易日' in result
+    assert '2026-09-29' in result and '2026-10-12' in result
+    assert '28.38' in result and '29.38' in result
+    assert '+0.56%' in result and '+1.26%' in result and '+1.35%' in result
+    assert '+3.52%' in result
+    assert '长江电力（600900）' in result
+
+
+def test_inline_market_facts_do_not_infer_across_conflicts_and_expand_long_windows():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const base = {{intent_decision:{{intent:'realtime_market'}}, facts:[]}};
+        const fact = (period, value) => ({{metric:'price', value, unit:'元/股', period,
+          company_code:'600900', source_category:'market'}});
+        const conflict = r.renderInlineMarketFacts({{...base, facts:[fact('2026-01-01',10), fact('2026-01-01',11)]}});
+        const single = r.renderInlineMarketFacts({{...base, facts:[fact('2026-01-01',10)]}});
+        const mixedObjects = r.renderInlineMarketFacts({{...base, facts:[
+          fact('2026-01-01',10), {{...fact('2026-01-02',20), company_code:'000001'}}
+        ]}});
+        const nonMarket = r.renderInlineMarketFacts({{intent_decision:{{intent:'report_fact'}}, facts:[
+          fact('2026-01-01',10), fact('2026-01-02',20)
+        ]}});
+        const longFacts = Array.from({{length:21}}, (_, i) => {{
+          const day = String(i + 1).padStart(2, '0');
+          return fact('2026-01-' + day, 10 + i);
+        }});
+        const long = r.renderInlineMarketFacts({{...base, facts:longFacts}});
+        console.log(JSON.stringify({{conflict, single, mixedObjects, nonMarket, long}}));
+        """
+    )
+    assert result['conflict'] == ''
+    assert result['single'] == ''
+    assert result['mixedObjects'] == ''
+    assert result['nonMarket'] == ''
+    assert '展开剩余 1 条' in result['long']
+
+
+def test_append_assistant_run_places_market_table_inside_answer_bubble():
+    result = _run_node(
+        f"""
+        const fs = require('fs'), vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('function appendAssistantRun(sel, message) {{');
+        const end = src.indexOf('// analysis 来源引用', start);
+        const wrapper = {{className:'', innerHTML:'', insertAdjacentHTML() {{}}}};
+        const box = {{appendChild(node) {{ this.child = node; }}, scrollHeight:0}};
+        const empty = () => '';
+        const sandbox = {{
+          window:{{ChatRendering:{{
+            normalizeAssistantMarkdown:value => value, renderScope:empty, renderExecutionSummary:empty,
+            renderInlineMarketFacts:() => '<section class="chat-inline-market">逐日行情</section>',
+            renderResearchPlan:empty, renderResearchSteps:empty, renderPolicy:empty,
+            renderFactsAndConflicts:empty, renderRunArtifacts:empty, renderVerification:empty,
+            renderRunStatus:empty, renderResearchRecovery:empty, renderRunReuseActions:empty
+          }}}},
+          $:() => box, renderMarkdown:value => '<p>' + value + '</p>',
+          document:{{createElement:() => wrapper}}, appendSupplementSummary:empty,
+          researchRunOwners:{{}}, chatSessionId:'fixture-session'
+        }};
+        vm.createContext(sandbox);
+        vm.runInContext(src.slice(start, end) + '; appendAssistantRun("#chat-history", {{content:"短期结论", run:{{}}}});', sandbox);
+        console.log(JSON.stringify(wrapper.innerHTML));
+        """
+    )
+    assert '<p>短期结论</p><section class="chat-inline-market">逐日行情</section>' in result

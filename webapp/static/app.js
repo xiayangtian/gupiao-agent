@@ -3429,7 +3429,9 @@ function appendAssistantRun(sel, message) {
     if (executionHtml) parts.push(executionHtml);
   }
   var displayed = rendering ? rendering.normalizeAssistantMarkdown(content) : content;
-  parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + '</div>');
+  var inlineMarketHtml = rendering && rendering.renderInlineMarketFacts
+    ? rendering.renderInlineMarketFacts(run) : '';
+  parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + inlineMarketHtml + '</div>');
   if (rendering) {
     var researchPlanHtml = rendering.renderResearchPlan(message && message.research_run && message.research_run.plan);
     if (researchPlanHtml) parts.push(researchPlanHtml);

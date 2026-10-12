@@ -16,6 +16,12 @@ def test_broad_market_request_does_not_require_a_company():
     assert result.market_window.label == "今日"
     assert result.allowed_source_kinds == frozenset({"market_indices", "market_overview", "web_search"})
 
+    recent = resolve_chat_request("分析A股近5个交易日整体表现", ScopeRequest.auto(), None, NOW)
+    assert isinstance(recent, ResolvedRequest)
+    assert recent.route.intent == "market_recap"
+    assert recent.route.requires_company is False
+    assert recent.market_window.trading_days == 5
+
 
 def test_company_recent_market_request_defaults_to_five_trading_days():
     result = resolve_chat_request("分析福耀玻璃近期行情", ScopeRequest.auto(), None, NOW)

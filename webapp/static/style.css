@@ -2076,6 +2076,7 @@ input, select, button { font-family: inherit; font-size: inherit; }
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .chat-msg.thinking {
@@ -2294,6 +2295,29 @@ input, select, button { font-family: inherit; font-size: inherit; }
   background: var(--surface);
   border: 1px solid var(--border);
 }
+
+.chat-inline-market {
+  margin-top: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border);
+  color: var(--text-primary);
+}
+.chat-inline-market h3 { margin: 0 0 var(--space-xs); font-size: 14px; color: var(--text-primary); }
+.chat-inline-market-note { margin: 0 0 var(--space-sm); color: var(--text-secondary); font-size: 12px; }
+.chat-inline-market-object { margin-top: var(--space-sm); min-width: 0; }
+.chat-inline-market-object h4 { margin: 0 0 6px; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.chat-inline-market-table-wrap { width: 100%; min-width: 0; }
+.chat-inline-market-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.chat-inline-market-table th, .chat-inline-market-table td { padding: 6px 5px; border-bottom: 1px solid var(--border); text-align: left; overflow-wrap: anywhere; }
+.chat-inline-market-table th { color: var(--text-secondary); font-weight: 600; background: var(--surface-alt); }
+.chat-inline-market-table th:nth-child(1) { width: 38%; }
+.chat-inline-market-table th:nth-child(2) { width: 31%; }
+.chat-inline-market-table th:nth-child(3) { width: 31%; }
+.chat-inline-market-table td:nth-child(n+2), .chat-inline-market-table th:nth-child(n+2) { text-align: right; }
+.chat-inline-market-value { font-weight: 600; }
+.chat-inline-market-more { margin-top: 6px; }
+.chat-inline-market-more > summary { width: fit-content; min-height: 36px; display: flex; align-items: center; cursor: pointer; color: var(--accent); font-size: 12px; }
+.chat-inline-market-more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
 
 .chat-supplement-consent {
   align-self: flex-start;

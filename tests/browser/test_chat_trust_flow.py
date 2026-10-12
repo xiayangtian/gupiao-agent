@@ -288,19 +288,41 @@ def _reopen_session_script(session_id: str) -> str:
 
 
 def _overflow_script(session_id: str) -> str:
-    """在移动视口下重开会话并量测横向溢出。"""
+    """在各视口下重开会话、插入行情表格并检查滚动边界。"""
     return f"""
 (async () => {{
   const deadline = Date.now() + 10000;
   await openChatSession({json.dumps(session_id)});
+  const dates = [['2026-09-29', 28.38], ['2026-09-30', 28.54], ['2026-10-08', 28.90],
+    ['2026-10-09', 28.99], ['2026-10-12', 29.38]];
+  const facts = dates.map(([period, value]) => ({{metric:'price', value, unit:'元/股', period,
+    period_kind:'daily', company_code:'600900', source_type:'tool', source_category:'market',
+    verification:'reference', as_of:'2026-10-12', evidence_ids:['source-1:600900:' + period]}}));
+  window.appendAssistantRun('#chat-history', {{content:'近5个交易日行情示例。', run:{{
+    id:'layout-market-fixture', status:'completed', intent_decision:{{intent:'realtime_market'}},
+    execution_plan:{{source_mode:'external_market', market_window:{{label:'近5交易日'}}}},
+    scope:{{companies:[{{code:'600900', name:'长江电力'}}]}}, facts,
+    tool_artifacts:[{{provider:'tencent', tool_name:'kline', source_id:'source-1', status:'success', as_of:'2026-10-12'}}]
+  }}}});
+  while (!document.querySelector('#chat-history .chat-inline-market') && Date.now() < deadline) {{
+    await new Promise(r => setTimeout(r, 100));
+  }}
   while (!document.querySelector('#chat-history .chat-run') && Date.now() < deadline) {{
     await new Promise(r => setTimeout(r, 100));
   }}
+  const bounds = selector => {{
+    const element = document.querySelector(selector);
+    return element ? element.getBoundingClientRect().bottom : null;
+  }};
   return JSON.stringify({{
     scrollWidth: document.documentElement.scrollWidth,
     innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
     overflow: document.documentElement.scrollWidth > window.innerWidth,
-    hasRun: !!document.querySelector('#chat-history .chat-run')
+    hasRun: !!document.querySelector('#chat-history .chat-run'),
+    chatHistoryBottom: bounds('#chat-history'),
+    chatPageBottom: bounds('#page-chat'),
+    inputBottom: bounds('.chat-input-row')
   }});
 }})()
 """
@@ -408,5 +430,8 @@ def test_chat_layout_has_no_horizontal_overflow_across_viewports(browser_session
         f"{viewport} 视口横向溢出：scrollWidth={rendered['scrollWidth']} > innerWidth={rendered['innerWidth']}"
     )
     assert rendered["overflow"] is False
+    if viewport[0] <= 640:
+        assert rendered["chatHistoryBottom"] <= rendered["chatPageBottom"] + 1
+        assert rendered["inputBottom"] <= rendered["innerHeight"] + 1
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
