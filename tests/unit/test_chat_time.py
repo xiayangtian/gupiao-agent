@@ -72,6 +72,41 @@ def test_recent_market_expressions_default_to_five_actual_trading_days(phrase):
     assert window.end_date == NOW.date()
 
 
+@pytest.mark.parametrize(("query", "start", "kind", "trading_days"), [
+    ("福耀玻璃近五天行情", date(2026, 10, 1), "explicit", None),
+    ("福耀玻璃过去十个自然日行情", date(2026, 9, 26), "explicit", None),
+    ("福耀玻璃近两周走势", date(2026, 9, 22), "explicit", None),
+    ("福耀玻璃过去12个交易日行情", None, "rolling_trading_days", 12),
+])
+def test_generic_market_durations_keep_natural_and_trading_units_distinct(query, start, kind, trading_days):
+    window = _api().resolve_market_window(query, NOW)
+
+    assert window is not None
+    assert window.kind == kind
+    assert window.start_date == start
+    assert window.trading_days == trading_days
+    if kind == "explicit":
+        assert window.end_date == NOW.date()
+
+
+def test_month_subtraction_clamps_to_calendar_end_and_preserves_leap_day_safely():
+    api = _api()
+    end = datetime(2024, 2, 29, 10, tzinfo=SH)
+    window = api.resolve_market_window("福耀玻璃近1年行情", end)
+
+    assert window is not None
+    assert window.start_date == date(2023, 2, 28)
+    assert window.end_date == date(2024, 2, 29)
+
+
+def test_market_window_rejects_explicit_date_ranges_beyond_safe_history_limit():
+    api = _api()
+    query = "福耀玻璃1900-01-01至2026-10-01股价走势"
+
+    assert api.resolve_market_window(query, NOW) is None
+    assert api.market_window_error(query) == "market_window_too_long"
+
+
 def test_market_time_default_does_not_apply_to_financial_questions():
     assert _api().resolve_market_window("农业银行近期营收趋势", NOW) is None
 

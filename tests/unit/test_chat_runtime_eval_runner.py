@@ -22,7 +22,7 @@ def _case(case_id: str):
     ("general-knowledge", "completed"),
     ("report-number-after-300", "completed"),
     ("market-kline", "completed"),
-    ("market-recap-window", "completed"),
+    ("market-recap-window", "partial"),
     ("explicit-research", "completed"),
     ("followup-scope", "completed"),
     ("source-failure", "partial"),

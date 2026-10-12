@@ -68,6 +68,31 @@ def test_market_recap_fallback_uses_only_index_facts_and_passes_horizon_verifica
                                   answer_intent="market_recap").status == "passed"
 
 
+def test_market_recap_fallback_preserves_fractional_index_values_for_verification():
+    from datetime import date
+    from financial_report_fetcher.rag.qa import market_evidence_fallback
+    from webapp.chat_models import Fact
+    from webapp.chat_time import MarketWindow
+    from webapp.chat_verifier import ClaimVerifier
+    from webapp.source_runtime import AnswerContext, SourceResult
+
+    facts = tuple(Fact("index_close", value, "点", period, "daily", "index", "sz399001",
+                       "tool", (f"index:{period}",), "reference", period, source_category="market")
+                  for period, value in (("2026-04-13", 14407.86), ("2026-10-12", 12522.32)))
+    source = SourceResult("indices", "tencent", "kline", "market", "success", as_of="2026-10-12",
+                          facts=facts)
+    scope = Scope.whole_corpus()
+    window = MarketWindow("近6个月", "explicit", date(2026, 4, 12), date(2026, 10, 12), None)
+
+    answer = market_evidence_fallback(AnswerContext(sources=(source,)), scope)
+
+    assert answer is not None
+    assert "14407.86点" in answer
+    assert "12522.32点" in answer
+    assert ClaimVerifier().verify(answer, scope, facts, (), (), window=window,
+                                  answer_intent="market_recap").status == "passed"
+
+
 def test_answer_returns_answer_and_valid_citations(tmp_path, fake_embedder):
     store = RagStore(str(tmp_path), fake_embedder)
     store.upsert([_chunk("营业收入为862亿元"), _chunk("净利润345亿元")])

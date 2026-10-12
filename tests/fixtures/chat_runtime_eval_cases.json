@@ -123,10 +123,9 @@
         "market_window": "2026-10-08"
       },
       "expected_intent": "market_recap",
-      "expected_status": "completed",
+      "expected_status": "partial",
       "allowed_sources": [
-        "market",
-        "mcp"
+        "market"
       ],
       "expected_claims": [],
       "forbidden_claims": [

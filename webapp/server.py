@@ -3190,6 +3190,11 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 if state.done_payload is not None:
                     done_evt = state.done_payload
                     answer = done_evt.get("answer") or ""
+                    if (route.intent == "market_recap" and state.required_sources_missing
+                            and state.market_evidence_status == "partial"):
+                        fallback = _verified_market_fallback()
+                        if fallback is not None:
+                            answer = fallback
                     legacy_citations = done_evt.get("citations", []) or []
                     legacy_web_sources = done_evt.get("web_sources", []) or []
                     legacy_tools_used = done_evt.get("tools_used", []) or []

@@ -226,6 +226,20 @@ def test_rolling_market_window_matches_only_last_actual_trading_days():
                            window=window, answer_intent="market_trend").status == "blocked"
 
 
+def test_market_recap_verifier_binds_named_index_claim_to_its_source_symbol():
+    from webapp.chat_models import Scope
+
+    wrong_index = Fact("index_close", 3500, "点", "2026-10-09", "daily", "index", "sz399001",
+                       "tool", ("index:sz399001",), "reference", "2026-10-09", source_category="market")
+    report = ClaimVerifier().verify(
+        "上证指数在2026-10-09收盘点位为 3500 点，外部参考。",
+        Scope.whole_corpus(), [wrong_index], (), (), answer_intent="market_recap",
+    )
+
+    assert report.status == "blocked"
+    assert any(issue.code == "unsupported_numeric_claim" for issue in report.issues)
+
+
 def test_market_long_horizon_verifier_requires_the_selected_kline_grain():
     from datetime import date
     from webapp.chat_time import MarketWindow

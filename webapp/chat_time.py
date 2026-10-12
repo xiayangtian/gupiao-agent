@@ -115,8 +115,25 @@ def is_orphan_market_horizon(question: str) -> bool:
 
 
 def market_window_error(question: str) -> str | None:
-    duration = _parse_market_duration(question or "")
+    text = question or ""
+    duration = _parse_market_duration(text)
     if duration is None:
+        match = _DATE_RANGE_RE.search(text)
+        try:
+            start = _parse_date(match.group("start")) if match else None
+            end = _parse_date(match.group("end")) if match else None
+            if start is not None and end is not None:
+                months = (end.year - start.year) * 12 + end.month - start.month
+                if months > _MAX_MARKET_WINDOW_MONTHS:
+                    return "market_window_too_long"
+            elif not match:
+                match = _SINGLE_DATE_RE.search(text)
+                target = _parse_date(match.group("date")) if match else None
+                today = date.today()
+                if target is not None and (today.year - target.year) * 12 + today.month - target.month > _MAX_MARKET_WINDOW_MONTHS:
+                    return "market_window_too_long"
+        except (AttributeError, ValueError):
+            pass
         return None
     count, unit = duration
     months = count * {"year": 12, "quarter": 3, "month": 1}.get(unit, 0)
@@ -261,11 +278,15 @@ def resolve_market_window(question: str, now: datetime | None = None) -> MarketW
         clipped_end = min(end, today)
         if start > clipped_end:
             return None
+        if (clipped_end.year - start.year) * 12 + clipped_end.month - start.month > _MAX_MARKET_WINDOW_MONTHS:
+            return None
         return MarketWindow(match.group(0).strip(), "explicit", start, clipped_end, None)
     match = _SINGLE_DATE_RE.search(text)
     if match:
         target = _parse_date(match.group("date"))
         if target is None or target > today:
+            return None
+        if (today.year - target.year) * 12 + today.month - target.month > _MAX_MARKET_WINDOW_MONTHS:
             return None
         return MarketWindow(match.group("date"), "explicit", target, target, None)
     if "今天" in text or "今日" in text:

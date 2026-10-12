@@ -62,7 +62,7 @@ def _parse(raw: Any) -> Any:
     return raw
 
 
-def _extract_rows(value: Any) -> tuple[list[dict[str, Any]], str]:
+def _extract_rows(value: Any, *, row_limit: int = MAX_ROWS) -> tuple[list[dict[str, Any]], str]:
     if isinstance(value, Mapping):
         if value.get("error") or value.get("success") is False or value.get("isError") is True:
             raise ValueError("provider_error")
@@ -102,7 +102,7 @@ def _extract_rows(value: Any) -> tuple[list[dict[str, Any]], str]:
     if not rows:
         raise ValueError("empty_payload")
     normalized = []
-    for row in rows[:MAX_ROWS]:
+    for row in rows[:row_limit]:
         if not isinstance(row, Mapping) or not row or not all(
             isinstance(key, str) and _safe_cell(cell) for key, cell in row.items()
         ):
@@ -181,7 +181,8 @@ def normalize_source(call: SourceCall, raw: Any, *, fetched_at: str = "") -> Sou
         if isinstance(value, Mapping) and (value.get("error") or value.get("success") is False):
             return SourceResult("", call.provider, call.operation, call.category, "failed",
                                 fetched_at=fetched_at, error_code="provider_error", coverage=base_coverage)
-        rows, as_of = _extract_rows(value)
+        row_limit = 800 if call.provider == "tencent" and call.operation == "kline" else MAX_ROWS
+        rows, as_of = _extract_rows(value, row_limit=row_limit)
         if call.provider == "web":
             rows = [row for row in rows if isinstance(row.get("url"), str)
                     and urlparse(row["url"]).scheme in {"http", "https"}]
@@ -190,7 +191,22 @@ def normalize_source(call: SourceCall, raw: Any, *, fetched_at: str = "") -> Sou
                                     fetched_at=fetched_at, error_code="empty_payload", coverage=base_coverage)
         coverage = _response_coverage(call, value, rows, base_coverage)
         payload = tuple(rows)
-        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:MAX_SOURCE_CHARS]
+        if call.provider == "tencent" and call.operation == "kline" and rows:
+            close_rows = [row for row in rows
+                          if isinstance(row.get("close"), (int, float)) and not isinstance(row.get("close"), bool)]
+            summary_rows = []
+            for row in (close_rows[:2] + close_rows[-2:]):
+                summary_rows.append({key: row[key] for key in ("symbol", "date", "close") if key in row})
+            summary = {
+                "symbol": call.arguments.get("symbol"),
+                "period": call.arguments.get("period"),
+                "returned_rows": len(rows),
+                "data_window": coverage.data_window,
+                "sampled_bars": summary_rows,
+            }
+            content = json.dumps(summary, ensure_ascii=False, separators=(",", ":"))[:1000]
+        else:
+            content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:MAX_SOURCE_CHARS]
         status = "success" if as_of else "partial"
         return SourceResult("", call.provider, call.operation, call.category, status,
                             content=content, as_of=as_of, fetched_at=fetched_at,

@@ -124,7 +124,7 @@ def _clarification_for(
     if route.requires_time_window and window is None and route.intent in {"market_trend", "market_recap"}:
         error = market_window_error(question)
         if error == "market_window_too_long":
-            message = "该行情期限超出当前可查询历史范围（最多800个月），请缩短时间范围。"
+            message = "该行情期限超出当前安全查询上限（自然窗口最多800个月、交易日窗口最多800个），请缩短时间范围。"
         elif has_market_period_expression(question):
             message = "无法解析该行情期限，请改用自然日、交易日、周、月或年表达。"
         else:

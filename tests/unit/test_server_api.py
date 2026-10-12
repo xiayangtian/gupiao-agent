@@ -4742,3 +4742,297 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         matched = client.get("/api/research/workspace?period=2026-06-30")
         assert matched.status_code == 200
         assert [item["session_id"] for item in matched.json()["items"]] == [sid]
+
+
+def test_market_recap_missing_overview_uses_verified_index_only_fallback(client, env, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from financial_report_fetcher.rag.config import RagConfig
+    from financial_report_fetcher.rag.qa import RagQA
+    from webapp.chat_store import ChatStore
+    from webapp.execution_plan import ExecutionPlan
+    from webapp.execution_planner import PlanningResult
+
+    now = datetime(2026, 10, 12, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    original_resolve = server.resolve_chat_request
+    monkeypatch.setattr(server, "resolve_chat_request", lambda question, scope_request, pending, _now=None:
+        original_resolve(question, scope_request, pending, now))
+    monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "market-recap-overview-fallback.json")))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=True, web_search=False, mcp_max_tool_calls=9,
+    )))
+    tool_defs = [
+        {"function": {"name": "stock_zt_pool"}},
+        {"function": {"name": "stock_sector_fund_flow_rank"}},
+    ]
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: tool_defs)
+    monkeypatch.setattr(server, "_mcp_tool_defs_cache", tool_defs)
+    monkeypatch.setattr(server, "mcp_breaker", type("Breaker", (), {"allow": lambda self: True})())
+    scope = server.Scope.whole_corpus()
+    monkeypatch.setattr(server, "_resolve_scope", lambda *_args, **_kwargs: server.ScopeResolution(scope))
+
+    index_symbols = ("sh000001", "sz399001", "sz399006", "sh000688")
+    dates = ("2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12")
+    def fake_kline(symbol, *, period, count, adjust):
+        assert period == "day" and count <= 800
+        base = {"sh000001": 3988.56, "sz399001": 14407.86,
+                "sz399006": 3476.44, "sh000688": 1375.29}[symbol]
+        return [{"date": day, "close": base + offset} for offset, day in enumerate(dates)]
+
+    monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+    monkeypatch.setattr(server.market_data_mcp, "call_tool", lambda *_args, **_kwargs: {"error": "offline"})
+
+    class FixedPlanner:
+        def __init__(self, *_args):
+            pass
+        def plan(self, *_args, **_kwargs):
+            plan = ExecutionPlan.from_dict({
+                "objective": "近5交易日 A 股整体表现", "source_mode": "market_recap",
+                "steps": [{"id": "indices", "kind": "market_indices", "required": True},
+                          {"id": "overview", "kind": "market_overview", "required": True},
+                          {"id": "answer", "kind": "answer", "required": True,
+                           "depends_on": ["indices", "overview"]}],
+                "acceptance": ["只依据匹配窗口的指数及市场广度证据"],
+            })
+            return PlanningResult("validated", plan)
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("market recap must not retrieve financial reports")
+
+    class ForbiddenAI:
+        def chat_stream(self, **_kwargs):
+            raise AssertionError("required source failure should use verified index fallback")
+            yield
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), ForbiddenAI()))
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "分析A股近5个交易日整体表现", "scope_mode": "whole_corpus", "use_mcp": True,
+    }))
+    done = _event(events, "done")
+    run = done["run"]
+
+    assert run["status"] == "partial"
+    assert run["verification_report"]["status"] == "passed"
+    assert "深证成指" in done["answer"]
+    assert "14407.86点" in done["answer"]
+    assert "不含同期全市场广度" in done["answer"]
+
+
+def test_market_recap_blocked_answer_uses_verified_index_only_fallback(client, env, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from financial_report_fetcher.rag.config import RagConfig
+    from financial_report_fetcher.rag.qa import RagQA
+    from webapp.chat_store import ChatStore
+    from webapp.execution_planner import PlanningResult, safe_market_plan
+
+    now = datetime(2026, 10, 9, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    original_resolve = server.resolve_chat_request
+    monkeypatch.setattr(server, "resolve_chat_request", lambda question, scope_request, pending, _now=None:
+        original_resolve(question, scope_request, pending, now))
+    monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "market-recap-fallback.json")))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=False, web_search=False, mcp_max_tool_calls=9,
+    )))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
+    scope = server.Scope.whole_corpus()
+    monkeypatch.setattr(server, "_resolve_scope", lambda *_args, **_kwargs: server.ScopeResolution(scope))
+
+    calls = []
+    def fake_kline(symbol, *, period, count, adjust):
+        calls.append((symbol, period, count, adjust))
+        start, end = now.date() - timedelta(days=5 * 365), now.date()
+        rows = []
+        cursor = start
+        offset = {"sh000001": 0, "sz399001": 100, "sz399006": 200, "sh000688": 300}[symbol]
+        while cursor <= end:
+            rows.append({"date": cursor.isoformat(), "close": 3000.0 + offset})
+            cursor += timedelta(days=7)
+        return rows[-count:]
+
+    monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+
+    class FixedPlanner:
+        def __init__(self, *_args):
+            pass
+        def plan(self, _question, _scope, capabilities, *, authoritative_intent=None, **_kwargs):
+            plan = safe_market_plan(authoritative_intent, capabilities.available_kinds,
+                                    capabilities.max_external_calls)
+            return PlanningResult("validated" if plan else "unavailable", plan)
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("market recap must not retrieve financial reports")
+
+    class WrongAnswerAI:
+        def chat_stream(self, **_kwargs):
+            yield {"type": "done", "answer": "上证指数收盘点位为 999999 点。", "model": "fixture", "usage": {}}
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), WrongAnswerAI()))
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "分析大盘过去5年主要指数走势", "use_mcp": True,
+    }))
+    done = _event(events, "done")
+    run = done["run"]
+
+    assert len(calls) == 4
+    assert all(period == "week" and count <= 800 for _, period, count, _ in calls)
+    assert "999999" not in done["answer"]
+    assert "上证指数" in done["answer"]
+    assert "不含同期全市场广度" in done["answer"]
+    assert run["status"] == "partial"
+    assert run["verification_report"]["status"] == "passed"
+    assert run["execution_plan"]["market_evidence_status"] == "partial"
+
+
+def test_market_horizon_fixture_matrix_replays_end_to_end_sse(client, env, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
+    from financial_report_fetcher.rag.config import RagConfig
+    from financial_report_fetcher.rag.qa import RagQA
+    from webapp.chat_store import ChatStore
+    from webapp.execution_planner import PlanningResult, safe_market_plan
+    from webapp.chat_time import resolve_market_window
+
+    fixture_path = Path(__file__).parents[1] / "fixtures" / "market_horizon_queries.json"
+    matrix = json.loads(fixture_path.read_text(encoding="utf-8"))
+    fixed_now = datetime.fromisoformat(matrix["now"]).astimezone(ZoneInfo("Asia/Shanghai"))
+    original_resolve = server.resolve_chat_request
+    monkeypatch.setattr(server, "resolve_chat_request", lambda question, scope_request, pending, _now=None:
+        original_resolve(question, scope_request, pending, fixed_now))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=True, web_search=False, mcp_max_tool_calls=9,
+    )))
+    tool_defs = [
+        {"function": {"name": "stock_zt_pool"}},
+        {"function": {"name": "stock_sector_fund_flow_rank"}},
+    ]
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: tool_defs)
+    monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: lambda *_a: "")
+    monkeypatch.setattr(server, "_mcp_tool_defs_cache", tool_defs)
+    monkeypatch.setattr(server, "mcp_breaker", type("Breaker", (), {"allow": lambda self: True})())
+    company_scope = server.Scope.company_only("600660", "福耀玻璃")
+    broad_scope = server.Scope.whole_corpus()
+    monkeypatch.setattr(server, "_resolve_scope", lambda body, run_id="", *, requires_company=False, question=None:
+        server.ScopeResolution(company_scope if requires_company else broad_scope))
+
+    current = {"window": None, "latest_date": ""}
+    kline_calls, mcp_calls = [], []
+    def fake_kline(symbol, *, period, count, adjust):
+        window = current["window"]
+        kline_calls.append((symbol, period, count, adjust))
+        end = window.end_date or fixed_now.date()
+        start = window.start_date or end - timedelta(days=30)
+        dates = []
+        if period == "week":
+            cursor = start
+            while cursor <= end:
+                dates.append(cursor)
+                cursor += timedelta(days=7)
+        elif period == "month":
+            dates = [start] if start == end else [start, end]
+        else:
+            cursor = start
+            while cursor <= end:
+                if cursor.weekday() < 5:
+                    dates.append(cursor)
+                cursor += timedelta(days=1)
+        dates = dates[-count:]
+        current["latest_date"] = dates[-1].isoformat()
+        close = 3500.0 if symbol.startswith(("sh", "sz")) else 10.0
+        return [{"date": day.isoformat(), "close": close} for day in dates]
+
+    def fake_mcp(name, arguments, *, timeout, retry):
+        mcp_calls.append((name, dict(arguments)))
+        return {"as_of": fixed_now.date().isoformat(), "data": [{
+            "date": fixed_now.date().isoformat(), "symbol": "600001",
+        }], "total_rows": 1}
+
+    monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+    monkeypatch.setattr(server.market_data_mcp, "call_tool", fake_mcp)
+
+    class FixedPlanner:
+        def __init__(self, *_args):
+            pass
+        def plan(self, _question, _scope, capabilities, *, authoritative_intent=None, **_kwargs):
+            plan = safe_market_plan(authoritative_intent, capabilities.available_kinds,
+                                    capabilities.max_external_calls)
+            return PlanningResult("validated" if plan else "unavailable", plan)
+
+    class NoStore:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("market horizon replay must not retrieve reports")
+
+    class AnswerAI:
+        def chat_stream(self, *, messages, **_kwargs):
+            case = current["case"]
+            if case["subject_kind"] == "company":
+                answer = (f"外部参考：福耀玻璃在{current['latest_date']}的股价收盘为10元/股。"
+                          "仅描述已取得采样，不推断涨跌原因。")
+            else:
+                limitation = case.get("coverage_note", "不含同期全市场广度")
+                answer = (f"外部参考：上证指数在{current['latest_date']}的指数收盘点位为3500点。"
+                          f"这里只反映实际取得的主要指数，{limitation}。")
+            yield {"type": "done", "answer": answer, "model": "fixture", "usage": {}}
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+    monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+
+    for case in matrix["cases"]:
+        current["case"] = case
+        current["window"] = resolve_market_window(case["query"], fixed_now)
+        current["latest_date"] = ""
+        kline_calls.clear()
+        mcp_calls.clear()
+        monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / f"{case['id']}.json")))
+        events = _read_sse(client.post("/api/chat/stream", json={
+            "question": case["query"], "use_mcp": True,
+        }))
+        if not any(event == "done" for event, _payload in events):
+            error = next(payload for event, payload in events if event == "error")
+            run = error.get("run") or {}
+            raise AssertionError({"error": error.get("error"), "status": run.get("status"),
+                                  "steps": run.get("execution_steps"), "plan": run.get("execution_plan"),
+                                  "tools": [(item.get("tool_name"), item.get("status"))
+                                            for item in run.get("tool_artifacts", [])]})
+        done = _event(events, "done")
+
+        if case["expected_status"] == "clarification":
+            assert done["clarification"] is True
+            assert "800个月" in done["answer"]
+            assert not kline_calls and not mcp_calls
+            continue
+
+        run = done["run"]
+        assert run["status"] == case["expected_status"], case["id"]
+        assert run["verification_report"]["status"] == "passed", case["id"]
+        plan = run["execution_plan"]
+        assert plan["window_origin"] == case["window_origin"]
+        assert plan["market_grain"] == case["grain"]
+        assert plan["market_window"]["label"] == current["window"].label
+        assert plan["market_evidence_status"] in {"completed", "partial"}
+        step_kinds = [step["kind"] for step in plan["steps"]]
+        assert all(kind in step_kinds for kind in case["required_steps"]), case["id"]
+        assert all(call[1] == case["grain"] and call[2] <= 800 for call in kline_calls), case["id"]
+        assert (len(mcp_calls) == 3) == (case["id"] == "Q9"), case["id"]
+        kline_artifacts = [item for item in run["tool_artifacts"] if item["tool_name"] == "kline"]
+        assert len(kline_artifacts) == (1 if case["subject_kind"] == "company" else 4)
+        assert all("实际数据期" in item["result_summary"] for item in kline_artifacts)
+        if case["window_kind"] == "explicit" and case["grain"] == "day":
+            if date.fromisoformat(case["window_start"]).weekday() < 5:
+                assert all(case["window_start"] in item["result_summary"] for item in kline_artifacts)
+            if date.fromisoformat(case["window_end"]).weekday() < 5:
+                assert all(case["window_end"] in item["result_summary"] for item in kline_artifacts)
+        expected_evidence_status = "partial" if case["expected_status"] == "partial" else "completed"
+        assert plan["market_evidence_status"] == expected_evidence_status
+        assert run["facts"], case["id"]
+        period_kind = {"day": "daily", "week": "weekly", "month": "monthly"}[case["grain"]]
+        assert all(fact["period_kind"] == period_kind for fact in run["facts"]), case["id"]
+        assert case.get("coverage_note", "不含同期全市场广度") in done["answer"] if case["subject_kind"] == "broad_market" else True

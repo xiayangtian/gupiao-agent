@@ -149,6 +149,13 @@ def _claim_matches(
         matches = [fact for fact in matches if fact.source_category == "market"]
     elif answer_intent == "market_recap":
         matches = [fact for fact in matches if fact.source_category in {"market", "mcp"}]
+        index_symbols = {
+            "上证指数": "sh000001", "深证成指": "sz399001",
+            "创业板指": "sz399006", "科创50指数": "sh000688",
+        }
+        named_index = next((symbol for name, symbol in index_symbols.items() if name in clause), None)
+        if named_index is not None:
+            matches = [fact for fact in matches if fact.company_code == named_index]
     elif answer_intent == "market_quote":
         matches = [fact for fact in matches if fact.source_category in {"market", "mcp"}]
     elif answer_intent == "general_web":

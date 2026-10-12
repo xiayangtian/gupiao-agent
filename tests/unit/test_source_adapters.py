@@ -111,6 +111,25 @@ def test_tencent_kline_coverage_records_requested_granularity_and_window():
     assert "来源查询期 过去五年" in result.coverage.summary()
 
 
+def test_tencent_kline_keeps_up_to_800_facts_but_bounds_prompt_content():
+    from datetime import date, timedelta
+    from webapp.source_runtime import SourceCall
+    from webapp.source_adapters import normalize_source
+
+    start = date(2025, 1, 1)
+    bars = [{"symbol": "600900", "date": (start + timedelta(days=index)).isoformat(),
+             "close": 10.0 + index / 100} for index in range(120)]
+    result = normalize_source(SourceCall("tencent", "kline", "market", {
+        "symbol": "600900", "period": "day", "count": 120, "window": "近120自然日",
+    }), {"as_of": bars[-1]["date"], "bars": bars})
+
+    assert len(result.payload) == 120
+    assert result.coverage.returned_rows == 120
+    assert result.coverage.data_window == "2025-01-01至2025-04-30"
+    assert len(result.content) < 1000
+    assert '"returned_rows":120' in result.content
+
+
 def test_market_pool_at_limit_does_not_claim_total_completeness():
     from webapp.source_runtime import SourceCall
     from webapp.source_adapters import normalize_source
