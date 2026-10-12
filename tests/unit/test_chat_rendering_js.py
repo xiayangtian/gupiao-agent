@@ -224,8 +224,144 @@ def test_artifacts_deduplicate_same_pdf_page_and_collapse_many_pages_to_home_lin
     assert '#page=1' in html
     assert 'data-chat-pdf-page=' not in html
     assert html.count('https://example.com/news') == 1
-    assert html.count('market') == 2
+    assert html.count('行情数据 ·') == 2
     assert all(value not in html for value in ('duplicate', 'web detail', '参数摘要', '结果摘要'))
+
+
+def test_external_facts_are_collapsed_and_rendered_with_their_source_data():
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const tool = {{provider:'tencent', tool_name:'kline', source_id:'call-1',
+          as_of:'2026-10-10', fetched_at:'2026-10-11T10:00:00', status:'success',
+          arguments_summary:'PRIVATE_ARGUMENTS', result_summary:'PRIVATE_RAW_RESULT'}};
+        const fact = {{metric:'price', value:14.22, unit:'元/股', period:'2026-10-10',
+          period_kind:'daily', entity_scope:'security', company_code:'600660',
+          source_type:'tool', source_category:'market', evidence_ids:['call-1:600660:2026-10-10'],
+          verification:'reference', as_of:'2026-10-10'}};
+        const pdfFact = {{metric:'revenue', value:862, unit:'亿元', period:'2026', period_kind:'annual',
+          entity_scope:'consolidated', company_code:'600660', source_type:'pdf', source_category:'local_pdf',
+          evidence_ids:['report#p1'], verification:'verified'}};
+        const inline = rendering.renderFactsAndConflicts({{facts:[fact, pdfFact]}});
+        const evidence = rendering.renderRunArtifacts({{facts:[fact], tool_artifacts:[tool]}});
+        console.log(JSON.stringify({{inline, evidence}}));
+        """
+    )
+
+    assert "外部参考" not in result["inline"]
+    assert "PDF 原文" in result["inline"]
+    assert 'class="chat-artifacts"' in result["evidence"]
+    assert 'open' not in result["evidence"].split(">", 1)[0]
+    assert "腾讯行情" in result["evidence"]
+    assert '<table class="chat-source-table">' in result["evidence"]
+    assert "股价" in result["evidence"]
+    assert "600660" in result["evidence"]
+    assert "14.22" in result["evidence"]
+    assert "2026-10-10" in result["evidence"]
+    assert "PRIVATE_ARGUMENTS" not in result["evidence"]
+    assert "PRIVATE_RAW_RESULT" not in result["evidence"]
+    assert "证据与来源（1 个来源 · 1 条外部数据）" in result["evidence"]
+
+
+def test_external_fact_values_hide_binary_float_noise_without_exposing_json_artifacts():
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const html = rendering.renderRunArtifacts({{
+          facts:[{{metric:'price', value:58.300000000000004, unit:'元/股', period:'2026-10-10', company_code:'600660',
+            source_type:'tool', source_category:'market', evidence_ids:['tool:tencent:quote'], verification:'reference', as_of:'2026-10-10'}}],
+          tool_artifacts:[{{provider:'tencent', tool_name:'quote', as_of:'2026-10-10', status:'success'}}]
+        }});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+    assert "58.3 元/股" in result["html"]
+    assert "58.300000000000004" not in result["html"]
+
+
+def test_external_fact_table_escapes_untrusted_fact_fields():
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const html = rendering.renderRunArtifacts({{
+          facts:[{{metric:'<img src=x>', value:7, unit:'<svg>', period:'2026-10-10', company_code:'<script>',
+            source_type:'tool', source_category:'mcp', evidence_ids:['tool:mcp:lookup'], verification:'reference', as_of:'2026-10-10'}}],
+          tool_artifacts:[{{provider:'mcp', tool_name:'lookup', as_of:'2026-10-10', status:'success'}}]
+        }});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+    html = result["html"]
+    assert "<img" not in html and "<script>" not in html and "<svg>" not in html
+    assert "&lt;img" in html and "&lt;script&gt;" in html and "&lt;svg&gt;" in html
+
+
+def test_same_source_facts_are_grouped_but_different_times_and_statuses_stay_separate():
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const tools = [
+          {{provider:'tencent', tool_name:'kline', source_id:'call-a', as_of:'2026-10-10', status:'success'}},
+          {{provider:'tencent', tool_name:'kline', source_id:'call-b', as_of:'2026-10-10', status:'success'}},
+          {{provider:'tencent', tool_name:'kline', source_id:'call-c', as_of:'2026-10-11', status:'success'}},
+          {{provider:'tencent', tool_name:'kline', source_id:'call-d', as_of:'2026-10-11', status:'partial'}},
+        ];
+        const facts = [
+          {{metric:'price', value:10, unit:'元/股', period:'2026-10-10', company_code:'600660', source_type:'tool', source_category:'market', evidence_ids:['call-a:600660:2026-10-10'], verification:'reference', as_of:'2026-10-10'}},
+          {{metric:'price', value:11, unit:'元/股', period:'2026-10-10', company_code:'600660', source_type:'tool', source_category:'market', evidence_ids:['call-b:600660:2026-10-10'], verification:'reference', as_of:'2026-10-10'}},
+          {{metric:'price', value:12, unit:'元/股', period:'2026-10-11', company_code:'600660', source_type:'tool', source_category:'market', evidence_ids:['call-c:600660:2026-10-11'], verification:'reference', as_of:'2026-10-11'}},
+          {{metric:'price', value:13, unit:'元/股', period:'2026-10-11', company_code:'600660', source_type:'tool', source_category:'market', evidence_ids:['call-d:600660:2026-10-11'], verification:'reference', as_of:'2026-10-11'}},
+        ];
+        const html = rendering.renderRunArtifacts({{facts, tool_artifacts:tools}});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+
+    html = result["html"]
+    assert html.count('class="chat-source-group"') == 3
+    assert "10" in html and "11" in html and "12" in html and "13" in html
+    assert "部分取得" in html
+
+
+def test_unmatched_external_fact_is_not_attributed_to_an_unrelated_source():
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const html = rendering.renderRunArtifacts({{
+          tool_artifacts:[{{provider:'tencent', tool_name:'kline', source_id:'source-a', as_of:'2026-10-10', status:'success'}}],
+          facts:[{{metric:'price', value:8, unit:'元/股', period:'2026-10-10', company_code:'600660',
+            source_type:'tool', source_category:'market', evidence_ids:['source-b:600660:2026-10-10'],
+            verification:'reference', as_of:'2026-10-10'}}]
+        }});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+
+    assert "来源未关联" in result["html"]
+    assert "source-b" not in result["html"]
+    assert result["html"].count('class="chat-source-group"') == 1
+    assert 'class="chat-source-group chat-source-unmatched"' in result["html"]
+
+
+def test_source_table_limits_initial_rows_to_twenty_and_provides_a_collapsed_remainder():
+    result = _run_node(
+        f"""
+        const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const facts = Array.from({{length:25}}, (_, i) => ({{
+          metric:'price', value:i+1, unit:'元/股', period:'2026-10-' + String(i+1).padStart(2,'0'),
+          company_code:'600660', source_type:'tool', source_category:'market',
+          evidence_ids:['call-1:600660:' + i], verification:'reference', as_of:'2026-10-25'
+        }}));
+        const html = rendering.renderRunArtifacts({{facts, tool_artifacts:[{{provider:'tencent', tool_name:'kline', source_id:'call-1', as_of:'2026-10-25', status:'success'}}]}});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+
+    html = result["html"]
+    assert html.count('class="chat-source-fact-row"') == 25
+    assert '<details class="chat-source-more">' in html
+    assert "查看更多 5 条" in html
+    assert 'class="chat-source-more" open' not in html
 
 
 def test_tool_entries_with_different_as_of_remain_distinct():
@@ -244,7 +380,7 @@ def test_tool_entries_with_different_as_of_remain_distinct():
     )
 
     html = result["html"]
-    assert html.count('market') == 2
+    assert html.count('行情数据 ·') == 2
     assert '数据截至 2026-09-10T09:00:00' in html
     assert '数据截至 2026-09-10T10:00:00' in html
 
@@ -379,7 +515,7 @@ def test_tool_artifact_renders_only_provider_and_as_of_without_summaries():
         """
     )
 
-    assert "stock-data-mcp" in result["html"]
+    assert "股票数据 MCP" in result["html"]
     assert "数据截至 2026-09-10T10:00:00" in result["html"]
     assert "get_financial_metrics" not in result["html"]
     assert "参数摘要" not in result["html"]
@@ -448,7 +584,7 @@ def test_m2_rendering_marks_reference_conflict_and_business_policy():
         """
     )
     assert '实时行情' in result['policy'] and 'get_quote' not in result['policy']
-    assert '外部参考' in result['facts'] and '已确认' not in result['facts']
+    assert '外部参考' not in result['facts']
     assert '存在口径/时间差异' in result['facts'] and 'PDF 原文' in result['facts'] and '实时数据' in result['facts']
     assert 'role="status"' in result['verification']
 

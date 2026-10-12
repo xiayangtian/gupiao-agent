@@ -311,13 +311,13 @@
       var url = isHttpUrl(artifact.url) ? String(artifact.url) : '';
       if (!url || seen[url]) return;
       seen[url] = true;
-      entries.push({ url: url, title: String(artifact.title || url) });
+      entries.push({ url: url, title: String(artifact.title || url), fetchedAt: String(artifact.fetched_at || '') });
     });
     return entries;
   }
 
   function compactToolEntries(tools) {
-    var seen = {};
+    var byKey = {};
     var entries = [];
     tools.forEach(function (tool) {
       if (!tool || typeof tool !== 'object') return;
@@ -328,44 +328,182 @@
       var sourceId = String(tool.source_id || '');
       var status = String(tool.status || '');
       if (!provider && !toolName) return;
-      // 来源身份/工具/状态都参与去重；失败与成功绝不能折叠成同一条。
-      var key = sourceId || (provider + '|' + toolName + '|' + asOf + '|' + status);
-      if (seen[key]) return;
-      seen[key] = true;
-      entries.push({ provider: provider || '实时数据', toolName: toolName, asOf: asOf, fetchedAt: fetchedAt, status: status });
+      // 同来源、工具、数据时间和状态归组；时间或成功状态不同则保留为独立组。
+      var key = JSON.stringify([provider, toolName, asOf, status]);
+      var entry = byKey[key];
+      if (!entry) {
+        entry = { provider: provider || '实时数据', toolName: toolName, asOf: asOf,
+          fetchedAt: [], sourceIds: [], status: status, facts: [] };
+        byKey[key] = entry;
+        entries.push(entry);
+      }
+      if (sourceId && entry.sourceIds.indexOf(sourceId) === -1) entry.sourceIds.push(sourceId);
+      if (fetchedAt && entry.fetchedAt.indexOf(fetchedAt) === -1) entry.fetchedAt.push(fetchedAt);
     });
     return entries;
+  }
+
+  function isExternalFact(fact) {
+    if (!fact || typeof fact !== 'object') return false;
+    return fact.verification === 'reference'
+      || fact.source_type === 'tool' || fact.source_type === 'web'
+      || ['market', 'mcp', 'web'].indexOf(String(fact.source_category || '')) !== -1;
+  }
+
+  function factMatchesToolGroup(fact, group) {
+    var evidenceIds = Array.isArray(fact.evidence_ids) ? fact.evidence_ids.map(String) : [];
+    var matchedByCall = group.sourceIds.some(function (sourceId) {
+      return evidenceIds.some(function (id) { return id === sourceId || id.indexOf(sourceId + ':') === 0; });
+    });
+    if (matchedByCall) return true;
+    var toolEvidenceId = 'tool:' + group.provider + ':' + group.toolName;
+    return evidenceIds.indexOf(toolEvidenceId) !== -1 && String(fact.as_of || '') === group.asOf;
+  }
+
+  function sourceProviderLabel(provider) {
+    return ({ tencent: '腾讯行情', market: '行情数据', 'stock-data-mcp': '股票数据 MCP', mcp: 'MCP 数据', web: '网页来源', web_search: '网页来源' })[provider]
+      || provider || '外部数据';
+  }
+
+  function sourceToolLabel(toolName) {
+    return ({
+      kline: 'K 线数据', quote: '实时报价', price: '行情数据', volume: '成交量数据',
+      market_overview: '市场概览', get_realtime_data: '实时报价',
+      get_financial_metrics: '财务指标',
+    })[toolName] || (toolName ? '数据查询' : '来源记录');
+  }
+
+  function sourceStatusLabel(status) {
+    return ({ success: '获取成功', partial: '部分取得', failed: '获取失败', unavailable: '不可用' })[status] || '状态未知';
+  }
+
+  function factObjectLabel(fact, run) {
+    var code = String(fact.company_code || '');
+    var companies = run && run.scope && Array.isArray(run.scope.companies) ? run.scope.companies : [];
+    var company = companies.filter(function (item) { return item && String(item.code || '') === code; })[0];
+    if (company) return String(company.name || code) + '（' + code + '）';
+    var indices = { sh000001: '上证指数', sz399001: '深证成指', sz399006: '创业板指', sh000688: '科创50指数' };
+    return (indices[code] ? indices[code] + '（' + code + '）' : code) || '未记录对象';
+  }
+
+  function factMetricLabel(metric) {
+    return ({ price: '股价', index_close: '指数点位', volume: '成交量', amount: '成交额',
+      revenue: '营业收入', net_profit: '净利润', roe: '净资产收益率', pct_change: '涨跌幅' })[metric] || metric || '未记录指标';
+  }
+
+  function factPeriodLabel(fact) {
+    var period = String(fact.period || '');
+    var kind = ({ daily: '日线', weekly: '周线', monthly: '月线', point_in_time: '时点' })[String(fact.period_kind || '')] || '';
+    return [period, kind].filter(Boolean).join(' · ') || String(fact.as_of || '未记录期间');
+  }
+
+  function formatFactValue(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value.toLocaleString('zh-CN', { maximumSignificantDigits: 15 });
+    }
+    return String(value == null ? '' : value);
+  }
+
+  function renderFactTable(facts, run) {
+    if (!facts.length) return '<p class="chat-source-empty">该来源未保留可展示的结构化事实。</p>';
+    function rows(items) {
+      return items.map(function (fact) {
+        var value = formatFactValue(fact.value);
+        var unit = String(fact.unit || '');
+        return '<tr class="chat-source-fact-row">'
+          + '<td><span class="chat-source-cell-label">对象</span>' + escapeHtml(factObjectLabel(fact, run)) + '</td>'
+          + '<td><span class="chat-source-cell-label">指标</span>' + escapeHtml(factMetricLabel(String(fact.metric || ''))) + '</td>'
+          + '<td><span class="chat-source-cell-label">期间</span>' + escapeHtml(factPeriodLabel(fact)) + '</td>'
+          + '<td class="chat-source-value"><span class="chat-source-cell-label">数值</span>'
+          + escapeHtml(value) + (unit ? ' ' + escapeHtml(unit) : '') + '</td></tr>';
+      }).join('');
+    }
+    function table(items) {
+      return '<div class="chat-source-table-wrap"><table class="chat-source-table">'
+        + '<thead><tr><th scope="col">对象</th><th scope="col">指标</th><th scope="col">期间</th><th scope="col">数值</th></tr></thead>'
+        + '<tbody>' + rows(items) + '</tbody></table></div>';
+    }
+    var first = facts.slice(0, 20);
+    var remaining = facts.slice(20);
+    return table(first) + (remaining.length
+      ? '<details class="chat-source-more"><summary>查看更多 ' + remaining.length + ' 条</summary>' + table(remaining) + '</details>'
+      : '');
+  }
+
+  function renderToolSourceGroup(group, run) {
+    var title = sourceProviderLabel(group.provider) + ' · ' + sourceToolLabel(group.toolName);
+    var meta = ['状态：' + sourceStatusLabel(group.status)];
+    if (group.asOf) meta.push('数据截至 ' + group.asOf);
+    else meta.push('数据时间未知');
+    if (group.fetchedAt.length) meta.push('获取于 ' + group.fetchedAt.join('、'));
+    return '<section class="chat-source-group" aria-label="实时数据来源">'
+      + '<h3>' + escapeHtml(title) + '</h3><p class="chat-source-meta">' + escapeHtml(meta.join(' · ')) + '</p>'
+      + renderFactTable(group.facts, run) + '</section>';
+  }
+
+  function renderWebSourceGroup(entry, facts, run) {
+    var host = entry.url;
+    try { host = new URL(entry.url).hostname || entry.url; } catch (_) {}
+    return '<section class="chat-source-group" aria-label="网页来源 ' + escapeHtml(host) + '">'
+      + '<h3>网页来源 · ' + escapeHtml(host) + '</h3>'
+      + '<a class="chat-artifact-link chat-web-link" href="' + escapeHtml(entry.url) + '" target="_blank" rel="noopener noreferrer">'
+      + escapeHtml(entry.title) + '</a>'
+      + (entry.fetchedAt ? '<p class="chat-source-meta">获取于 ' + escapeHtml(entry.fetchedAt) + '</p>' : '')
+      + (facts.length ? renderFactTable(facts, run) : '') + '</section>';
+  }
+
+  function renderUnmatchedSourceGroup(facts, run) {
+    return '<section class="chat-source-group chat-source-unmatched" aria-label="来源未关联">'
+      + '<h3>来源未关联</h3><p class="chat-source-meta">事实未能可靠映射到本次来源记录，避免错误归因。</p>'
+      + renderFactTable(facts, run) + '</section>';
   }
 
   function renderRunArtifacts(run) {
     if (!run || typeof run !== 'object') return '';
     var artifacts = Array.isArray(run.artifacts) ? run.artifacts : [];
     var tools = Array.isArray(run.tool_artifacts) ? run.tool_artifacts : [];
+    var allFacts = Array.isArray(run.facts) ? run.facts : [];
+    var externalFacts = allFacts.filter(isExternalFact);
     var pdfEntries = compactPdfEntries(artifacts);
     var webEntries = compactWebEntries(artifacts);
     var toolEntries = compactToolEntries(tools);
-    var parts = [];
+    var unmatchedFacts = [];
 
-    pdfEntries.forEach(function (entry) { parts.push(pdfEntryHtml(entry)); });
-    webEntries.forEach(function (entry) {
-      parts.push('<a class="chat-artifact-link chat-web-link" href="' + escapeHtml(entry.url) + '"'
-        + ' target="_blank" rel="noopener noreferrer">网页 · ' + escapeHtml(entry.title) + '</a>');
+    externalFacts.forEach(function (fact) {
+      var toolMatches = toolEntries.filter(function (entry) { return factMatchesToolGroup(fact, entry); });
+      if (toolMatches.length === 1) {
+        toolMatches[0].facts.push(fact);
+        return;
+      }
+      var webMatches = webEntries.filter(function (entry) {
+        return fact.source_category === 'web' && Array.isArray(fact.evidence_ids)
+          && fact.evidence_ids.indexOf(entry.url) !== -1;
+      });
+      if (!toolMatches.length && webMatches.length === 1) {
+        webMatches[0].facts = webMatches[0].facts || [];
+        webMatches[0].facts.push(fact);
+        return;
+      }
+      unmatchedFacts.push(fact);
     });
-    toolEntries.forEach(function (entry) {
-      var label = '实时数据 · ' + entry.provider;
-      var statusLabel = { partial: '部分取得', failed: '获取失败', unavailable: '不可用' }[entry.status] || '';
-      if (statusLabel) label += ' · ' + statusLabel;
-      if (entry.asOf) label += ' · 数据截至 ' + entry.asOf;
-      else if (entry.status !== 'success') label += ' · 数据时间未知';
-      if (entry.fetchedAt) label += ' · 获取于 ' + entry.fetchedAt;
-      parts.push('<span class="chat-artifact-tool">' + escapeHtml(label) + '</span>');
-    });
-    if (!parts.length) return '';
 
+    var sourceGroups = [];
+    toolEntries.forEach(function (entry) { sourceGroups.push(renderToolSourceGroup(entry, run)); });
+    webEntries.forEach(function (entry) { sourceGroups.push(renderWebSourceGroup(entry, entry.facts || [], run)); });
+    if (unmatchedFacts.length) sourceGroups.push(renderUnmatchedSourceGroup(unmatchedFacts, run));
+
+    var links = [];
+    pdfEntries.forEach(function (entry) { links.push(pdfEntryHtml(entry)); });
+    if (!links.length && !sourceGroups.length) return '';
+    var sourceCount = sourceGroups.length + pdfEntries.length;
+    var summary = '证据与来源（' + sourceCount + '）';
+    if (externalFacts.length) summary = '证据与来源（' + sourceCount + ' 个来源 · ' + externalFacts.length + ' 条外部数据）';
     return '<details class="chat-artifacts" aria-label="回答证据与来源">'
-      + '<summary>证据与来源（' + parts.length + '）</summary>'
-      + '<div class="chat-artifacts-list">' + parts.join('') + '</div>'
-      + '</details>';
+      + '<summary>' + escapeHtml(summary) + '</summary>'
+      + '<div class="chat-artifacts-list">'
+      + (sourceGroups.length ? '<div class="chat-source-groups">' + sourceGroups.join('') + '</div>' : '')
+      + (links.length ? '<div class="chat-artifact-links">' + links.join('') + '</div>' : '')
+      + '</div></details>';
   }
 
   function renderPolicy(policy) {
@@ -387,11 +525,11 @@
     if (!run || typeof run !== 'object') return '';
     var parts = [];
     (Array.isArray(run.facts) ? run.facts : []).forEach(function (fact) {
-      if (!fact || typeof fact !== 'object') return;
-      var label = fact.verification === 'reference' ? '外部参考' : 'PDF 原文';
-      var asOf = fact.verification === 'reference' && fact.as_of ? ' · 数据截至 ' + escapeHtml(fact.as_of) : '';
+      if (!fact || typeof fact !== 'object' || isExternalFact(fact)) return;
+      var label = fact.source_type === 'pdf' || fact.source_category === 'local_pdf' ? 'PDF 原文' : '事实';
+      var asOf = fact.as_of ? ' · 数据截至 ' + escapeHtml(fact.as_of) : '';
       parts.push('<div class="chat-fact chat-fact-' + escapeHtml(fact.verification || '') + '">'
-        + escapeHtml(label + ' · ' + String(fact.metric || '') + '：' + String(fact.value || '') + ' ' + String(fact.unit || '')) + asOf + '</div>');
+        + escapeHtml(label + ' · ' + String(fact.metric || '') + '：' + String(fact.value == null ? '' : fact.value) + ' ' + String(fact.unit || '')) + asOf + '</div>');
     });
     (Array.isArray(run.conflicts) ? run.conflicts : []).forEach(function (conflict) {
       if (!conflict || typeof conflict !== 'object') return;

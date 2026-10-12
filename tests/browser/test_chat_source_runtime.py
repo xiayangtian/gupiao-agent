@@ -84,13 +84,15 @@ def test_chat_source_status_and_time_are_visible_in_browser(app_url, question, e
         _browser(session, "wait", "#chat-history .chat-run")
         payload = _browser(session, "eval", "JSON.stringify((() => {const runs=document.querySelectorAll('#chat-history .chat-run');const run=runs[runs.length-1];"
                   "return {text:run?.textContent||'',width:document.documentElement.scrollWidth,"
-                  "inner:window.innerWidth,status:run?.querySelector('.chat-run-status-label')?.textContent||''};})())")
+                  "inner:window.innerWidth,status:run?.querySelector('.chat-run-status-label')?.textContent||'',sourceGroups:run?.querySelectorAll('.chat-source-group').length||0,factRows:run?.querySelectorAll('.chat-source-fact-row').length||0};})())")
         dom = json.loads(payload["data"]["result"])
         assert expected_label in dom["text"]
         assert ({'completed':'已完成','partial':'部分完成'}[expected_status]) in dom["status"]
         if "网页失败" in question:
             assert "数据截至 2026-09-24" in dom["text"]
-            assert dom["text"].count("实时数据 · tencent") == 4
+            assert dom["text"].count("腾讯行情 · K 线数据") == 1
+            assert dom["sourceGroups"] == 2
+            assert dom["factRows"] == 4
         assert dom["width"] <= dom["inner"]
         assert _browser(session, "errors")["data"].get("errors", []) == []
         assert not [item for item in _browser(session, "console")["data"].get("messages", [])

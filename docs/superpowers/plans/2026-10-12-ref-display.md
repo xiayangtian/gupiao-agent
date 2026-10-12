@@ -14,4 +14,13 @@
 
 ## 验收结果记录
 
-实现前基线：`python3 -m pytest -q tests/unit/test_chat_rendering_js.py` → 28 passed。最终验证命令和结果在完成时追加。
+实现前基线：`python3 -m pytest -q tests/unit/test_chat_rendering_js.py` → 28 passed。
+
+## 实施与验证记录
+
+- 外部事实改为默认折叠并按 provider/tool/as_of/status 分组；用来源调用 ID 与 evidence IDs 匹配事实，未匹配项明确独立分组。冲突和本地 PDF 事实仍即时可见。
+- 每组用语义化表格显示对象、指标、期间、数值/单位；每组初始 20 条，其余原生折叠“查看更多”；不渲染原始参数或结果摘要。窄屏表格换行布局，不增加页面横向宽度。
+- `python3 -m pytest -q tests/unit/test_chat_rendering_js.py tests/unit/test_design_registry.py` → 43 passed；`node --check webapp/static/chat_rendering.js`、`git diff --check` 通过。
+- Browser 单场景 `test_chat_source_status_and_time_are_visible_in_browser`（网页来源失败场景）→ 1 passed；布局浏览器回归 desktop/tablet/mobile → 3 passed。
+- Browser QA：`http://127.0.0.1:8127`，桌面/平板/手机；无 console/page errors，无失败请求，只有既有 `favicon.ico` 404。用 25 条事实的本地渲染 fixture 检查默认折叠、20+5 展开、来源合组及浮点格式；页面宽度在 1440/834/390px 均无横向溢出，手机表格自身宽度 272px。
+- 已知非本次回归：`tests/browser/test_chat_source_runtime.py` 的另两个终态断言在基线 `main` `43db423` 也失败；`test_chat_history_reopens_with_scope_and_pdf_page_link` 的来源标题编码断言在相同基线上也失败。当前版本的网页来源分组场景通过；未扩大范围修改上述既有问题。
