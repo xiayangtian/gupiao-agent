@@ -17,7 +17,7 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
-| 智能问答外部参考折叠与分组展示 | 实施中 | — | [主记录](#chat-external-reference-display) |
+
 
 ## 全部设计
 
@@ -55,4 +55,4 @@
 | <a id="chat-reliability-p4"></a>智能问答可靠性优化第四阶段：真实链路评测、检索质量与上下文压缩 | [P4 详细设计](specs/chat-reliability-p4.md) | [计划](plans/2026-10-08-chat-p4.md)；[计划边界](specs/2026-09-24-chat-reliability.md#p4-plan) | 已实现 | — | 用户授权后于 2026-10-08 本地 fast-forward 合入 `main`（合并 03df820）；聚焦单测 352 passed、P3/P2/source-runtime 浏览器 9 passed，`git diff --check` 通过；`python3 -m pytest -q tests/unit/test_design_registry.py`：9 passed。9 场景相关窗口候选 0 阻断、9/9 终态匹配，目标引用 0/1→1/1；长历史 prompt 字符估计 24,899→15,877。真实提供方未探测，未推送远端；TASK-20260924-006 | 2026-10-08 |
 | <a id="chat-market-routing-repair"></a>智能问答市场链路修复：对象、时间、澄清、来源与终态 | [设计](specs/2026-10-09-chat-market-routing-repair-design.md) | [实施计划](plans/2026-10-09-chat-market-routing-repair.md) | 已实现 | — | 用户授权后与期限分析功能一并合并 536043d 至 `main`（包含原功能分支 `feat/chat-market-routing-repair` 的路由、澄清、来源预算与终态修复提交）；全量验证：`python3 -m pytest -q`：1416 passed、1 skipped、10 failed，10 项在基线 `0e563c4` 已复现；Q1-Q15 本地接口场景覆盖行情路由、窗口、来源及终态，用户同意在记录该基线结果后合入 | 2026-10-12 |
 | <a id="generic-market-horizons"></a>个股与大盘通用期限行情分析 | [设计](specs/2026-10-09-individual-and-market-horizon-analysis-design.md) | [实施计划](plans/2026-10-09-generic-market-horizon-analysis.md) | 已实现 | — | 用户授权 2026-10-12 合入 main，合并 536043d。聚焦验证：`python3 -m pytest -q tests/unit/test_rag_qa.py tests/unit/test_server_api.py tests/unit/test_chat_execution.py tests/unit/test_chat_verifier.py`：296 passed；本地接口 Q1-Q8 completed 且核验通过，Q9因广度 MCP 不可用、Q10-Q14因仅指数范围均为核验通过的 partial，Q15因区间首端数据缺失为 partial。全量 `python3 -m pytest -q`：1416 passed、1 skipped、10 failed；10项在基线 `main` `0e563c4` 已复现，用户明确授权在此结果下合入。 | 2026-10-12 |
-| <a id="chat-external-reference-display"></a>智能问答外部参考折叠与分组展示 | [设计](specs/2026-10-12-ref-display.md) | [实施计划](plans/2026-10-12-ref-display.md) | 实施中 | — | 用户确认默认折叠、按来源归组及 20 条默认展示上限；隔离分支 `feat/external-reference-display`（base `43db423`）；实现前 `test_chat_rendering_js.py` 28 passed | 2026-10-12 |
+| <a id="chat-external-reference-display"></a>智能问答外部参考折叠与分组展示 | [设计](specs/2026-10-12-ref-display.md) | [实施计划](plans/2026-10-12-ref-display.md) | 已实现 | — | 用户确认后 fast-forward 合并 070002f 至 main；聚焦验证：`python3 -m pytest -q tests/unit/test_chat_rendering_js.py tests/unit/test_design_registry.py`：43 passed；来源失败场景浏览器回归 1 passed，聊天布局 desktop/tablet/mobile 3 passed；browser_qa `http://127.0.0.1:8127` 三视口无 console/page errors，只有 favicon.ico 404；25 条本地渲染 fixture 验证默认折叠、20+5 展开、浮点显示及 390/834/1440px 无页面横向溢出。两个既有来源终态断言与一个来源标题编码断言在基线 `43db423` 可复现，未混作本次回归 | 2026-10-12 |
