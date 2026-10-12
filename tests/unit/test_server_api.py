@@ -2100,7 +2100,7 @@ class TestChatSessionsApi:
 
         assert error["run"]["status"] == "failed"
         assert run_id
-        assert error["error"] == f"流式问答失败，请重试（诊断 ID：{run_id}）"
+        assert error["error"] == f"回答时遇到问题，请稍后重试。（反馈编号：{run_id}）"
         assert secret_question not in error["error"]
         assert secret_question not in caplog.text
         assert all(record.exc_info is None for record in caplog.records), "诊断日志不得附带 traceback"
@@ -2127,7 +2127,7 @@ class TestChatSessionsApi:
         error = next(data for event, data in events if event == "error")
         run_id = error["run"]["id"]
 
-        assert error["error"] == f"流式问答失败，请重试（诊断 ID：{run_id}）"
+        assert error["error"] == f"回答时遇到问题，请稍后重试。（反馈编号：{run_id}）"
         assert private_marker not in response.text
         assert private_marker not in caplog.text
         assert error["run"]["status"] == "failed"
@@ -2169,7 +2169,7 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "rag_qa", FakeRagQA())
         r = client.post("/api/chat/stream", json={"question": "x"})
         body = r.text
-        assert "未检索到相关内容" in body
+        assert "本地财报库中没有找到相关内容" in body
         assert "event: done" in body
         assert store.list_sessions()[0]["message_count"] == 2
 
@@ -3183,6 +3183,7 @@ class TestChatSupplementApi:
         assert supplement_env["ingestion"].calls == []
         names = [name for name, _ in events]
         assert names[:3] == ["session", "run_started", "reasoning_stage"]
+        assert events[2][1]["message"] == "正在准备分析步骤…"
         assert names[3:] == ["scope_resolved", "plan_fallback", "policy_resolved", "policy_fallback",
                              "supplement_needed"]
 
@@ -3486,7 +3487,7 @@ class TestChatSupplementApi:
         assert [name for name, _ in events][-1] == "error"
         error = _event(events, "error")
         run = error["run"]
-        assert error["error"] == f"恢复问答失败，请重试（诊断 ID：{run['id']}）"
+        assert error["error"] == f"继续回答时遇到问题，请稍后重试。（反馈编号：{run['id']}）"
         assert private_marker not in str(events)
         assert run["status"] == "failed"
         assert run["supplement"]["status"] == "failed"
@@ -3794,7 +3795,7 @@ def test_exhausted_completion_persists_notice_instead_of_partial_fragment(client
     done = _event(events, "done")
     assert ai.calls == 3
     assert done["run"]["status"] == "partial"
-    assert done["run"]["content"] == "回答经过补全重试仍未能完整生成，请重试。"
+    assert done["run"]["content"] == "回答未能完整生成，请重试。"
     assert "答案仍未写完" not in done["run"]["content"]
 
 
@@ -3879,7 +3880,7 @@ def test_m2_policy_is_emitted_and_unsupported_numeric_is_degraded(client, env, m
     }))
     assert _event(events, "policy_resolved")["intent"] == "report_fact"
     assert _event(events, "verification")["verification"]["status"] == "blocked"
-    assert "未找到可核验" in _event(events, "done")["run"]["content"]
+    assert "没有找到可核实的公开披露" in _event(events, "done")["run"]["content"]
 
 
 def test_m2_mcp_financial_reference_cannot_support_report_fact_claims(client, env, monkeypatch):
@@ -3908,7 +3909,7 @@ def test_m2_mcp_financial_reference_cannot_support_report_fact_claims(client, en
     assert run["verification_report"]["status"] == "blocked"
     assert "100 亿元" not in run["content"]
     assert "621" not in run["content"]
-    assert run["content"].count("未找到可核验的披露") == 1
+    assert run["content"].count("没有找到可核实的公开披露") == 1
 
 
 def test_resume_history_passes_full_safe_history_to_budget_projection():

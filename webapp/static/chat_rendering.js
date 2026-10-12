@@ -93,7 +93,7 @@
     proposed: true, approved: true, downloading: true, ingesting: true, resuming: true,
   };
   // 失败原因只暴露受控分类，绝不展示原始错误码、URL 或堆栈。
-  var SUPPLEMENT_FAILURE_REASONS = { download_failed: '下载失败', ingest_failed: '索引失败' };
+  var SUPPLEMENT_FAILURE_REASONS = { download_failed: '下载未成功', ingest_failed: '报告处理未成功' };
 
   function supplementPeriodLabel(entry) {
     if (!entry || typeof entry !== 'object') return '';
@@ -165,10 +165,10 @@
 
     var headline;
     if (waiting) {
-      headline = status === 'proposed' ? '等待你确认是否补充以下财报' : '正在补充财报原文';
+      headline = status === 'proposed' ? '请选择要补充的财报' : '正在补充财报原文';
     } else if (status === 'completed') {
       headline = ingestedCount
-        ? '本次经授权补充 ' + ingestedCount + ' 份财报'
+        ? '已按你的确认补充 ' + ingestedCount + ' 份财报'
         : '本次补充未取得可核验的财报原文';
     } else if (status === 'declined') {
       headline = '本次未补充财报，已基于现有信息回答';
@@ -206,17 +206,17 @@
       var industryName = String(industry.name || '');
       var parts = [];
       if (company) parts.push(company);
-      if (industryName) parts.push(escapeHtml(industryName) + '（数据源分类）');
+      if (industryName) parts.push(escapeHtml(industryName));
       if (periodText) parts.push(escapeHtml(periodText));
       head = parts.join(' · ');
       // 本地可检索同业样本：M1 只做本地已索引同业报告的对照，绝不承诺全市场排名。
       note = (industry && industry.sample_kind === 'local_indexed')
-        ? '已扩展同业范围：本地可检索同业样本'
-        : '已扩展同业范围';
+        ? '仅包含本地已收录的同业报告'
+        : '范围已扩展至同业公司';
     } else if (mode === 'company_only') {
       var onlyParts = [];
       if (company) onlyParts.push(company);
-      onlyParts.push('本公司');
+      onlyParts.push('仅分析这家公司');
       if (periodText) onlyParts.push(escapeHtml(periodText));
       head = onlyParts.join(' · ');
       if (scope.fallback_reason) note = escapeHtml(scope.fallback_reason);
@@ -225,7 +225,7 @@
       var planSteps = ((run.execution_plan || {}).steps || []);
       var usedLocalPdf = sourceSummary.local_pdf !== '未使用'
         && planSteps.some(function(step) { return step && step.kind === 'retrieve'; });
-      head = usedLocalPdf ? '全库财报检索' : '全库范围（未检索财报）';
+      head = usedLocalPdf ? '已查询本地财报库' : '未查询本地财报';
     } else {
       return '';
     }
@@ -332,7 +332,7 @@
       var key = JSON.stringify([provider, toolName, asOf, status]);
       var entry = byKey[key];
       if (!entry) {
-        entry = { provider: provider || '实时数据', toolName: toolName, asOf: asOf,
+        entry = { provider: provider || '外部数据', toolName: toolName, asOf: asOf,
           fetchedAt: [], sourceIds: [], status: status, facts: [] };
         byKey[key] = entry;
         entries.push(entry);
@@ -361,20 +361,55 @@
   }
 
   function sourceProviderLabel(provider) {
-    return ({ tencent: '腾讯行情', market: '行情数据', 'stock-data-mcp': '股票数据 MCP', mcp: 'MCP 数据', web: '网页来源', web_search: '网页来源' })[provider]
-      || provider || '外部数据';
+    return ({ tencent: '腾讯行情', market: '行情数据', 'stock-data-mcp': '股票数据服务', mcp: '数据服务', web: '网页来源', web_search: '网页来源' })[provider]
+      || '外部数据来源';
   }
 
   function sourceToolLabel(toolName) {
     return ({
-      kline: 'K 线数据', quote: '实时报价', price: '行情数据', volume: '成交量数据',
-      market_overview: '市场概览', get_realtime_data: '实时报价',
+      kline: '历史行情', quote: '实时行情', price: '行情数据', volume: '成交量数据',
+      market_overview: 'A 股市场概况', market_indices: 'A 股指数行情',
+      market_quote: '个股行情', market_breadth: '市场涨跌数据',
+      sector_performance: '行业板块表现', market_fund_flow: '市场资金流向',
+      get_realtime_data: '实时行情', get_realtime_quote: '实时行情',
       get_financial_metrics: '财务指标',
-    })[toolName] || (toolName ? '数据查询' : '来源记录');
+      get_stock_basic_info: '公司基本信息', get_stock_a_code_name: '股票代码与名称',
+      stock_sector_fund_flow_rank: '行业资金流向', stock_zt_pool: '涨停数据',
+      web_search: '网页资料',
+    })[toolName] || (toolName ? '相关数据' : '来源记录');
+  }
+
+  function chatToolActivity(toolName, phase) {
+    var label = sourceToolLabel(toolName);
+    var separator = /^[A-Za-z]/.test(label) ? ' ' : '';
+    if (phase === 'started') return '正在查询' + separator + label + '…';
+    if (phase === 'failed') return '暂时无法获取' + separator + label;
+    return '已获取' + separator + label;
+  }
+
+  var EXECUTION_STEP_LABELS = {
+    retrieve: '本地财报', market_quote: '个股行情', market_indices: 'A 股指数行情',
+    market_breadth: '市场涨跌数据', sector_performance: '行业板块表现',
+    market_fund_flow: '市场资金流向', market_overview: 'A 股市场概况',
+    web_search: '网页资料', answer: '综合分析'
+  };
+
+  function executionStepMessage(kind, phase) {
+    if (kind === 'answer') {
+      if (phase === 'started') return '正在整理回答…';
+      if (phase === 'failed') return '回答暂未完成';
+      return '回答已整理';
+    }
+    var label = EXECUTION_STEP_LABELS[kind] || '相关信息';
+    var separator = /^A /.test(label) ? ' ' : '';
+    if (phase === 'started') return '正在查询' + separator + label + '…';
+    if (phase === 'failed') return '暂时无法获取' + separator + label;
+    if (phase === 'completed') return '已获取' + separator + label;
+    return label;
   }
 
   function sourceStatusLabel(status) {
-    return ({ success: '获取成功', partial: '部分取得', failed: '获取失败', unavailable: '不可用' })[status] || '状态未知';
+    return ({ success: '获取成功', partial: '部分获取', failed: '获取失败', unavailable: '暂不可用' })[status] || '状态未说明';
   }
 
   function factObjectLabel(fact, run) {
@@ -405,7 +440,7 @@
   }
 
   function renderFactTable(facts, run) {
-    if (!facts.length) return '<p class="chat-source-empty">该来源未保留可展示的结构化事实。</p>';
+    if (!facts.length) return '<p class="chat-source-empty">当前来源没有可展示的数据项。</p>';
     function rows(items) {
       return items.map(function (fact) {
         var value = formatFactValue(fact.value);
@@ -596,9 +631,9 @@
     var title = sourceProviderLabel(group.provider) + ' · ' + sourceToolLabel(group.toolName);
     var meta = ['状态：' + sourceStatusLabel(group.status)];
     if (group.asOf) meta.push('数据截至 ' + group.asOf);
-    else meta.push('数据时间未知');
+    else meta.push('未提供数据时间');
     if (group.fetchedAt.length) meta.push('获取于 ' + group.fetchedAt.join('、'));
-    return '<section class="chat-source-group" aria-label="实时数据来源">'
+    return '<section class="chat-source-group" aria-label="外部数据来源">'
       + '<h3>' + escapeHtml(title) + '</h3><p class="chat-source-meta">' + escapeHtml(meta.join(' · ')) + '</p>'
       + renderFactTable(group.facts, run) + '</section>';
   }
@@ -616,7 +651,7 @@
 
   function renderUnmatchedSourceGroup(facts, run) {
     return '<section class="chat-source-group chat-source-unmatched" aria-label="来源未关联">'
-      + '<h3>来源未关联</h3><p class="chat-source-meta">事实未能可靠映射到本次来源记录，避免错误归因。</p>'
+      + '<h3>来源未关联</h3><p class="chat-source-meta">暂时无法确认这些数据对应哪个来源，因此不标注具体来源。</p>'
       + renderFactTable(facts, run) + '</section>';
   }
 
@@ -671,16 +706,16 @@
   function renderPolicy(policy) {
     if (!policy || typeof policy !== 'object') return '';
     var label = {
-      report_fact: '本地财报查证', company_trend: '本地财报趋势对照',
-      industry_benchmark: '本地可检索同业样本', realtime_market: '实时行情查证',
-      event_attribution: '公开事件参考', research_task: '受限研究计划与来源核对'
+      report_fact: '本地财报资料', company_trend: '财报趋势对照',
+      industry_benchmark: '本地同业样本', realtime_market: '行情数据',
+      event_attribution: '公开信息参考', research_task: '分步研究与多来源核对'
     }[String(policy.intent || '')];
-    return label ? '<details class="chat-policy"><summary>本次查证方式</summary><span>'
+    return label ? '<details class="chat-policy"><summary>本次分析依据</summary><span>'
       + escapeHtml(label) + '</span></details>' : '';
   }
 
   function factSourceLabel(fact) {
-    return fact && fact.source_type === 'pdf' ? 'PDF 原文' : '实时数据';
+    return fact && fact.source_type === 'pdf' ? 'PDF 原文' : '外部数据';
   }
 
   function renderFactsAndConflicts(run) {
@@ -691,20 +726,22 @@
       var label = fact.source_type === 'pdf' || fact.source_category === 'local_pdf' ? 'PDF 原文' : '事实';
       var asOf = fact.as_of ? ' · 数据截至 ' + escapeHtml(fact.as_of) : '';
       parts.push('<div class="chat-fact chat-fact-' + escapeHtml(fact.verification || '') + '">'
-        + escapeHtml(label + ' · ' + String(fact.metric || '') + '：' + String(fact.value == null ? '' : fact.value) + ' ' + String(fact.unit || '')) + asOf + '</div>');
+        + escapeHtml(label + ' · ' + factMetricLabel(String(fact.metric || '')) + '：' + String(fact.value == null ? '' : fact.value) + ' ' + String(fact.unit || '')) + asOf + '</div>');
     });
     (Array.isArray(run.conflicts) ? run.conflicts : []).forEach(function (conflict) {
       if (!conflict || typeof conflict !== 'object') return;
       var labels = (Array.isArray(conflict.facts) ? conflict.facts : []).map(factSourceLabel).filter(function (value, index, all) { return all.indexOf(value) === index; });
-      parts.push('<div class="chat-conflict" role="status"><strong>存在口径/时间差异</strong>：'
-        + escapeHtml(String(conflict.reason || '来源数值不一致')) + '（' + escapeHtml(labels.join('、')) + '）</div>');
+      parts.push('<div class="chat-conflict" role="status"><strong>数据口径或时间不一致</strong>：'
+        + escapeHtml(String(conflict.reason || '不同来源的数据不一致')) + '（' + escapeHtml(labels.join('、')) + '）</div>');
     });
     return parts.length ? '<div class="chat-facts-conflicts">' + parts.join('') + '</div>' : '';
   }
 
   function renderVerification(report) {
     if (!report || typeof report !== 'object' || report.status === 'passed') return '';
-    var label = report.status === 'blocked' ? '未找到可核验的披露，不能确认该数值。' : '该回答含外部参考或口径差异，请结合来源核对。';
+    var label = report.status === 'blocked'
+      ? '没有找到可核实的公开披露，暂时无法确认这个数值。'
+      : '部分数据来自外部来源，或统计口径/时间不一致；请查看对应来源。';
     return '<div class="chat-verification chat-verification-' + escapeHtml(report.status) + '" role="status">' + escapeHtml(label) + '</div>';
   }
 
@@ -713,8 +750,8 @@
   }
 
   var RESEARCH_STEP_STATUS_LABELS = {
-    pending: '待执行', running: '进行中', completed: '已完成',
-    stopped: '已停止', failed: '失败', skipped: '已跳过',
+    pending: '待开始', running: '进行中', completed: '已完成',
+    stopped: '已停止', failed: '未能完成', skipped: '已跳过',
   };
 
   function renderResearchPlan(plan) {
@@ -724,7 +761,7 @@
     if (!steps.length) return '';
     return '<details class="research-plan"><summary>研究计划（' + steps.length + ' 步）</summary>'
       + '<ol>' + steps.map(function (step) { return '<li>' + escapeHtml(researchStepLabel(step)) + '</li>'; }).join('') + '</ol>'
-      + '<div class="research-acceptance"><strong>完成判据</strong>：' + escapeHtml(acceptance.join('；')) + '</div></details>';
+      + '<div class="research-acceptance"><strong>完成标准</strong>：' + escapeHtml(acceptance.join('；')) + '</div></details>';
   }
 
   function renderResearchSteps(run) {
@@ -766,8 +803,9 @@
     if (!run || typeof run !== 'object' || !run.research_run_id) return '';
     if (!researchRunIsResumable(run, researchRun)) return '';
     var summary = run.research_summary || {};
-    var from = String(summary.resume_from_step_id || '未完成步骤');
-    return '<div class="research-recovery"><span>从步骤：' + escapeHtml(from) + '</span><button type="button" class="chat-run-action" data-chat-action="resume-research" data-research-run-id="' + escapeHtml(String(run.research_run_id)) + '">继续研究</button></div>';
+    var nextStep = String(summary.resume_from_step_id || '');
+    var message = nextStep ? '可从「' + escapeHtml(nextStep) + '」继续' : '还有未完成的部分';
+    return '<div class="research-recovery"><span>' + message + '</span><button type="button" class="chat-run-action" data-chat-action="resume-research" data-research-run-id="' + escapeHtml(String(run.research_run_id)) + '">继续研究</button></div>';
   }
 
   function renderWorkspaceItem(item) {
@@ -832,24 +870,24 @@
   function renderRunReuseActions(run) {
     if (!run || typeof run !== 'object' || !run.id) return '';
     return '<div class="chat-run-reuse">'
-      + '<button type="button" class="chat-run-action" data-chat-action="edit-reask">编辑重问</button>'
+      + '<button type="button" class="chat-run-action" data-chat-action="edit-reask">改写后再问</button>'
       + '<button type="button" class="chat-run-action" data-chat-action="branch-followup"'
-      + ' data-chat-run-id="' + escapeHtml(String(run.id)) + '">分支追问</button></div>';
+      + ' data-chat-run-id="' + escapeHtml(String(run.id)) + '">另开会话追问</button></div>';
   }
 
   function renderRunStatus(run) {
     if (!run || typeof run !== 'object') return '';
     if (run.legacy_evidence_unavailable) {
       return '<div class="chat-run-status chat-run-status-legacy" role="status">'
-        + '<span class="chat-run-status-label">历史回答，未保留证据包</span></div>';
+        + '<span class="chat-run-status-label">较早的回答，原始来源明细未保存</span></div>';
     }
     var status = String(run.status || '');
     var label = {
       completed: '✅ 已完成',
       partial: '⚠️ 部分完成',
       stopped: '⏹ 已停止',
-      failed: '❌ 失败',
-      waiting_consent: '⏸ 等待授权补充财报',
+      failed: '❌ 未能完成',
+      waiting_consent: '⏸ 等待你确认补充报告',
     }[status];
     if (!label) return '';
 
@@ -857,18 +895,18 @@
       + '" role="status" aria-live="polite">'
       + '<span class="chat-run-status-label">' + label + '</span>';
     if (run.knowledge_basis === 'model_knowledge_unretrieved') {
-      html += '<span class="chat-run-status-note">依据模型常识，未检索外部来源</span>';
+      html += '<span class="chat-run-status-note">依据通用知识回答，未查询外部资料</span>';
     }
     if (status === 'stopped' || status === 'partial' || status === 'failed') {
       html += '<button type="button" class="chat-run-action chat-run-regenerate"'
-        + ' data-chat-action="regenerate">重新生成</button>';
+        + ' data-chat-action="regenerate">重试回答</button>';
     }
     var runId = String(run.id || '');
     if (runId) {
-      html += '<span class="chat-run-diagnostic">诊断 ID：<code>' + escapeHtml(runId) + '</code></span>'
+      html += '<span class="chat-run-diagnostic">反馈编号：<code>' + escapeHtml(runId) + '</code></span>'
         + '<button type="button" class="chat-run-action chat-run-copy-id"'
         + ' data-chat-action="copy-run-id" data-chat-run-id="' + escapeHtml(runId) + '"'
-        + ' aria-label="复制诊断 ID" title="复制诊断 ID">复制</button>';
+        + ' aria-label="复制反馈编号" title="复制反馈编号">复制编号</button>';
     }
     return html + '</div>';
   }
@@ -878,15 +916,14 @@
     var plan = run.execution_plan || {};
     var steps = Array.isArray(plan.steps) ? plan.steps : [];
     if (!steps.length) return '';
-    var labels = {retrieve: '本地财报', market_quote: '个股实时行情', market_indices: 'A 股主要指数', market_breadth: '市场广度与成交', sector_performance: '行业与概念板块', market_fund_flow: '市场资金流', market_overview: '市场概览（指数、广度、板块与资金）', web_search: '网页事件解释', answer: '综合分析'};
-    var text = steps.map(function (step) { return labels[step.kind] || '来源步骤'; }).join(' → ');
+    var text = steps.map(function (step) { return EXECUTION_STEP_LABELS[step.kind] || '相关信息'; }).join('、');
     var source = run.source_summary || {};
     var notes = [];
-    if (source.local_pdf === '未使用') notes.push('未使用本地财报');
-    if (plan.source_mode === 'general_web') notes.push('非股票问题：仅模型与网页搜索');
-    if (plan.source_mode === 'general_knowledge') notes.push('依据模型常识，未检索外部来源');
-    if (plan.source_mode === 'market_recap') notes.push('A 股日/周复盘');
-    return '<div class="chat-execution-summary" aria-label="执行来源">已按计划：'
+    if (source.local_pdf === '未使用') notes.push('未查询本地财报');
+    if (plan.source_mode === 'general_web') notes.push('结合网页资料补充');
+    if (plan.source_mode === 'general_knowledge') notes.push('基于通用知识回答，未查询外部资料');
+    if (plan.source_mode === 'market_recap') notes.push('A 股市场复盘');
+    return '<div class="chat-execution-summary" aria-label="分析依据">本次参考资料：'
       + escapeHtml(text) + (notes.length ? ' · ' + escapeHtml(notes.join('；')) : '') + '</div>';
   }
 
@@ -895,6 +932,8 @@
     webSourceReferences: webSourceReferences,
     renderScope: renderScope,
     renderExecutionSummary: renderExecutionSummary,
+    chatToolActivity: chatToolActivity,
+    executionStepMessage: executionStepMessage,
     renderWorkspaceItem: renderWorkspaceItem,
     renderResearchQuality: renderResearchQuality,
     renderRunReuseActions: renderRunReuseActions,

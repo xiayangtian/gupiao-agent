@@ -1527,15 +1527,15 @@ _supplement_context = threading.local()
 
 _SUPPLEMENT_TYPE_LABELS = {"annual": "年报", "semi_annual": "半年报", "quarterly": "季报"}
 # 等待授权与无可用候选时的受控回答文案（不含模型猜测）。
-_SUPPLEMENT_WAITING_TEXT = "已申请补充财报原文，等待你选择要下载的报告。"
+_SUPPLEMENT_WAITING_TEXT = "已找到可补充的报告，请选择要补充的内容。"
 _SUPPLEMENT_UNAVAILABLE_TEXT = (
-    "本地现有财报证据不足，且未找到可补充下载的报告；"
-    "以下回答仅基于当前可核验的信息，请谨慎参考。"
+    "现有财报资料不足，也没有找到可补充的报告；"
+    "以下回答仅依据目前能核实的信息，请谨慎参考。"
 )
 # 模型申请补库但问题本身不在单公司财报范围内：不得声称“不存在可下载报告”。
 _SUPPLEMENT_OUT_OF_SCOPE_TEXT = (
-    "当前问题不属于单公司财报范围，无法自动补充财报原文；"
-    "以下回答仅基于当前可核验的信息，请谨慎参考。"
+    "这个问题不适合通过补充单家公司财报来回答；"
+    "以下回答仅依据目前能核实的信息，请谨慎参考。"
 )
 
 
@@ -2386,7 +2386,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
             asyncio.run(forward_inner_response())
         except Exception as exc:
             logger.error("chat_run_worker_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
-            safe = "问答运行失败，请重试。"
+            safe = f"回答时遇到问题，请稍后重试。（反馈编号：{run_id}）"
             channel.publish(_sse("error", {"error": safe, "run_id": run_id}), run_control)
         finally:
             channel.close()
@@ -2394,7 +2394,7 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     async def events():
         yield _sse("session", {"session_id": sid})
         yield _sse("run_started", {"run_id": run_id})
-        yield _sse("reasoning_stage", {"stage": "planning", "message": "正在制定受限执行计划…"})
+        yield _sse("reasoning_stage", {"stage": "planning", "message": "正在准备分析步骤…"})
         if not chat_run_registry.start(control, run_worker):
             channel.close()
             yield _sse("error", {"error": "当前问答任务较多，请稍后重试。", "run_id": run_id})
@@ -3139,7 +3139,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     return
 
                 if state.empty:
-                    default = "知识库中未检索到相关内容，请补充更多报告或更换问法。"
+                    default = "本地财报库中没有找到相关内容。请补充报告或换个问法。"
                     run = _persist("completed", default)
                     yield _sse("done", {
                         "answer": default,
@@ -3166,9 +3166,9 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                             answer = None
                     if answer is None:
                         if route.intent in {"market_quote", "market_trend", "market_recap"}:
-                            answer = "回答经过补全重试仍未能完整生成，且未能从已取得的行情事实生成可核验结论。"
+                            answer = "回答未能完整生成，也无法根据已取得的行情数据给出可靠结论。"
                         else:
-                            answer = "回答经过补全重试仍未能完整生成，请重试。"
+                            answer = "回答未能完整生成，请重试。"
                         status = "partial"
                     run = _persist(status, answer)
                     if run.verification_report is not None:
@@ -3182,7 +3182,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 if state.error_text:
                     run = _persist("failed", "".join(state.answer_parts).strip())
                     yield _sse("error", {
-                        "error": f"流式问答失败，请重试（诊断 ID：{run_id}）",
+                        "error": f"回答时遇到问题，请稍后重试。（反馈编号：{run_id}）",
                         "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
@@ -3288,7 +3288,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 if not saved:
                     _persist("failed", "".join(state.answer_parts).strip())
                 yield _sse("error", {
-                "error": f"流式问答失败，请重试（诊断 ID：{run_id}）",
+                "error": f"回答时遇到问题，请稍后重试。（反馈编号：{run_id}）",
                 "elapsed_seconds": round(time.perf_counter() - started_at, 3),
             })
         finally:
@@ -3303,14 +3303,14 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     if stopped_run is not None:
                         stopped_summary = {"status": stopped_run.status,
                                            "resume_from_step_id": stopped_run.resume_from_step_id}
-                    stopped_content = stopped_content or "研究已停止；已完成步骤已保存，可继续研究。"
+                    stopped_content = stopped_content or "研究已停止，已完成的内容已保存；你可以继续研究。"
                 timed_out = run_control is not None and run_control.cancel_reason == "deadline"
                 has_partial = bool(stopped_content or state.evidence_artifacts or state.facts or state.tool_artifacts
                                    or any(step.get("status") in {"completed", "partial"}
                                           for step in state.execution_steps))
                 terminal_status = ("partial" if has_partial else "failed") if timed_out else "stopped"
                 if timed_out and not stopped_content:
-                    stopped_content = "问答已达到整轮时限；仅保留已取得的来源。"
+                    stopped_content = "本次回答等待时间已到，已保留目前取得的资料。"
                 _persist(terminal_status, stopped_content,
                          research_run_id=research_run_id, research_summary=stopped_summary)
 
@@ -3383,7 +3383,7 @@ async def resume_research_run(run_id: str, body: ResumeResearchRequest, request:
                 event = events.get_nowait()
                 yield _sse(event["type"], {key: value for key, value in event.items() if key != "type"})
         except ValueError:
-            yield _sse("research_blocked", {"reason": "没有可安全恢复的未完成步骤。"})
+            yield _sse("research_blocked", {"reason": "目前没有可继续的未完成步骤。"})
             return
         finally:
             if resume_task is not None and not resume_task.done():
@@ -3606,7 +3606,7 @@ async def resolve_chat_supplement(
                     if supplement_status == "completed":
                         _advance("failed")
                         supplement_status = "failed"
-                    answer = "回答经过补全重试仍未能完整生成，请重试。"
+                    answer = "回答未能完整生成，请重试。"
                     run = _persist("partial", answer)
                     yield _sse("done", {
                         "answer": answer, "citations": [], "session_id": sid,
@@ -3621,7 +3621,7 @@ async def resolve_chat_supplement(
                         supplement_status = "failed"
                     run = _persist("failed", "".join(state.answer_parts).strip())
                     yield _sse("error", {
-                        "error": f"恢复问答失败，请重试（诊断 ID：{run_id}）",
+                        "error": f"继续回答时遇到问题，请稍后重试。（反馈编号：{run_id}）",
                         "run": run.to_dict(),
                         "elapsed_seconds": round(time.perf_counter() - started_at, 3),
                     })
@@ -3644,7 +3644,7 @@ async def resolve_chat_supplement(
             if not saved:
                 _persist("failed", "".join(state.answer_parts).strip())
             yield _sse("error", {
-                "error": f"恢复问答失败，请重试（诊断 ID：{run_id}）",
+                "error": f"继续回答时遇到问题，请稍后重试。（反馈编号：{run_id}）",
                 "elapsed_seconds": round(time.perf_counter() - started_at, 3),
             })
         finally:

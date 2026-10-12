@@ -448,7 +448,7 @@ def test_run_reuse_actions_keep_history_and_branch_into_a_new_session(browser_se
   const question = document.querySelector('#chat-history .chat-msg.user').textContent.trim();
   document.querySelector('[data-chat-action="edit-reask"]').click();
   const inputAfterEdit = document.querySelector('#chat-input').value;
-  const editNotice = document.body.textContent.indexOf('已回填该轮原始问题') >= 0;
+  const editNotice = document.body.textContent.indexOf('已填入原问题') >= 0;
   document.querySelector('[data-chat-action="branch-followup"]').click();
   until = deadline();
   while (chatSessionId === completed.session_id && Date.now() < until) {
@@ -458,7 +458,7 @@ def test_run_reuse_actions_keep_history_and_branch_into_a_new_session(browser_se
   while (document.querySelector('#chat-input').value !== question && Date.now() < until) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  const branchNotice = document.body.textContent.indexOf('已在新会话中分支追问') >= 0;
+  const branchNotice = document.body.textContent.indexOf('已在新会话填入原问题，可修改后发送。') >= 0;
   const oldDetail = await (await fetch('/api/chat/sessions/' + encodeURIComponent(completed.session_id))).json();
   const newDetail = await (await fetch('/api/chat/sessions/' + encodeURIComponent(branchSessionId))).json();
   return JSON.stringify({

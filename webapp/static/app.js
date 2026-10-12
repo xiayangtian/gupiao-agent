@@ -2631,7 +2631,7 @@ function appendThinkingBubble(sel) {
   var div = document.createElement('div');
   div.className = 'chat-msg assistant thinking';
   div.innerHTML = '<span class="chat-thinking-dots"><span></span><span></span><span></span></span>'
-    + '<span class="chat-thinking-text">思考中，正在检索知识库并处理…</span>';
+    + '<span class="chat-thinking-text">正在分析你的问题…</span>';
   box.appendChild(div);
   scrollChatToBottom();
   return div;
@@ -2726,14 +2726,14 @@ function renderSupplementConsent(container, payload, handlers) {
   var decline = document.createElement('button');
   decline.type = 'button';
   decline.className = 'btn chat-supplement-decline';
-  decline.textContent = '暂不补充';
+  decline.textContent = '不补充，继续回答';
   var approve = document.createElement('button');
   approve.type = 'button';
   approve.className = 'btn primary chat-supplement-approve';
-  approve.textContent = '确认补充并继续';
+  approve.textContent = '下载所选报告并继续';
   function updateSelectionState() {
     approve.disabled = selected.size === 0;
-    approve.textContent = '确认补充并继续（' + selected.size + '/' + payload.limit + '）';
+    approve.textContent = '下载所选报告并继续（' + selected.size + '/' + payload.limit + '）';
   }
   updateSelectionState();
   var status = document.createElement('p');
@@ -2750,12 +2750,12 @@ function renderSupplementConsent(container, payload, handlers) {
     status.textContent = message || '';
   }
   function act(action) {
-    setBusy(true, action === 'approve' ? '正在下载并索引所选财报…' : '正在基于现有信息继续回答…');
+    setBusy(true, action === 'approve' ? '正在下载所选报告…' : '正在整理已有资料，继续回答…');
     var task = action === 'approve'
       ? handlers.approve(Array.from(selected))
       : handlers.decline();
     Promise.resolve(task).catch(function () {
-      setBusy(false, '本次未补充成功，已基于现有信息回答');
+      setBusy(false, '这次没有完成报告补充，已根据现有资料回答。');
       if (handlers.error) handlers.error();
     });
   }
@@ -2927,13 +2927,13 @@ async function resolveSupplementConsent(supplementId, action, candidateIds, card
       card.setStatus('正在下载所选财报…');
     },
     supplement_downloaded: function () {
-      card.setStatus('财报已下载，正在准备索引…');
+      card.setStatus('报告已下载，正在整理内容…');
     },
     supplement_ingested: function () {
-      card.setStatus('财报已索引，正在恢复回答…');
+      card.setStatus('报告内容已准备好，正在继续回答…');
     },
     supplement_failed: function () {
-      card.setStatus('部分补充未成功，正在基于现有信息继续回答…');
+      card.setStatus('部分报告未能补充，正在根据已有资料继续回答…');
     },
     delta: function (data) {
       answerText += data.text || '';
@@ -2996,7 +2996,7 @@ async function submitQuestion(q, key) {
     if (st.researchBlocked) {
       var blocked = document.createElement('div');
       blocked.className = 'research-step research-step-failed';
-      blocked.textContent = '受阻：' + st.researchBlocked;
+      blocked.textContent = '暂时无法继续：' + st.researchBlocked;
       researchStreamEl.appendChild(blocked);
     }
     scrollChatToBottom();
@@ -3013,9 +3013,7 @@ async function submitQuestion(q, key) {
       body: JSON.stringify(body),
     });
     if (!res.ok || !res.body) {
-      var errData = null;
-      try { errData = await res.json(); } catch (_) {}
-      throw new Error(errData && errData.detail ? errData.detail : 'HTTP ' + res.status);
+      throw new Error('暂时无法开始回答，请稍后重试。');
     }
 
     var reader = res.body.getReader();
@@ -3086,7 +3084,7 @@ async function submitQuestion(q, key) {
         }
       } else if (parsed.event === 'reasoning_stage') {
         if (isCurrentChatStream(key)) {
-          var stageMessage = parsed.data.message || '正在处理补充信息…';
+          var stageMessage = parsed.data.message || '正在准备回答…';
           if (thinkingEl) setThinkingText(thinkingEl, stageMessage);
           if (!toolStepsEl) {
             toolStepsEl = document.createElement('div');
@@ -3104,7 +3102,7 @@ async function submitQuestion(q, key) {
             stageEl.className = 'chat-tool-step stage';
             toolStepsEl.appendChild(stageEl);
           }
-          stageEl.textContent = '分析进度：' + stageMessage;
+          stageEl.textContent = stageMessage;
           scrollChatToBottom();
         }
       } else if (/^execution_step_(started|completed|failed)$/.test(parsed.event)) {
@@ -3127,16 +3125,20 @@ async function submitQuestion(q, key) {
           }
           var phase = parsed.event.slice('execution_step_'.length);
           executionRow.className = 'chat-tool-step ' + (phase === 'started' ? 'running' : phase === 'failed' ? 'failed' : 'done');
+          var stepMessage = window.ChatRendering && window.ChatRendering.executionStepMessage
+            ? window.ChatRendering.executionStepMessage(parsed.data.kind, phase)
+            : (phase === 'started' ? '正在准备分析…' : phase === 'failed' ? '这一步暂未完成' : '已完成');
           executionRow.textContent = (phase === 'started' ? '⏳ ' : phase === 'failed' ? '❌ ' : '✅ ')
-            + String(parsed.data.kind || '来源') + '：'
-            + (phase === 'started' ? '执行中' : phase === 'failed' ? '未完成' : '已完成');
+            + stepMessage;
           scrollChatToBottom();
         }
       } else if (parsed.event === 'tool_call') {
         // MCP 工具调用：更新思考文案 + 添加工具步骤（⏳ 调用中）
         var toolName = parsed.data.name || '';
         if (isCurrentChatStream(key)) {
-          if (thinkingEl) setThinkingText(thinkingEl, '正在调用工具「' + toolName + '」…');
+          var toolActivity = window.ChatRendering && window.ChatRendering.chatToolActivity
+            ? window.ChatRendering.chatToolActivity(toolName, 'started') : '正在查询相关数据…';
+          if (thinkingEl) setThinkingText(thinkingEl, toolActivity);
           if (!toolStepsEl) {
             toolStepsEl = document.createElement('div');
             toolStepsEl.className = 'chat-tool-steps';
@@ -3155,7 +3157,7 @@ async function submitQuestion(q, key) {
           var step = document.createElement('div');
           step.className = 'chat-tool-step running';
           step.dataset.name = toolName;
-          step.innerHTML = '<span class="chat-tool-step-icon">⏳</span> 正在调用「' + escapeHtml(toolName) + '」…';
+          step.textContent = '⏳ ' + toolActivity;
           toolStepsEl.appendChild(step);
           scrollChatToBottom();
         }
@@ -3169,13 +3171,14 @@ async function submitQuestion(q, key) {
             if (steps[si].dataset && steps[si].dataset.name === rName
                 && steps[si].className.indexOf('running') >= 0) {
               steps[si].className = ok ? 'chat-tool-step done' : 'chat-tool-step failed';
-              steps[si].innerHTML = '<span class="chat-tool-step-icon">' + (ok ? '✅' : '❌') + '</span> '
-                + (ok ? '已获取「' + escapeHtml(rName) + '」数据'
-                     : '获取「' + escapeHtml(rName) + '」失败');
+              var resultMessage = window.ChatRendering && window.ChatRendering.chatToolActivity
+                ? window.ChatRendering.chatToolActivity(rName, ok ? 'completed' : 'failed')
+                : (ok ? '已获取相关数据' : '暂时无法获取相关数据');
+              steps[si].textContent = (ok ? '✅ ' : '❌ ') + resultMessage;
               break;
             }
           }
-          if (thinkingEl) setThinkingText(thinkingEl, ok ? '已获取工具数据，正在整理回答…' : '工具获取失败，继续基于已有信息回答…');
+          if (thinkingEl) setThinkingText(thinkingEl, ok ? '已获取所需数据，正在整理回答…' : '部分数据暂时无法获取，正在根据已有信息回答…');
           scrollChatToBottom();
         }
       } else if (parsed.event === 'supplement_needed') {
@@ -3198,7 +3201,7 @@ async function submitQuestion(q, key) {
             error: function () {
               if (consent.card.parentNode) consent.card.remove();
               appendAssistantRun('#chat-history', {
-                content: '本次未补充成功，已基于现有信息回答',
+                content: '这次没有完成报告补充，已根据现有资料回答。',
                 run: { status: 'partial' },
               });
               scrollChatToBottom();
@@ -3222,7 +3225,7 @@ async function submitQuestion(q, key) {
         else steps.push(stepRun);
         renderResearchProgress();
       } else if (parsed.event === 'research_blocked') {
-        st.researchBlocked = parsed.data.reason || '研究受阻';
+        st.researchBlocked = parsed.data.reason || '暂时无法继续研究';
         if (st.researchRun) st.researchRun.status = 'partial';
         renderResearchProgress();
       } else if (parsed.event === 'research_done') {
@@ -3248,7 +3251,7 @@ async function submitQuestion(q, key) {
           if (parsed.data.retrieval_degraded) {
             var retrievalWarning = document.createElement('div');
             retrievalWarning.className = 'chat-retrieval-warning';
-            retrievalWarning.textContent = '⚠️ 本次未能连接本地财报检索模型，回答未引用 PDF 原文';
+            retrievalWarning.textContent = '⚠️ 本次无法查询本地财报，因此回答未引用 PDF 原文';
             $('#chat-history').appendChild(retrievalWarning);
           }
           scrollChatToBottom();
@@ -3263,7 +3266,8 @@ async function submitQuestion(q, key) {
         });
       } else if (parsed.event === 'error') {
         st.failedRun = parsed.data.run || { status: 'failed', id: st.runId || '' };
-        throw new Error(parsed.data.error || '流式响应出错');
+        st.safeErrorMessage = parsed.data.error || '回答时遇到问题，请稍后重试。';
+        throw new Error(st.safeErrorMessage);
       }
     }
 
@@ -3287,7 +3291,7 @@ async function submitQuestion(q, key) {
         scopeEl = null;
         clearResearchProgress();
         appendAssistantRun('#chat-history', {
-          content: st.answerText,
+          content: st.answerText || (st.stopped ? '回答已停止。' : '连接中断，回答未能完整生成。'),
           run: { status: st.stopped ? 'stopped' : 'failed', id: st.runId || '', research_run_id: (st.researchRun && st.researchRun.id) || '' },
           research_run: st.researchRun || null,
         });
@@ -3323,7 +3327,7 @@ async function submitQuestion(q, key) {
         scopeEl = null;
         clearResearchProgress();
         appendAssistantRun('#chat-history', {
-          content: '⚠️ ' + err.message,
+          content: '⚠️ ' + (st.safeErrorMessage || '暂时无法连接问答服务，请稍后重试。'),
           run: st.failedRun || { status: 'failed', id: st.runId || '' },
           research_run: st.researchRun || null,
         });
@@ -3511,11 +3515,11 @@ function copyChatRunId(button) {
     var copied = false;
     try { copied = document.execCommand('copy'); } catch (_) { /* 浏览器不支持时保留原按钮文案 */ }
     document.body.removeChild(input);
-    setChatRunCopyFeedback(button, copied ? '已复制' : '复制失败');
+    setChatRunCopyFeedback(button, copied ? '已复制反馈编号' : '未能复制编号');
   }
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(runId).then(function () {
-      setChatRunCopyFeedback(button, '已复制');
+      setChatRunCopyFeedback(button, '已复制反馈编号');
     }, fallbackCopy);
   } else {
     fallbackCopy();
@@ -3569,10 +3573,10 @@ async function resumeResearch(runId, button) {
     await consumeSupplementStream(response, {
       research_plan: function () { button.textContent = '正在继续研究…'; },
       research_running: function () { button.textContent = '正在继续研究…'; },
-      research_step_started: function (data) { button.textContent = '正在执行：' + (data.label || '研究步骤'); },
+      research_step_started: function (data) { button.textContent = '正在查询：' + (data.label || '研究资料'); },
       research_step_completed: function (data) { button.textContent = '已完成：' + (data.label || '研究步骤'); },
-      research_step_failed: function (data) { button.textContent = '步骤失败：' + (data.label || '研究步骤'); },
-      research_blocked: function (data) { button.textContent = data.reason || '研究受阻'; },
+      research_step_failed: function (data) { button.textContent = '这一步暂未完成：' + (data.label || '研究资料'); },
+      research_blocked: function (data) { button.textContent = data.reason || '暂时无法继续研究'; },
       done: function (data) { finished = true; appendAssistantRun('#chat-history', { content: data.answer, run: data.run }); }
     });
     if (finished) {
@@ -3584,7 +3588,7 @@ async function resumeResearch(runId, button) {
       button.disabled = false;
     }
   } catch (_) {
-    button.textContent = '继续研究失败';
+    button.textContent = '暂时无法继续研究，请重试';
     button.disabled = false;
   }
 }
@@ -3611,7 +3615,7 @@ function editAndReask(button) {
   if (!question || !input) return;
   input.value = question;
   input.focus();
-  appendChatNotice('<div role="status">已回填该轮原始问题，可编辑后发送。</div>');
+  appendChatNotice('<div role="status">已填入原问题，可修改后发送。</div>');
 }
 
 // 「分支追问」：用既有 POST /api/chat/sessions 新建（或复用空）会话并预填原问题，
@@ -3631,9 +3635,9 @@ async function branchFollowup(button) {
     await loadChatSessions();
     input.value = question;
     input.focus();
-    appendChatNotice('<div role="status">已在新会话中分支追问：确认或修改问题后发送。</div>');
+    appendChatNotice('<div role="status">已在新会话填入原问题，可修改后发送。</div>');
   } catch (_) {
-    appendChatNotice('<div role="status">分支追问失败，请重试。</div>');
+    appendChatNotice('<div role="status">暂时无法开启新会话，请重试。</div>');
   } finally {
     button.disabled = false;
   }

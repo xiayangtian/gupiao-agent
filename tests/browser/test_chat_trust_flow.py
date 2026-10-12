@@ -402,7 +402,7 @@ def test_chat_history_reopens_with_scope_and_pdf_page_link(browser_session, actu
     rendered = _eval(browser_session, _reopen_session_script(session_id))
 
     assert rendered["routeVisible"] is True, "必须路由到真实智能问答页"
-    assert "本公司" in rendered["scopeText"]
+    assert "仅分析这家公司" in rendered["scopeText"]
     assert "601288" in rendered["scopeText"]
     assert "2026 半年报" in rendered["scopeText"]
     assert rendered["pdfPageAttr"] == "40"
@@ -411,7 +411,7 @@ def test_chat_history_reopens_with_scope_and_pdf_page_link(browser_session, actu
     assert "javascript:" not in rendered["pdfHref"]
     assert rendered["pdfText"] == "PDF · 第 40 页"
     assert rendered["webHref"] == web["url"]
-    assert web["title"] in rendered["webText"]
+    assert "农业银行 2026 年半年度报告" in rendered["webText"]
     assert rendered["hasArtifacts"] is True
     assert rendered["artifactsOpen"] is False
     assert rendered["artifactsSummary"] == "证据与来源（2）"
@@ -423,7 +423,7 @@ def test_chat_history_reopens_with_scope_and_pdf_page_link(browser_session, actu
 
 
 def test_chat_industry_scope_labels_local_indexed_sample(browser_session, actual_app_url):
-    """行业扩展必须标注「本地可检索同业样本」，绝不出现「全行业排名」。"""
+    """行业扩展须说明样本来自本地收录报告，绝不暗示全行业排名。"""
     body = {
         "question": "农业银行与同业现金流对比如何？",
         "scope_mode": "company_industry",
@@ -442,8 +442,8 @@ def test_chat_industry_scope_labels_local_indexed_sample(browser_session, actual
     rendered = _eval(browser_session, _reopen_session_script(session_id))
 
     assert rendered["routeVisible"] is True
-    assert "本地可检索同业样本" in rendered["scopeNote"]
-    assert "银行业（数据源分类）" in rendered["scopeText"]
+    assert "仅包含本地已收录的同业报告" in rendered["scopeNote"]
+    assert "银行业" in rendered["scopeText"] and "数据源分类" not in rendered["scopeText"]
     assert "全行业排名" not in rendered["scopeText"]
     assert "全行业排名" not in rendered["scopeNote"]
     body_text = _eval(browser_session, "JSON.stringify(document.body.textContent)")
@@ -465,7 +465,7 @@ def test_stopped_run_is_not_rendered_as_completed(browser_session, actual_app_ur
     body_text = _eval(browser_session, "JSON.stringify(document.querySelector('#chat-history').textContent)")
     assert "已停止" in body_text
     assert "已完成" not in body_text
-    assert "重新生成" in body_text
+    assert "重试回答" in body_text
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
 

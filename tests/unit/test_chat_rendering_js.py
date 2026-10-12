@@ -29,7 +29,7 @@ def test_knowledge_basis_shows_unretrieved_notice_only_for_explicit_flag():
         console.log(JSON.stringify({{knowledge:r.renderRunStatus({{status:'completed',knowledge_basis:'model_knowledge_unretrieved'}}),
           legacy:r.renderRunStatus({{status:'completed'}})}}));"""
     )
-    assert "依据模型常识，未检索外部来源" in result["knowledge"]
+    assert "依据通用知识回答，未查询外部资料" in result["knowledge"]
     assert "未检索外部来源" not in result["legacy"]
 
 
@@ -115,10 +115,10 @@ def test_scope_renderer_identifies_local_industry_sample_and_fallback():
         """
     )
 
-    assert "本地可检索同业样本" in result
+    assert "仅包含本地已收录的同业报告" in result
     assert "601288" in result
     assert "农业银行" in result
-    assert "银行业（数据源分类）" in result
+    assert "银行业" in result and "数据源分类" not in result
     assert "2026 半年报" in result
 
 
@@ -151,11 +151,11 @@ def test_scope_renderer_derives_periods_from_report_ids_and_escapes():
     assert "<农业银行>" not in result["multi"]
     assert "&lt;农业银行&gt;" in result["multi"]
     # 未执行 retrieve 时，不得把范围选择误描述为财报检索。
-    assert "全库范围（未检索财报）" in result["noRetrieval"]
-    assert "全库财报检索" in result["retrieved"]
+    assert "未查询本地财报" in result["noRetrieval"]
+    assert "已查询本地财报" in result["retrieved"]
     assert "<注入>" not in result["multi"]
     # 旧会话缺少执行记录时也必须避免暗示已检索财报。
-    assert "全库范围（未检索财报）" in result["whole"]
+    assert "未查询本地财报" in result["whole"]
 
 
 def test_pdf_artifact_renders_only_one_collapsed_page_link_or_unavailable_state():
@@ -320,7 +320,7 @@ def test_same_source_facts_are_grouped_but_different_times_and_statuses_stay_sep
     html = result["html"]
     assert html.count('class="chat-source-group"') == 3
     assert "10" in html and "11" in html and "12" in html and "13" in html
-    assert "部分取得" in html
+    assert "部分获取" in html
 
 
 def test_unmatched_external_fact_is_not_attributed_to_an_unrelated_source():
@@ -465,7 +465,7 @@ def test_web_artifact_requires_http_url_and_escapes_title():
 
 
 def test_run_status_renders_regenerate_for_incomplete_runs_without_a_fake_continue_placeholder():
-    """停止/部分/失败给出清晰文本与「重新生成」；恢复入口只由真实研究运行提供。"""
+    """停止/部分/失败给出清晰文本与「重试回答」；恢复入口只由真实研究运行提供。"""
     result = _run_node(
         f"""
         const rendering = require({json.dumps(str(CHAT_RENDERING_JS))});
@@ -479,23 +479,23 @@ def test_run_status_renders_regenerate_for_incomplete_runs_without_a_fake_contin
     )
 
     assert "已停止" in result["stopped"]
-    assert "诊断 ID：<code>run-stopped</code>" in result["stopped"]
-    assert 'data-chat-action="copy-run-id"' in result["stopped"]
-    assert "重新生成" in result["stopped"]
+    assert "反馈编号：<code>run-stopped</code>" in result["stopped"]
+    assert 'aria-label="复制反馈编号"' in result["stopped"] and '复制编号' in result["stopped"]
+    assert "重试回答" in result["stopped"]
     assert 'data-chat-action="continue"' not in result["stopped"]
     assert "继续研究" not in result["stopped"]
     assert "部分完成" in result["partial"]
-    assert "诊断 ID：<code>run-partial</code>" in result["partial"]
-    assert "重新生成" in result["partial"]
-    assert "失败" in result["failed"]
-    assert "诊断 ID：<code>run-failed</code>" in result["failed"]
-    assert "重新生成" in result["failed"]
+    assert "反馈编号：<code>run-partial</code>" in result["partial"]
+    assert "重试回答" in result["partial"]
+    assert "未能完成" in result["failed"]
+    assert "反馈编号：<code>run-failed</code>" in result["failed"]
+    assert "重试回答" in result["failed"]
     assert "已完成" in result["completed"]
-    assert "诊断 ID：<code>run-debug-123</code>" in result["completed"]
+    assert "反馈编号：<code>run-debug-123</code>" in result["completed"]
     assert 'data-chat-action="copy-run-id"' in result["completed"]
-    assert 'data-chat-run-id="run-debug-123"' in result["completed"]
-    assert "重新生成" not in result["completed"]
-    assert "历史回答，未保留证据包" in result["legacy"]
+    assert 'data-chat-run-id="run-debug-123"' in result["completed"] and 'aria-label="复制反馈编号"' in result["completed"]
+    assert "重试回答" not in result["completed"]
+    assert "较早的回答，原始来源明细未保存" in result["legacy"]
 
 
 def test_tool_artifact_renders_only_provider_and_as_of_without_summaries():
@@ -515,7 +515,7 @@ def test_tool_artifact_renders_only_provider_and_as_of_without_summaries():
         """
     )
 
-    assert "股票数据 MCP" in result["html"]
+    assert "股票数据服务" in result["html"]
     assert "数据截至 2026-09-10T10:00:00" in result["html"]
     assert "get_financial_metrics" not in result["html"]
     assert "参数摘要" not in result["html"]
@@ -583,9 +583,9 @@ def test_m2_rendering_marks_reference_conflict_and_business_policy():
         }}));
         """
     )
-    assert '实时行情' in result['policy'] and 'get_quote' not in result['policy']
+    assert '行情数据' in result['policy'] and 'get_quote' not in result['policy']
     assert '外部参考' not in result['facts']
-    assert '存在口径/时间差异' in result['facts'] and 'PDF 原文' in result['facts'] and '实时数据' in result['facts']
+    assert '数据口径或时间不一致' in result['facts'] and 'PDF 原文' in result['facts'] and '外部数据' in result['facts']
     assert 'role="status"' in result['verification']
 
 
@@ -598,8 +598,8 @@ def test_research_rendering_shows_business_steps_acceptance_and_recovery_only_wh
         console.log(JSON.stringify({{plan:r.renderResearchPlan(plan), recovery:r.renderResearchRecovery(stopped), completed:r.renderResearchRecovery({{status:'completed', research_run_id:'r1'}})}}));
         """
     )
-    assert '核对来源' in result['plan'] and '完成判据' in result['plan']
-    assert '继续研究' in result['recovery'] and '从步骤：比较' in result['recovery']
+    assert '核对来源' in result['plan'] and '完成标准' in result['plan']
+    assert '继续研究' in result['recovery'] and '可从「比较」继续' in result['recovery']
     assert result['completed'] == ''
 
 
@@ -615,7 +615,7 @@ def test_research_recovery_hides_dead_button_for_finished_or_unavailable_runs():
         console.log(JSON.stringify({{stopped:r.renderResearchRecovery(stopped), finished:r.renderResearchRecovery(finished), withCompletedRun, liveStopped}}));
         """
     )
-    assert '继续研究' in result['stopped'] and '从步骤：比较' in result['stopped']
+    assert '继续研究' in result['stopped'] and '可从「比较」继续' in result['stopped']
     assert result['finished'] == ''
     assert result['withCompletedRun'] == ''
     # 用户刚停止、持久化状态还没回到前端的运行仍要保留入口，不能把停止后的恢复入口也删掉。
@@ -634,7 +634,7 @@ def test_research_steps_render_public_running_failed_and_blocked_states():
     )
     assert '检索已授权披露' in result['running']
     assert '进行中' in result['running']
-    assert '失败' in result['failed']
+    assert '未能完成' in result['failed']
 
 
 def test_workspace_item_shows_persisted_scope_status_and_favorite_actions():
@@ -813,7 +813,7 @@ def test_run_reuse_actions_reuse_existing_run_identity_without_new_privileges():
 
     assert 'data-chat-action="edit-reask"' in result['run']
     assert 'data-chat-action="branch-followup"' in result['run']
-    assert '编辑重问' in result['run'] and '分支追问' in result['run']
+    assert '改写后再问' in result['run'] and '另开会话追问' in result['run']
     assert result['legacy'] == ''
     assert result['missing'] == ''
 
@@ -1031,3 +1031,41 @@ def test_clear_chat_history_destroys_market_charts_before_clearing_dom():
     )
     assert result['available'] is True
     assert result['events'] == ['destroy', 'clear']
+
+
+def test_chat_user_facing_copy_avoids_internal_terms_and_names_actions_clearly():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const facts = r.renderFactsAndConflicts({{facts:[{{metric:'revenue', value:100, unit:'亿元', source_type:'pdf'}}],
+          conflicts:[{{reason:'数值有差异', facts:[{{source_type:'pdf'}}, {{source_type:'tool'}}]}}]}});
+        const verification = r.renderVerification({{status:'partial'}});
+        const summary = r.renderExecutionSummary({{execution_plan:{{source_mode:'general_web', steps:[
+          {{kind:'web_search'}}, {{kind:'answer'}}]}}, source_summary:{{local_pdf:'未使用'}}}});
+        const artifacts = r.renderRunArtifacts({{tool_artifacts:[{{provider:'stock-data-mcp',
+          tool_name:'get_financial_metrics', status:'success', as_of:'2026-10-12'}}]}});
+        console.log(JSON.stringify({{
+          policy:r.renderPolicy({{intent:'research_task'}}), facts, verification, summary, artifacts,
+          toolStarted:r.chatToolActivity('get_financial_metrics','started'),
+          toolDone:r.chatToolActivity('get_financial_metrics','completed'),
+          toolFailed:r.chatToolActivity('get_financial_metrics','failed'),
+          stepStarted:r.executionStepMessage('market_indices','started'),
+          stepFailed:r.executionStepMessage('market_indices','failed'),
+          actions:r.renderRunReuseActions({{id:'run-1'}})
+        }}));
+        """
+    )
+    assert '分步研究与多来源核对' in result['policy'] and '受限' not in result['policy']
+    assert '营业收入' in result['facts'] and 'revenue' not in result['facts']
+    assert '数据口径或时间不一致' in result['facts'] and '外部数据' in result['facts']
+    assert '部分数据来自外部来源' in result['verification']
+    assert '本次参考资料：网页资料、综合分析' in result['summary']
+    assert '未查询本地财报' in result['summary'] and '仅模型' not in result['summary']
+    assert '股票数据服务' in result['artifacts'] and 'MCP' not in result['artifacts']
+    assert 'get_financial_metrics' not in result['artifacts']
+    assert result['toolStarted'] == '正在查询财务指标…'
+    assert result['toolDone'] == '已获取财务指标'
+    assert result['toolFailed'] == '暂时无法获取财务指标'
+    assert result['stepStarted'] == '正在查询 A 股指数行情…'
+    assert result['stepFailed'] == '暂时无法获取 A 股指数行情'
+    assert '改写后再问' in result['actions'] and '另开会话追问' in result['actions']

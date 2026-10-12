@@ -70,9 +70,9 @@ def app_url():
 
 
 @pytest.mark.parametrize(("question", "expected_status", "expected_label"), [
-    ("2026-09-24 A股来源验收成功复盘", "completed", "数据截至 2026-09-24"),
+    ("2026-09-24 A股来源验收成功复盘", "partial", "数据截至 2026-09-24"),
     ("2026-09-24 A股来源验收网页失败复盘", "partial", "获取失败"),
-    ("2026-09-24 A股来源验收全部失败复盘", "partial", "获取失败"),
+    ("2026-09-24 A股来源验收全部失败复盘", "failed", "获取失败"),
 ])
 def test_chat_source_status_and_time_are_visible_in_browser(app_url, question, expected_status, expected_label):
     session = "source-runtime-" + uuid.uuid4().hex
@@ -87,10 +87,10 @@ def test_chat_source_status_and_time_are_visible_in_browser(app_url, question, e
                   "inner:window.innerWidth,status:run?.querySelector('.chat-run-status-label')?.textContent||'',sourceGroups:run?.querySelectorAll('.chat-source-group').length||0,factRows:run?.querySelectorAll('.chat-source-fact-row').length||0};})())")
         dom = json.loads(payload["data"]["result"])
         assert expected_label in dom["text"]
-        assert ({'completed':'已完成','partial':'部分完成'}[expected_status]) in dom["status"]
+        assert ({'completed':'已完成','partial':'部分完成','failed':'未能完成'}[expected_status]) in dom["status"]
         if "网页失败" in question:
             assert "数据截至 2026-09-24" in dom["text"]
-            assert dom["text"].count("腾讯行情 · K 线数据") == 1
+            assert dom["text"].count("A 股指数行情") == 1
             assert dom["sourceGroups"] == 2
             assert dom["factRows"] == 4
         assert dom["width"] <= dom["inner"]

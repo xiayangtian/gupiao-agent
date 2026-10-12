@@ -318,7 +318,7 @@ def test_m2_evaluation_case_runs_through_real_ragqa_policy_gate(client, env, mon
         assert run["facts"] == []
         assert run["status"] != "completed" or run["verification_report"]["status"] != "passed"
     if case["expected_verification"] == "blocked":
-        assert run["content"] == "未找到可核验的披露，不能确认该数值。"
+        assert run["content"] == "没有找到可核实的公开披露，暂时无法确认这个数值。"
 
     # The fake executor is the only external collaborator and receives precisely
     # the calls RagQA admitted; the persisted run is the same SSE completion.

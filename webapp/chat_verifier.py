@@ -14,7 +14,7 @@ _NUMBER_RE = re.compile(
 _MONEY_SCALES = {"元": 1e-8, "万元": 1e-4, "亿元": 1.0}
 
 # blocked 回答的最小降级文案：只说「无法核验该数值」，不整段重写回答。
-SAFE_UNSUPPORTED_CLAIM_TEXT = "未找到可核验的披露，不能确认该数值。"
+SAFE_UNSUPPORTED_CLAIM_TEXT = "没有找到可核实的公开披露，暂时无法确认这个数值。"
 
 # 论断边界：以句末标点或换行切分。
 _SENTENCE_END_RE = re.compile(r"[。！？!?；;\n]")

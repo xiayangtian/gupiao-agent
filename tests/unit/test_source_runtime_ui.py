@@ -22,8 +22,9 @@ def test_source_status_and_unknown_data_time_are_visible_without_merging_sources
     """
     output = subprocess.run([NODE, "-e", script], cwd=ROOT, check=True, capture_output=True, text=True)
     html = json.loads(output.stdout)
-    assert "数据时间未知" in html
+    assert "未提供数据时间" in html
     assert "获取失败" in html
-    assert "部分取得" in html
+    assert "部分获取" in html
     assert "获取于" in html
-    assert html.count("chat-artifact-tool") == 2
+    assert "fixture" not in html and "fund_flow" not in html
+    assert html.count('<section class="chat-source-group"') == 2

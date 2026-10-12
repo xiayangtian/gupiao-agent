@@ -209,7 +209,7 @@ def test_approve_shows_safe_progress_and_resumed_pdf_source(browser_session, act
     # 只接受服务端进度帧渲染的文案：初始本地"setBusy"同时含「下载」与「索引」，
     # 因此不能用这两个词做断言，否则即使没有任何 SSE 帧也会通过。
     assert any("正在下载所选财报" in message for message in rendered["progress"]), rendered["progress"]
-    assert any("财报已索引" in message for message in rendered["progress"]), rendered["progress"]
+    assert any("报告内容已准备好，正在继续回答" in message for message in rendered["progress"]), rendered["progress"]
     assert "已基于补充财报原文恢复回答" in rendered["text"]
     assert "PDF · 第 40 页" in rendered["pdfText"]
     _assert_fixture_only(actual_app_url[1], downloaded=True)
@@ -274,8 +274,8 @@ def test_reloaded_history_shows_authorized_supplement_summary(browser_session, a
 
     assert rendered["hasSummary"] is True
     # 历史按轮次渲染：先暂停的等待轮，再是补充完成后的恢复回答。
-    assert any("等待授权补充财报" in text for text in rendered["waitingStatuses"])
-    assert "本次经授权补充 1 份财报" in rendered["lastSummary"]
+    assert any("等待你确认补充报告" in text for text in rendered["waitingStatuses"])
+    assert "已按你的确认补充 1 份财报" in rendered["lastSummary"]
     assert "2025 半年报" in rendered["lastSummary"]
     assert "已完成" in rendered["historyText"]
     _assert_fixture_only(actual_app_url[1], downloaded=True)
@@ -330,7 +330,7 @@ def test_reloaded_waiting_consent_shows_honest_state_without_confirm_action(
         browser_session, actual_app_url[0], session_id, ".chat-run-status-waiting_consent",
     )
 
-    assert any("等待授权补充财报" in text for text in rendered["waitingStatuses"])
+    assert any("等待你确认补充报告" in text for text in rendered["waitingStatuses"])
     assert rendered["hasSummary"] is True
     assert "待补充报告" in rendered["lastSummary"]
     assert rendered["approveButtons"] == 0

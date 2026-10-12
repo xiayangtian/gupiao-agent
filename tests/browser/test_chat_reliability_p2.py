@@ -102,7 +102,7 @@ def test_knowledge_label_keyboard_and_mobile_overflow(app_url):
         _browser(session, "set", "viewport", "390", "844")
         before = _calls(app_url)
         view = _send(session, "什么是市盈率？")
-        assert "依据模型常识，未检索外部来源" in view["note"]
+        assert "依据通用知识回答，未查询外部资料" in view["note"]
         assert "市盈率" in view["text"]
         assert _calls(app_url) == before
         assert not view["overflow"]

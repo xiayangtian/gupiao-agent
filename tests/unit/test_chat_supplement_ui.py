@@ -44,6 +44,35 @@ def _function_source(source: str, name: str) -> str:
     raise AssertionError(f"unterminated function {name}")
 
 
+def test_initial_thinking_message_is_generic_and_does_not_claim_always_searching_local_knowledge():
+    source = _source()
+    script = "\n".join([
+        _function_source(source, "appendThinkingBubble"),
+        """
+const bubble = {className:'', innerHTML:''};
+const box = {appendChild: function () {}};
+const document = {createElement: function () { return bubble; }};
+const $ = function () { return box; };
+const scrollChatToBottom = function () {};
+appendThinkingBubble("#chat-history");
+console.log(JSON.stringify(bubble.innerHTML));
+""",
+    ])
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    html = json.loads(result.stdout)
+    assert "正在分析你的问题…" in html
+    assert "知识库" not in html and "思考中" not in html
+
+
+def test_chat_progress_and_feedback_messages_use_plain_user_facing_language():
+    server_source = (APP_JS.parents[1] / "server.py").read_text(encoding="utf-8")
+    source = _source()
+    assert "正在准备分析步骤…" in server_source
+    assert "正在制定受限执行计划" not in server_source
+    assert "已复制反馈编号" in source and "未能复制编号" in source
+    assert "暂时无法连接问答服务，请稍后重试。" in source
+
+
 def test_consent_card_is_explicitly_opt_in_and_accessible():
     source = _source()
 
@@ -53,13 +82,15 @@ def test_consent_card_is_explicitly_opt_in_and_accessible():
     assert "selected.size >= payload.limit" in source
     assert "aria-live', 'polite'" in source
     assert "checkbox.setAttribute('aria-label'" in source
+    assert "需要补充财报原文" in source
+    assert "不补充，继续回答" in source
 
 
 def test_selection_count_is_visible_from_zero_and_tracks_every_change():
     source = _source()
 
     assert "function updateSelectionState()" in source
-    assert "'确认补充并继续（' + selected.size + '/' + payload.limit + '）'" in source
+    assert "'下载所选报告并继续（' + selected.size + '/' + payload.limit + '）'" in source
     assert "updateSelectionState();" in source
     # A rejected sixth selection restores its checkbox and still refreshes 5/5.
     assert "checkbox.checked = false;\n          updateSelectionState();\n          return;" in source
@@ -89,7 +120,7 @@ def test_supplement_stream_renders_progress_then_existing_run_renderer():
     assert "supplement_ingested" in source
     assert "supplement_failed" in source
     assert "appendAssistantRun('#chat-history'" in source
-    assert "本次未补充成功，已基于现有信息回答" in source
+    assert "这次没有完成报告补充，已根据现有资料回答。" in source
     assert "parsed.event === 'supplement_needed'" in source
 
 
@@ -116,7 +147,7 @@ consumeSupplementStream({
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout.strip() == "safe EOF rejection"
     # The action catch clears busy controls before it renders this safe fallback.
-    assert "setBusy(false, '本次未补充成功，已基于现有信息回答')" in source
+    assert "setBusy(false, '这次没有完成报告补充，已根据现有资料回答。')" in source
 
 
 def test_consent_card_styles_keep_controls_keyboard_and_mobile_accessible():
@@ -173,12 +204,12 @@ def test_persisted_supplement_summary_reports_what_was_authorized_and_ingested()
         resumed_at="2026-09-15T10:00:00",
     ))
 
-    assert view["headline"] == "本次经授权补充 1 份财报"
+    assert view["headline"] == "已按你的确认补充 1 份财报"
     assert view["periods"] == ["2025 半年报"]
     assert view["waiting"] is False
     # 失败项从受控候选身份推导，不泄露候选 id、报告 id 或下载地址。
     assert view["failures"] == [
-        {"reason": "下载失败", "company": "农业银行", "period": "2024 半年报"},
+        {"reason": "下载未成功", "company": "农业银行", "period": "2024 半年报"},
     ]
     serialized = json.dumps(view, ensure_ascii=False)
     assert "candidate-b" not in serialized
@@ -198,7 +229,7 @@ def test_persisted_supplement_summary_states_declined_and_failed_plainly():
     assert declined["periods"] == []
     assert "补充未成功" in failed["headline"]
     assert failed["failures"] == [
-        {"reason": "索引失败", "company": "农业银行", "period": "2025 半年报"},
+        {"reason": "报告处理未成功", "company": "农业银行", "period": "2025 半年报"},
     ]
 
 
@@ -229,7 +260,7 @@ def test_authorized_headline_counts_each_ingested_report_not_unique_labels():
     ))
 
     # 同一年两份季报的可读标签可去重，但经授权补充数量必须忠实计两份。
-    assert view["headline"] == "本次经授权补充 2 份财报"
+    assert view["headline"] == "已按你的确认补充 2 份财报"
     assert view["periods"] == ["2025 季报"]
 
 
@@ -241,8 +272,8 @@ def test_waiting_consent_run_shows_honest_non_actionable_supplement_state():
 
     assert view["waiting"] is True
     assert view["periods"] == ["2025 半年报"]
-    assert "等待" in view["headline"]
-    assert "等待授权补充财报" in status_html
+    assert "请选择" in view["headline"]
+    assert "等待你确认补充报告" in status_html
     assert "chat-run-status-waiting_consent" in status_html
     # 重载后无法再确认：不得渲染任何失效的确认/重生成按钮。
     assert "button" not in status_html

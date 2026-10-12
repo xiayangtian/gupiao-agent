@@ -28,8 +28,8 @@ def test_m2_report_policy_and_safe_numeric_degradation(browser_session, actual_a
         overflow: document.documentElement.scrollWidth > window.innerWidth}});
     }})()"""
     rendered = _eval(browser_session, script)
-    assert "本地财报查证" in rendered["policy"]
-    assert "未找到可核验的披露" in rendered["text"]
+    assert "本地财报资料" in rendered["policy"]
+    assert "没有找到可核实的公开披露" in rendered["text"]
     assert rendered["overflow"] is False
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
