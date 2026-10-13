@@ -60,8 +60,8 @@
 
 - [x] **Step 1: 写真实应用浏览器回归**：以本地受控 `AnswerRun` 注入两个证券日期点，验证图表和原表格同屏存在；小数据或冲突事实只显示原表格，不产生空图。
 - [x] **Step 2: 运行浏览器回归确认 RED，再实现 fixture/回归修正直至 GREEN**：`python3 -m pytest tests/browser/test_chat_trust_flow.py -q -k 'individual_stock_chart'`。
-- [ ] **Step 3: 更新行情图表和功能目录**：描述新入口、数据资格、单位语义和测试入口；README 仅在使用方式/可见功能索引确有需要时同步。
-- [ ] **Step 4: 运行聚焦验证**：`python3 -m pytest tests/unit/test_chat_rendering_js.py tests/unit/test_chat_market_charts_js.py tests/unit/test_design_registry.py -q`；`node --check webapp/static/chat_rendering.js`；`node --check webapp/static/chat_market_charts.js`；`git diff --check`。
+- [x] **Step 3: 更新行情图表和功能目录**：描述新入口、数据资格、单位语义和测试入口；README 仅在使用方式/可见功能索引确有需要时同步。
+- [x] **Step 4: 运行聚焦验证**：`python3 -m pytest tests/unit/test_chat_rendering_js.py tests/unit/test_chat_market_charts_js.py tests/unit/test_design_registry.py -q`；`node --check webapp/static/chat_rendering.js`；`node --check webapp/static/chat_market_charts.js`；`git diff --check`。
 
 ## Self-review
 

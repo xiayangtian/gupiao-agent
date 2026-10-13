@@ -107,9 +107,9 @@
 - Modify: `docs/superpowers/DESIGN-REGISTRY.md`
 - Modify: `docs/superpowers/specs/2026-10-12-context-aware-followup-search-audit-design.md`
 
-- [ ] **Step 1: 更新功能目录**：记录查询上下文边界、context-only 的无检索条件、query 证据路径和聚焦测试入口；不要把未合入功能写入 README 功能说明。
-- [ ] **Step 2: 执行聚焦回归**：`python3 -m pytest tests/unit/test_chat_followups.py tests/unit/test_chat_request_resolution.py tests/unit/test_execution_plan.py tests/unit/test_execution_planner.py tests/unit/test_execution_executor.py tests/unit/test_chat_evidence.py tests/unit/test_chat_execution.py tests/unit/test_chat_rendering_js.py tests/unit/test_server_api.py tests/unit/test_design_registry.py -q`；`python3 -m pytest tests/browser/test_chat_source_runtime.py -q -k 'query or followup'`；`git diff --check`。
-- [ ] **Step 3: 复核计划覆盖**：检查两类 query 事件（计划执行与 RAG 工具事件）、无 run/损坏 run/跨会话、市场归因、检索禁用、脱敏、UI 转义和重复来源分组。
+- [x] **Step 1: 更新功能目录**：记录查询上下文边界、context-only 的无检索条件、query 证据路径和聚焦测试入口；README 和功能目录已在代码 fast-forward 合入后同步更新。
+- [x] **Step 2: 执行聚焦回归**：`python3 -m pytest tests/unit/test_chat_followups.py tests/unit/test_chat_request_resolution.py tests/unit/test_execution_plan.py tests/unit/test_execution_planner.py tests/unit/test_execution_executor.py tests/unit/test_chat_evidence.py tests/unit/test_chat_execution.py tests/unit/test_chat_rendering_js.py tests/unit/test_server_api.py tests/unit/test_design_registry.py -q`；`python3 -m pytest tests/browser/test_chat_trust_flow.py -q -k 'web_search_source_details or individual_stock_chart'`；`git diff --check`。
+- [x] **Step 3: 复核计划覆盖**：检查两类 query 事件（计划执行与 RAG 工具事件）、无 run/损坏 run/跨会话、市场归因、检索禁用、脱敏、UI 转义和重复来源分组；独立审查无 Critical/Important 发现。
 
 ## Self-review
 
