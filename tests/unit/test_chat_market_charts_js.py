@@ -67,6 +67,35 @@ def test_market_chart_config_is_line_chart_with_date_raw_point_and_change_toolti
     assert "+1.00%" in result["tooltipLabel"]
 
 
+def test_stock_chart_uses_raw_prices_on_axis_and_relative_change_in_tooltip():
+    result = _run_node(
+        f"""
+        const charts = require({json.dumps(str(CHARTS_JS))});
+        const config = charts.chartConfig({{
+          mode:'stock_price', unit:'元/股', periods:['2026-01-05','2026-01-06'],
+          series:[{{code:'600900', label:'长江电力', closeValues:[10,11], changePctValues:[0,10]}}]
+        }});
+        const tooltip = config.options.plugins.tooltip.callbacks;
+        const item = {{label:'2026-01-06', dataset:config.data.datasets[0], dataIndex:1, parsed:{{y:11}}}};
+        console.log(JSON.stringify({{
+          data:config.data.datasets[0].data,
+          yTitle:config.options.scales.y.title.text,
+          yTick:config.options.scales.y.ticks.callback(11),
+          tooltip:tooltip.label(item),
+          title:tooltip.title([item])
+        }}));
+        """
+    )
+    assert result['data'] == [10, 11]
+    assert '元/股' in result['yTitle']
+    assert '11' in result['yTick']
+    assert result['title'] == '2026-01-06'
+    assert '长江电力' in result['tooltip']
+    assert '11' in result['tooltip']
+    assert '较首个采样点' in result['tooltip']
+    assert '+10.00%' in result['tooltip']
+
+
 def test_market_chart_mount_fallback_and_destroy_all_manage_chart_instances():
     result = _run_node(
         f"""

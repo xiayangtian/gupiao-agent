@@ -102,6 +102,27 @@ def test_financial_trend_keeps_fiscal_period_contract():
     assert result.allowed_source_kinds == frozenset({"retrieve"})
 
 
+def test_contextual_display_followup_is_answer_only_but_market_causation_is_not():
+    from webapp.chat_followups import PreviousTurnContext
+
+    previous = PreviousTurnContext(
+        question="分析长江电力近五日走势", answer="长江电力行情。", run_id="r1",
+        status="completed", source_mode="external_market", steps=("market_kline",),
+        companies=({"code": "600900", "name": "长江电力"},), facts=(), tools=(),
+    )
+    display = resolve_chat_request("这个为什么没画图？", ScopeRequest.auto(), None, NOW,
+                                  previous_context=previous)
+    assert isinstance(display, ResolvedRequest)
+    assert display.context_only_followup is True
+    assert display.route.intent == "general_knowledge"
+    assert display.allowed_source_kinds == frozenset()
+
+    cause = resolve_chat_request("长江电力股价为什么涨了？", ScopeRequest.auto(), None, NOW,
+                                 previous_context=previous)
+    assert isinstance(cause, ResolvedRequest)
+    assert cause.context_only_followup is False
+
+
 def test_market_request_conflicting_with_whole_corpus_scope_clarifies():
     result = resolve_chat_request("分析福耀玻璃近期行情", ScopeRequest.whole_corpus(), None, NOW)
 

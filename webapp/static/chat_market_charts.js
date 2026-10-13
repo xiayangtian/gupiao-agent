@@ -1,4 +1,4 @@
-/* Accessible Chart.js line charts for multi-index chat answers. */
+/* Accessible Chart.js line charts for chat market answers. */
 (function (root, factory) {
   var api = factory(root);
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -25,6 +25,8 @@
   function chartConfig(data) {
     var periods = Array.isArray(data && data.periods) ? data.periods : [];
     var series = Array.isArray(data && data.series) ? data.series : [];
+    var stockPrice = data && data.mode === 'stock_price';
+    var unit = String(data && data.unit || '元/股');
     return {
       type: 'line',
       data: {
@@ -32,9 +34,12 @@
         datasets: series.map(function (item, index) {
           var color = PALETTE[index % PALETTE.length];
           return {
-            label: String(item.label || item.code || '指数'),
-            data: Array.isArray(item.changePctValues) ? item.changePctValues : [],
+            label: String(item.label || item.code || (stockPrice ? '个股' : '指数')),
+            data: stockPrice
+              ? (Array.isArray(item.closeValues) ? item.closeValues : [])
+              : (Array.isArray(item.changePctValues) ? item.changePctValues : []),
             rawValues: Array.isArray(item.closeValues) ? item.closeValues : [],
+            changePctValues: Array.isArray(item.changePctValues) ? item.changePctValues : [],
             borderColor: color,
             backgroundColor: color,
             borderWidth: 2,
@@ -62,9 +67,11 @@
                 var dataset = context && context.dataset || {};
                 var index = Number(context && context.dataIndex);
                 var close = Array.isArray(dataset.rawValues) ? dataset.rawValues[index] : null;
-                var change = context && context.parsed ? context.parsed.y : null;
-                return String(dataset.label || '指数') + '：' + formatClose(close) + ' 点（区间 '
-                  + formatPercent(change) + '）';
+                var changes = Array.isArray(dataset.changePctValues) ? dataset.changePctValues : [];
+                var change = changes[index];
+                return String(dataset.label || (stockPrice ? '个股' : '指数')) + '：' + formatClose(close)
+                  + (stockPrice ? ' ' + unit : ' 点') + '（'
+                  + (stockPrice ? '较首个采样点 ' : '区间 ') + formatPercent(change) + '）';
               },
             },
           },
@@ -75,8 +82,8 @@
             ticks: { maxTicksLimit: 7, maxRotation: 0, autoSkip: true },
           },
           y: {
-            title: { display: true, text: '区间涨跌幅（%）' },
-            ticks: { callback: formatPercent },
+            title: { display: true, text: stockPrice ? '收盘价（' + unit + '）' : '区间涨跌幅（%）' },
+            ticks: { callback: stockPrice ? formatClose : formatPercent },
           },
         },
       },
@@ -125,8 +132,8 @@
     var message = container.querySelector('.chat-market-chart-fallback');
     if (message) { message.hidden = true; message.textContent = ''; }
     var rendering = root && root.ChatRendering;
-    var data = rendering && typeof rendering.marketIndexChartData === 'function'
-      ? rendering.marketIndexChartData(run) : null;
+    var data = rendering && typeof rendering.marketChartData === 'function'
+      ? rendering.marketChartData(run) : null;
     if (!data) return null;
     var ChartClass = root && root.Chart;
     if (!ChartClass || root.__chartFailed) {

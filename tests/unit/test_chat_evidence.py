@@ -162,6 +162,16 @@ def test_tool_artifact_redacts_secret_arguments_and_limits_result_summary():
     assert len(artifact.result_summary) <= 500
 
 
+def test_tool_argument_query_retains_up_to_300_characters():
+    query = "行情" * 180
+    artifact = EvidenceNormalizer().normalize_tool_event(
+        "web_search", {"query": query}, "搜索结果", provider="web",
+        as_of="2026-10-12T10:00:00+08:00", ok=True,
+    )
+
+    assert json.loads(artifact.arguments_summary)["query"] == query[:300]
+
+
 def test_failed_tool_event_keeps_failure_status_without_as_of():
     artifact = EvidenceNormalizer().normalize_tool_event(
         "quote",

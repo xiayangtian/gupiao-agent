@@ -41,6 +41,41 @@ def test_plan_rejects_unknown_fields_and_unknown_step_kind():
         })
 
 
+def test_plan_carries_bounded_search_query_without_granting_source_permission():
+    plan = ExecutionPlan.from_dict({
+        "objective": "搜索相关事件", "source_mode": "general_web",
+        "steps": [{"id": "web", "kind": "web_search"}, {"id": "answer", "kind": "answer"}],
+        "acceptance": ["回答附来源"], "search_query": "长江电力 近五日股价变化 原因",
+    })
+    valid, issues = validate_execution_plan(plan, Scope.whole_corpus(), {"web_search"}, 1)
+    assert plan.search_query == "长江电力 近五日股价变化 原因"
+    assert valid == plan and issues == ()
+
+    with pytest.raises(ValueError, match="search_query"):
+        ExecutionPlan.from_dict({
+            "objective": "x", "source_mode": "general_web", "steps": [{"id": "answer", "kind": "answer"}],
+            "acceptance": ["x"], "search_query": "x" * 301,
+        })
+
+
+def test_conversation_context_plan_is_answer_only_and_cannot_carry_search_query():
+    plan = ExecutionPlan.from_dict({
+        "objective": "解释上一轮图表", "source_mode": "conversation_context",
+        "steps": [{"id": "answer", "kind": "answer"}], "acceptance": ["只用上一轮上下文"],
+    })
+    valid, issues = validate_execution_plan(plan, Scope.whole_corpus(), set(), 0)
+    assert valid == plan and issues == ()
+
+    search = ExecutionPlan.from_dict({
+        "objective": "不应调用来源", "source_mode": "conversation_context",
+        "steps": [{"id": "web", "kind": "web_search"}, {"id": "answer", "kind": "answer"}],
+        "acceptance": ["x"],
+    })
+    valid, issues = validate_execution_plan(search, Scope.whole_corpus(), {"web_search"}, 1)
+    assert valid is None
+    assert "conversation_context_boundary" in {issue.code for issue in issues}
+
+
 def test_validator_rejects_plan_without_terminal_answer_or_with_unavailable_step():
     plan = ExecutionPlan.from_dict({
         "objective": "x", "source_mode": "external_market",

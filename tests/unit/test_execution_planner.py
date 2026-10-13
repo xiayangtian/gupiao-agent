@@ -84,6 +84,26 @@ def test_authoritative_window_is_visible_to_planner_but_not_model_selectable():
     assert snapshots[0]["authoritative_window"] == window
 
 
+def test_planner_receives_bounded_conversation_context_and_keeps_generated_search_query():
+    snapshots = []
+    planner = ExecutionPlanner(lambda _question, snapshot: (
+        snapshots.append(dict(snapshot)) or {
+            "objective": "查询上一轮主体的外部信息", "source_mode": "general_web",
+            "steps": [{"id": "web", "kind": "web_search"}, {"id": "answer", "kind": "answer"}],
+            "acceptance": ["来源可核验"], "search_query": "长江电力 近期走势 原因",
+        }
+    ))
+    context = '{"previous_user_question":"分析长江电力走势","companies":[{"code":"600900"}]}'
+    result = planner.plan(
+        "那上涨原因呢？", Scope.whole_corpus(), PlanningCapabilities({"web_search"}, 1),
+        conversation_context=context,
+    )
+
+    assert result.plan is not None
+    assert result.plan.search_query == "长江电力 近期走势 原因"
+    assert snapshots[0]["conversation_context"] == context
+
+
 def test_company_recent_trend_forces_quote_and_kline_not_indices():
     from webapp.chat_models import CompanyRef, Scope
     planner = ExecutionPlanner(lambda question, snapshot: {

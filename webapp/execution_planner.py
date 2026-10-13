@@ -72,6 +72,7 @@ class ExecutionPlanner:
         self, question: str, scope: Scope, capabilities: PlanningCapabilities,
         *, authoritative_intent: str | None = None,
         authoritative_window: Mapping[str, Any] | None = None,
+        conversation_context: str = "",
     ) -> PlanningResult:
         if self._json_planner is None:
             return PlanningResult("fallback", issues=(PlanIssue("planner_unavailable", "执行计划模型当前不可用。"),))
@@ -80,6 +81,8 @@ class ExecutionPlanner:
             snapshot["authoritative_intent"] = authoritative_intent
         if authoritative_window is not None:
             snapshot["authoritative_window"] = dict(authoritative_window)
+        if isinstance(conversation_context, str) and conversation_context.strip():
+            snapshot["conversation_context"] = conversation_context.strip()[:4000]
         try:
             raw = self._json_planner(question, snapshot)
             candidate = ExecutionPlan.from_dict(raw)

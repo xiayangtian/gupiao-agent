@@ -157,7 +157,7 @@ def _report_scope_key(report_id: str) -> str:
     return f"{parts[0]}:{parts[1]}"
 
 
-def _safe_arguments_summary(arguments: Any) -> str:
+def safe_arguments_summary(arguments: Any) -> str:
     """白名单过滤 + 脱敏后的参数摘要；非受控结构一律丢弃。"""
     if not isinstance(arguments, Mapping):
         return ""
@@ -166,7 +166,8 @@ def _safe_arguments_summary(arguments: Any) -> str:
         if not isinstance(key, str) or key not in SAFE_ARGUMENT_KEYS:
             continue
         if isinstance(value, str):
-            filtered[key] = _redact_secrets(value)[:_ARGUMENT_VALUE_MAX_CHARS]
+            value_limit = 300 if key == "query" else _ARGUMENT_VALUE_MAX_CHARS
+            filtered[key] = _redact_secrets(value)[:value_limit]
         elif isinstance(value, bool) or value is None:
             filtered[key] = value
         elif isinstance(value, (int, float)):
@@ -297,7 +298,7 @@ class EvidenceNormalizer:
             tool_name=name,
             as_of=as_of,
             status="success" if ok else "failed",
-            arguments_summary=_safe_arguments_summary(arguments),
+            arguments_summary=safe_arguments_summary(arguments),
             result_summary=_safe_result_summary(summary),
         )
 

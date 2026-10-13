@@ -328,6 +328,65 @@ def _overflow_script(session_id: str) -> str:
 """
 
 
+def _search_query_source_script(session_id: str) -> str:
+    return f"""
+(async () => {{
+  await openChatSession({json.dumps(session_id)});
+  window.appendAssistantRun('#chat-history', {{content:'搜索来源详情测试。', run:{{
+    status:'completed', execution_plan:{{source_mode:'general_web'}}, tool_artifacts:[
+      {{provider:'web', tool_name:'web_search', status:'success', arguments_summary:JSON.stringify({{query:'长江电力 <img src=x>'}})}},
+      {{provider:'web', tool_name:'web_search', status:'success', arguments_summary:JSON.stringify({{query:'A股 最新公告'}})}}
+    ]
+  }}}});
+  const details = document.querySelector('#chat-history .chat-artifacts');
+  const collapsedByDefault = details && !details.open;
+  if (details) details.open = true;
+  const queries = [...document.querySelectorAll('#chat-history .chat-source-meta')]
+    .filter(element => element.textContent.startsWith('搜索词：'));
+  return JSON.stringify({{
+    collapsedByDefault, labels:queries.map(element => element.textContent),
+    injectedImages:document.querySelectorAll('#chat-history .chat-source-meta img').length
+  }});
+}})()
+"""
+
+
+def _individual_stock_chart_script(session_id: str, run: dict) -> str:
+    return f"""
+(async () => {{
+  await openChatSession({json.dumps(session_id)});
+  let fetchCount = 0;
+  const originalFetch = window.fetch;
+  window.fetch = function (...args) {{ fetchCount += 1; return originalFetch.apply(this, args); }};
+  window.appendAssistantRun('#chat-history', {{content:'个股行情浏览器测试。', run:{json.dumps(run, ensure_ascii=False)}}});
+  window.fetch = originalFetch;
+  const deadline = Date.now() + 5000;
+  let canvas = document.querySelector('#chat-history .chat-market-chart canvas');
+  let chart = null;
+  while (canvas && Date.now() < deadline) {{
+    chart = window.Chart && typeof window.Chart.getChart === 'function' ? window.Chart.getChart(canvas) : null;
+    if (!chart && window.Chart && window.Chart.instances) {{
+      chart = Object.values(window.Chart.instances).find(instance => instance.canvas === canvas) || null;
+    }}
+    if (chart) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }}
+  const figure = document.querySelector('#chat-history .chat-market-chart');
+  const tooltip = chart && chart.options.plugins.tooltip.callbacks.label({{
+    dataset:chart.data.datasets[0], dataIndex:chart.data.datasets[0].data.length - 1,
+    parsed:{{y:chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1]}}
+  }});
+  return JSON.stringify({{
+    rendered:!!chart, mode:chart && chart.data.datasets[0].data,
+    yTitle:chart && chart.options.scales.y.title.text,
+    tooltip, title:figure && figure.querySelector('h4').textContent,
+    table:!!document.querySelector('#chat-history .chat-inline-market-object table'),
+    queryCount:fetchCount, overflow:document.documentElement.scrollWidth > window.innerWidth
+  }});
+}})()
+"""
+
+
 def _multi_index_chart_script(session_id: str, run: dict) -> str:
     return f"""
 (async () => {{
@@ -488,6 +547,50 @@ def test_chat_layout_has_no_horizontal_overflow_across_viewports(browser_session
     if viewport[0] <= 640:
         assert rendered["chatHistoryBottom"] <= rendered["chatPageBottom"] + 1
         assert rendered["inputBottom"] <= rendered["innerHeight"] + 1
+    assert _console_errors(browser_session) == []
+    assert _page_errors(browser_session) == []
+
+
+def test_web_search_source_details_show_each_escaped_actual_query(browser_session, actual_app_url):
+    session_id, _ = _create_completed_chat(actual_app_url, question="农业银行经营现金流如何？")
+    _run_browser(browser_session, "open", f"{actual_app_url}/#/chat")
+    _start_observing(browser_session)
+    rendered = _eval(browser_session, _search_query_source_script(session_id))
+
+    assert rendered["collapsedByDefault"] is True
+    assert rendered["labels"] == ["搜索词：长江电力 <img src=x>", "搜索词：A股 最新公告"]
+    assert rendered["injectedImages"] == 0
+    assert _console_errors(browser_session) == []
+    assert _page_errors(browser_session) == []
+
+
+@pytest.mark.parametrize("viewport", [(1280, 900), (390, 844)])
+def test_individual_stock_chart_uses_price_axis_and_keeps_facts_table(browser_session, actual_app_url, viewport):
+    session_id, _ = _create_completed_chat(actual_app_url, question="农业银行经营现金流如何？")
+    run = {
+        "status": "completed", "intent_decision": {"intent": "realtime_market"},
+        "execution_plan": {"source_mode": "external_market", "market_window": {"label": "近3日"}},
+        "scope": {"companies": [{"code": "600900", "name": "长江电力"}]},
+        "facts": [
+            {"metric": "price", "value": value, "unit": "元/股", "period": day,
+             "period_kind": "daily", "entity_scope": "security", "company_code": "600900",
+             "source_type": "tool", "source_category": "market", "verification": "reference"}
+            for day, value in [("2026-10-08", 29.1), ("2026-10-09", 29.25), ("2026-10-12", 29.4)]
+        ],
+    }
+    _run_browser(browser_session, "set", "viewport", str(viewport[0]), str(viewport[1]))
+    _run_browser(browser_session, "open", f"{actual_app_url}/#/chat")
+    _start_observing(browser_session)
+    rendered = _eval(browser_session, _individual_stock_chart_script(session_id, run))
+
+    assert rendered["rendered"] is True
+    assert rendered["mode"] == [29.1, 29.25, 29.4]
+    assert "元/股" in rendered["yTitle"]
+    assert "29.4" in rendered["tooltip"] and "+1.03%" in rendered["tooltip"]
+    assert rendered["title"] == "个股收盘价走势"
+    assert rendered["table"] is True
+    assert rendered["queryCount"] == 0
+    assert rendered["overflow"] is False
     assert _console_errors(browser_session) == []
     assert _page_errors(browser_session) == []
 

@@ -22,6 +22,7 @@ from webapp.source_adapters import normalize_source
 
 from .reranker import Reranker, _maybe_rerank
 from .store import RagStore
+from .web_search import normalize_search_query
 
 logger = logging.getLogger(__name__)
 
@@ -1187,11 +1188,11 @@ class RagQA:
         frozen company identities.  Whole-corpus queries retain the legacy text
         unchanged; they deliberately have no company boundary to bind.
         """
-        if scope is None or scope.mode == "whole_corpus":
-            return arguments
-        query = arguments.get("query")
-        if not isinstance(query, str) or not query.strip():
+        query = normalize_search_query(arguments.get("query"))
+        if not query:
             return None
+        if scope is None or scope.mode == "whole_corpus":
+            return {**arguments, "query": query}
         allowed_codes = {report_id.split(":", 1)[0] for report_id in scope.report_ids}
         allowed_codes.update(company.code for company in scope.companies)
         if any(code not in allowed_codes for code in cls._query_identity_codes(query, resolver)):
@@ -1199,7 +1200,7 @@ class RagQA:
         identities = [f"{company.name}（{company.code}）" for company in scope.companies]
         identities.extend(code for code in sorted(allowed_codes) if code not in {company.code for company in scope.companies})
         bound = dict(arguments)
-        bound["query"] = f"范围限定公司：{'、'.join(identities)}；{query.strip()}"
+        bound["query"] = normalize_search_query(f"范围限定公司：{'、'.join(identities)}；{query}")
         return bound
 
     @staticmethod

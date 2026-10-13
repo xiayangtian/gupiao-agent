@@ -262,6 +262,7 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
             tool_name=result.operation[:120] or "source",
             as_of=result.as_of if status in {"success", "partial"} else "",
             status=status,
+            arguments_summary=(result.arguments_summary if result.provider == "web" and result.operation == "web_search" else ""),
             result_summary=artifact_summary,
             fetched_at=result.fetched_at,
             source_id=result.call_id,

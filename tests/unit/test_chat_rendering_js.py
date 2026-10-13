@@ -23,6 +23,24 @@ def _run_node(source: str) -> dict:
     return json.loads(completed.stdout)
 
 
+def test_web_search_queries_are_visible_separately_and_escaped_in_source_details():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const html = r.renderRunArtifacts({{tool_artifacts:[
+          {{provider:'web', tool_name:'web_search', status:'partial', arguments_summary:JSON.stringify({{query:'长江电力 <img src=x>'}})}},
+          {{provider:'web', tool_name:'web_search', status:'partial', arguments_summary:JSON.stringify({{query:'A股 最新公告'}})}}
+        ]}});
+        console.log(JSON.stringify({{html}}));
+        """
+    )
+    html = result['html']
+    assert html.count('搜索词：') == 2
+    assert '长江电力 &lt;img src=x&gt;' in html
+    assert 'A股 最新公告' in html
+    assert '<img src=x>' not in html
+
+
 def test_knowledge_basis_shows_unretrieved_notice_only_for_explicit_flag():
     result = _run_node(
         f"""const r=require({json.dumps(str(CHAT_RENDERING_JS))});
@@ -1009,6 +1027,53 @@ def test_render_inline_market_facts_places_accessible_index_chart_before_point_t
     assert html.index('<figure class="chat-market-chart"') < html.index('chat-inline-market-object')
     assert 'chat-inline-market-object' in result['oneIndex']
     assert 'data-chat-market-chart' not in result['oneIndex']
+
+
+def test_individual_stock_chart_uses_raw_close_prices_and_rejects_unqualified_series():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const fact = (period, value, extra={{}}) => ({{
+          metric:'price', value, unit:'元/股', period, period_kind:'daily', entity_scope:'security',
+          company_code:'600900', source_type:'tool', source_category:'market', verification:'reference',
+          ...extra
+        }});
+        const facts = [fact('2026-01-07',11), fact('2026-01-05',10), fact('2026-01-06',10.5)];
+        const run = {{execution_plan:{{source_mode:'external_market', market_window:{{label:'近3日'}}}},
+          scope:{{companies:[{{code:'600900',name:'长江电力'}}]}}, facts}};
+        const available = typeof r.marketChartData === 'function';
+        const data = available ? r.marketChartData(run) : null;
+        const html = r.renderInlineMarketFacts(run);
+        const single = available ? r.marketChartData({{...run, facts:[fact('2026-01-05',10)]}}) : null;
+        const conflict = available ? r.marketChartData({{...run, facts:[fact('2026-01-05',10), fact('2026-01-05',11), fact('2026-01-06',12)]}}) : null;
+        const mixed = available ? r.marketChartData({{...run, facts:[fact('2026-01-05',10), fact('2026-01-06',11,{{period_kind:'weekly'}})]}}) : null;
+        const badDate = available ? r.marketChartData({{...run, facts:[fact('2026-02-30',10), fact('2026-03-01',11)]}}) : null;
+        const wrongScope = available ? r.marketChartData({{...run, facts:[fact('2026-01-05',10,{{entity_scope:'index'}}), fact('2026-01-06',11,{{entity_scope:'index'}})]}}) : null;
+        const scopeMismatch = available ? r.marketChartData({{...run, scope:{{companies:[{{code:'601288',name:'农业银行'}}]}}}}) : null;
+        const weekly = available ? r.marketChartData({{...run, facts:[fact('2026-01-05',10,{{period_kind:'weekly'}}), fact('2026-01-12',12,{{period_kind:'weekly'}})]}}) : null;
+        const monthly = available ? r.marketChartData({{...run, facts:[fact('2026-01-01',10,{{period_kind:'monthly'}}), fact('2026-02-01',12,{{period_kind:'monthly'}})]}}) : null;
+        const duplicate = available ? r.marketChartData({{...run, facts:[fact('2026-01-05',10), fact('2026-01-05',10), fact('2026-01-06',11)]}}) : null;
+        const invalidValue = available ? r.marketChartData({{...run, facts:[fact('2026-01-05',0), fact('2026-01-06',11)]}}) : null;
+        const badSource = available ? r.marketChartData({{...run, facts:[fact('2026-01-05',10,{{source_type:'pdf'}}), fact('2026-01-06',11,{{source_type:'pdf'}})]}}) : null;
+        console.log(JSON.stringify({{available, data, html, single, conflict, mixed, badDate, wrongScope, scopeMismatch, weekly, monthly, duplicate, invalidValue, badSource}}));
+        """
+    )
+    assert result['available'] is True
+    assert result['data']['mode'] == 'stock_price'
+    assert result['data']['periods'] == ['2026-01-05', '2026-01-06', '2026-01-07']
+    assert result['data']['series'][0]['closeValues'] == [10, 10.5, 11]
+    assert result['data']['series'][0]['changePctValues'] == pytest.approx([0, 5, 10])
+    assert result['single'] is None and result['conflict'] is None
+    assert result['mixed'] is None and result['badDate'] is None and result['wrongScope'] is None
+    assert result['scopeMismatch'] is None
+    assert result['weekly']['periodKind'] == 'weekly'
+    assert result['monthly']['periodKind'] == 'monthly'
+    assert result['duplicate']['periods'] == ['2026-01-05', '2026-01-06']
+    assert result['invalidValue'] is None and result['badSource'] is None
+    assert 'aria-label="长江电力收盘价折线图"' in result['html']
+    assert '个股收盘价' in result['html']
+    assert 'data-chat-market-chart' in result['html']
+    assert result['html'].index('<figure class="chat-market-chart"') < result['html'].index('chat-inline-market-object')
 
 
 def test_clear_chat_history_destroys_market_charts_before_clearing_dom():

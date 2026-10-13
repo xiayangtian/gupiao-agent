@@ -49,6 +49,20 @@ def test_tavily_search_returns_sanitized_sources():
     }]
 
 
+def test_tavily_search_uses_bounded_redacted_query_for_actual_request_and_result():
+    session = FakeSession(FakeResponse({"results": []}))
+    search = TavilyWebSearch("test-key", session=session)
+    raw_query = "长江电力 api_key=do-not-send " + ("走势 " * 100)
+
+    result = json.loads(search.search(raw_query))
+
+    actual_query = session.calls[0]["json"]["query"]
+    assert actual_query == result["query"]
+    assert len(actual_query) <= 300
+    assert "do-not-send" not in actual_query
+    assert "api_key=[已隐藏]" in actual_query
+
+
 def test_tavily_search_missing_key_does_not_send_request():
     session = FakeSession(FakeResponse({}))
     result = TavilyWebSearch("", session=session).search("测试")

@@ -327,13 +327,20 @@
       var fetchedAt = String(tool.fetched_at || '');
       var sourceId = String(tool.source_id || '');
       var status = String(tool.status || '');
+      var searchQuery = '';
+      if ((provider === 'web' || provider === 'web_search') && toolName === 'web_search') {
+        try {
+          var args = JSON.parse(String(tool.arguments_summary || '{}'));
+          if (args && typeof args.query === 'string') searchQuery = args.query.slice(0, 300);
+        } catch (_) { /* malformed historical summaries remain hidden */ }
+      }
       if (!provider && !toolName) return;
-      // 同来源、工具、数据时间和状态归组；时间或成功状态不同则保留为独立组。
-      var key = JSON.stringify([provider, toolName, asOf, status]);
+      // 搜索词不同的调用必须保留为独立来源组；其余字段仍按既有来源身份归组。
+      var key = JSON.stringify([provider, toolName, asOf, status, searchQuery]);
       var entry = byKey[key];
       if (!entry) {
         entry = { provider: provider || '外部数据', toolName: toolName, asOf: asOf,
-          fetchedAt: [], sourceIds: [], status: status, facts: [] };
+          fetchedAt: [], sourceIds: [], status: status, searchQuery: searchQuery, facts: [] };
         byKey[key] = entry;
         entries.push(entry);
       }
@@ -530,22 +537,79 @@
     };
   }
 
+  function marketChartData(run) {
+    var indexData = marketIndexChartData(run);
+    if (indexData) return Object.assign({ mode: 'index_change' }, indexData);
+    if (!run || typeof run !== 'object') return null;
+    var plan = run.execution_plan && typeof run.execution_plan === 'object' ? run.execution_plan : {};
+    if (String(plan.source_mode || '') !== 'external_market') return null;
+
+    var scopedCompanies = run.scope && Array.isArray(run.scope.companies) ? run.scope.companies : [];
+    var scopedCodes = scopedCompanies.map(function (item) { return item && String(item.code || ''); }).filter(Boolean);
+    var candidates = (Array.isArray(run.facts) ? run.facts : []).filter(function (fact) {
+      return fact && (!scopedCodes.length || scopedCodes.indexOf(String(fact.company_code || '')) !== -1)
+        && fact.metric === 'price' && fact.source_category === 'market'
+        && fact.source_type === 'tool' && fact.verification === 'reference'
+        && fact.entity_scope === 'security' && typeof fact.company_code === 'string'
+        && fact.company_code && typeof fact.value === 'number' && Number.isFinite(fact.value)
+        && fact.value > 0 && typeof fact.unit === 'string' && fact.unit
+        && ['daily', 'weekly', 'monthly'].indexOf(String(fact.period_kind || '')) !== -1;
+    });
+    var byCode = {};
+    candidates.forEach(function (fact) {
+      var date = String(fact.period || '');
+      if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(date)) return;
+      var parsed = new Date(date + 'T00:00:00Z');
+      if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) return;
+      var group = byCode[fact.company_code];
+      if (!group) {
+        group = { code: fact.company_code, unit: fact.unit, periodKind: fact.period_kind, values: {}, invalid: false };
+        byCode[fact.company_code] = group;
+      }
+      if (group.unit !== fact.unit || group.periodKind !== fact.period_kind) group.invalid = true;
+      if (Object.prototype.hasOwnProperty.call(group.values, date)) {
+        if (group.values[date] !== fact.value) group.invalid = true;
+      } else {
+        group.values[date] = fact.value;
+      }
+    });
+    var codes = Object.keys(byCode);
+    if (codes.length !== 1) return null;
+    var group = byCode[codes[0]];
+    var periods = Object.keys(group.values).sort();
+    if (group.invalid || periods.length < 2) return null;
+    var closeValues = periods.map(function (period) { return group.values[period]; });
+    var baseline = closeValues[0];
+    var companies = run.scope && Array.isArray(run.scope.companies) ? run.scope.companies : [];
+    var company = companies.filter(function (item) { return item && String(item.code || '') === group.code; })[0];
+    var label = company ? String(company.name || group.code) : group.code;
+    return {
+      mode: 'stock_price', periods: periods, periodKind: group.periodKind, unit: group.unit,
+      series: [{ code: group.code, label: label, closeValues: closeValues,
+        changePctValues: closeValues.map(function (value) { return (value / baseline - 1) * 100; }) }]
+    };
+  }
+
   function renderMarketIndexChart(data) {
     if (!data || !Array.isArray(data.periods) || !Array.isArray(data.series)) return '';
     var baseline = String(data.periods[0] || '');
-    var names = data.series.map(function (series) { return String(series.label || series.code || '指数'); });
+    var stockPrice = data.mode === 'stock_price';
+    var title = stockPrice ? '个股收盘价走势' : '多指数区间走势';
+    var names = data.series.map(function (series) { return String(series.label || series.code || (stockPrice ? '个股' : '指数')); });
     var legend = data.series.map(function (series, index) {
       return '<li><span class="chat-market-chart-swatch chat-market-chart-swatch-' + (index % 4)
-        + '" aria-hidden="true"></span><span>' + escapeHtml(series.label || series.code || '指数') + '</span></li>';
+        + '" aria-hidden="true"></span><span>' + escapeHtml(series.label || series.code || (stockPrice ? '个股' : '指数')) + '</span></li>';
     }).join('');
-    var chartLabel = '多指数区间涨跌幅折线图，包含：' + names.join('、');
-    return '<figure class="chat-market-chart" aria-label="多指数区间走势比较">'
-      + '<figcaption><h4>多指数区间走势</h4><p>以 ' + escapeHtml(baseline)
-      + ' 为共同基准点（0%）；悬停可查看原始收盘点位与区间涨跌，下方表格保留收盘点位。</p></figcaption>'
+    var chartLabel = stockPrice ? names.join('、') + '收盘价折线图' : '多指数区间涨跌幅折线图，包含：' + names.join('、');
+    var description = stockPrice
+      ? '纵轴为收盘价（' + String(data.unit || '') + '）；悬停可查看原始价格与相对首个采样点的涨跌幅。'
+      : '以 ' + baseline + ' 为共同基准点（0%）；悬停可查看原始收盘点位与区间涨跌，下方表格保留收盘点位。';
+    return '<figure class="chat-market-chart" aria-label="' + escapeHtml(title) + '">'
+      + '<figcaption><h4>' + escapeHtml(title) + '</h4><p>' + escapeHtml(description) + '</p></figcaption>'
       + '<div class="chat-market-chart-plot"><canvas data-chat-market-chart role="img" aria-label="'
       + escapeHtml(chartLabel) + '"></canvas><p class="chat-market-chart-fallback" role="status"'
       + ' aria-live="polite" hidden></p></div>'
-      + '<ul class="chat-market-chart-legend" aria-label="指数图例">' + legend + '</ul></figure>';
+      + '<ul class="chat-market-chart-legend" aria-label="' + (stockPrice ? '个股图例' : '指数图例') + '">' + legend + '</ul></figure>';
   }
 
   function renderInlineMarketFacts(run) {
@@ -607,7 +671,7 @@
     }
 
     var label = plan.market_window && String(plan.market_window.label || '') || '行情采样区间';
-    var indexChartHtml = renderMarketIndexChart(marketIndexChartData(run));
+    var indexChartHtml = renderMarketIndexChart(marketChartData(run));
     var sections = groups.map(function (group) {
       var rows = group.rows;
       var overall = percent(rows[rows.length - 1].value, rows[0].value);
@@ -633,9 +697,11 @@
     if (group.asOf) meta.push('数据截至 ' + group.asOf);
     else meta.push('未提供数据时间');
     if (group.fetchedAt.length) meta.push('获取于 ' + group.fetchedAt.join('、'));
+    var query = group.searchQuery
+      ? '<p class="chat-source-meta">搜索词：' + escapeHtml(group.searchQuery) + '</p>' : '';
     return '<section class="chat-source-group" aria-label="外部数据来源">'
       + '<h3>' + escapeHtml(title) + '</h3><p class="chat-source-meta">' + escapeHtml(meta.join(' · ')) + '</p>'
-      + renderFactTable(group.facts, run) + '</section>';
+      + query + renderFactTable(group.facts, run) + '</section>';
   }
 
   function renderWebSourceGroup(entry, facts, run) {
@@ -942,6 +1008,7 @@
     renderRunArtifacts: renderRunArtifacts,
     renderInlineMarketFacts: renderInlineMarketFacts,
     marketIndexChartData: marketIndexChartData,
+    marketChartData: marketChartData,
     renderPolicy: renderPolicy,
     renderFactsAndConflicts: renderFactsAndConflicts,
     renderVerification: renderVerification,

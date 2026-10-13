@@ -572,6 +572,21 @@ def test_answer_stream_emits_stages_and_web_sources_across_rounds(tmp_path, fake
     done = events[-1]
     assert done["tools_used"] == ["web_search", "get_news_data"]
     assert done["web_sources"] == [{"title": "公告", "url": "https://example.com/a", "content": "摘要", "published_date": "2026-09-01"}]
+    web_call = next(event for event in events if event["type"] == "tool_call" and event["name"] == "web_search")
+    assert web_call["arguments"]["query"] == "某公司公告"
+
+
+def test_web_search_query_is_normalized_before_tool_event_and_execution():
+    from webapp.chat_models import Scope
+    from financial_report_fetcher.rag.qa import RagQA
+
+    raw = "长江电力 api_key=do-not-send " + ("走势 " * 100)
+    bound = RagQA._bind_web_query_to_scope({"query": raw}, Scope.whole_corpus(), None)
+
+    assert bound is not None
+    assert len(bound["query"]) <= 300
+    assert "do-not-send" not in bound["query"]
+    assert "api_key=[已隐藏]" in bound["query"]
 
 
 def test_answer_stream_skips_duplicate_tool_call(tmp_path, fake_embedder):

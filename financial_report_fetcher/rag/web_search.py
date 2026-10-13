@@ -2,9 +2,23 @@
 
 import json
 import os
+import re
 from typing import Any, Optional
 
 import requests
+
+_SEARCH_SECRET_RE = re.compile(
+    r"(?i)\b(api[-_]?key|access[-_]?token|token|secret|password|passwd|authorization)\b\s*[:=]\s*\S+"
+)
+
+
+def normalize_search_query(query: Any) -> str:
+    """Bound a provider query and redact obvious credential assignments before sending it."""
+    if not isinstance(query, str):
+        return ""
+    collapsed = re.sub(r"\s+", " ", query).strip()
+    redacted = _SEARCH_SECRET_RE.sub(lambda match: match.group(1) + "=[已隐藏]", collapsed)
+    return redacted[:300]
 
 
 class TavilyWebSearch:
@@ -28,7 +42,7 @@ class TavilyWebSearch:
         return bool(self.api_key)
 
     def search(self, query: str, max_results: int = 5, search_depth: str = "basic") -> str:
-        query = str(query or "").strip()
+        query = normalize_search_query(query)
         if not self.available:
             return "工具调用失败：网页搜索未配置 TAVILY_API_KEY"
         if not query:

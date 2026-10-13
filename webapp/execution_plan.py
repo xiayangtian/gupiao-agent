@@ -7,10 +7,10 @@ from typing import Any, Literal, Mapping
 from webapp.chat_models import Scope
 
 StepKind = Literal["retrieve", "market_quote", "market_kline", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "market_overview", "web_search", "answer"]
-SourceMode = Literal["local_evidence", "external_market", "market_recap", "general_web", "general_knowledge", "mixed"]
+SourceMode = Literal["local_evidence", "external_market", "market_recap", "general_web", "general_knowledge", "mixed", "conversation_context"]
 
 _STEP_KINDS = frozenset(("retrieve", "market_quote", "market_kline", "market_indices", "market_breadth", "sector_performance", "market_fund_flow", "market_overview", "web_search", "answer"))
-_SOURCE_MODES = frozenset(("local_evidence", "external_market", "market_recap", "general_web", "general_knowledge", "mixed"))
+_SOURCE_MODES = frozenset(("local_evidence", "external_market", "market_recap", "general_web", "general_knowledge", "mixed", "conversation_context"))
 
 
 @dataclass(frozen=True)
@@ -51,16 +51,20 @@ class ExecutionPlan:
     source_mode: SourceMode
     steps: tuple[ExecutionStep, ...]
     acceptance: tuple[str, ...]
+    search_query: str = ""
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ExecutionPlan":
         if not isinstance(data, Mapping):
             raise ValueError("execution plan must be an object")
-        unknown = set(data) - {"objective", "source_mode", "steps", "acceptance"}
+        unknown = set(data) - {"objective", "source_mode", "steps", "acceptance", "search_query"}
         if unknown:
             raise ValueError("unsupported execution plan fields")
         objective, source_mode = data.get("objective"), data.get("source_mode")
         steps, acceptance = data.get("steps"), data.get("acceptance")
+        search_query = data.get("search_query", "")
+        if not isinstance(search_query, str) or len(search_query) > 300 or any(ord(char) < 32 and char not in "\t\n" for char in search_query):
+            raise ValueError("search_query must be a bounded plain-text string")
         if not isinstance(objective, str) or not objective.strip():
             raise ValueError("execution objective must be non-empty")
         if source_mode not in _SOURCE_MODES:
@@ -69,7 +73,8 @@ class ExecutionPlan:
             raise ValueError("execution plan steps and acceptance must be arrays")
         if not acceptance or not all(isinstance(item, str) and item.strip() for item in acceptance):
             raise ValueError("execution plan acceptance must be non-empty strings")
-        return cls(objective.strip(), source_mode, tuple(ExecutionStep.from_dict(item) for item in steps), tuple(acceptance))
+        return cls(objective.strip(), source_mode, tuple(ExecutionStep.from_dict(item) for item in steps),
+                   tuple(acceptance), " ".join(search_query.split()))
 
 
 def validate_execution_plan(
@@ -108,6 +113,10 @@ def validate_execution_plan(
         issues.append(PlanIssue("missing_answer", "计划必须且只能以一个最终回答步骤结束。"))
     if plan.source_mode == "general_knowledge" and (len(plan.steps) != 1 or plan.steps[0].kind != "answer" or authoritative_intent != "general_knowledge"):
         issues.append(PlanIssue("knowledge_boundary", "普通常识只允许服务端确认的单步回答计划。"))
+    if plan.source_mode == "conversation_context" and (len(plan.steps) != 1 or plan.steps[0].kind != "answer"):
+        issues.append(PlanIssue("conversation_context_boundary", "上一轮上下文解释只允许单步回答，不可检索或调用外部来源。"))
+    if plan.search_query and not any(step.kind == "web_search" for step in plan.steps):
+        issues.append(PlanIssue("unexpected_search_query", "只有包含网页搜索步骤的计划可携带搜索词。"))
     if plan.source_mode == "general_web" and any(step.kind not in {"web_search", "answer"} for step in plan.steps):
         issues.append(PlanIssue("general_web_boundary", "非股票问题只允许网页搜索和模型回答。"))
     if plan.source_mode == "market_recap" and "retrieve" in {step.kind for step in plan.steps}:

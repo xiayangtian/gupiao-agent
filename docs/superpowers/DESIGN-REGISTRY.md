@@ -17,6 +17,8 @@
 
 方案 | 状态 | 可执行性 | 方案入口
 --- | --- | --- | ---
+| 个股多期行情价格图表 | 实施中 | — | [主记录](#individual-stock-price-chart) |
+| 上下文追问与 WebSearch 查询词溯源 | 实施中 | — | [主记录](#context-aware-followup-search-audit) |
 
 ## 全部设计
 
@@ -58,3 +60,5 @@
 | <a id="short-market-answer-formatting"></a>短期行情答案直观展示 | [设计](specs/2026-10-12-short-market-answer.md) | [实施计划](plans/2026-10-12-short-market-answer.md) | 已实现 | — | 本地 `main` fast-forward 合并 4d79eb8；`python3 -m pytest -q tests/unit/test_chat_rendering_js.py tests/unit/test_chat_request_resolution.py tests/unit/test_chat_policy.py tests/unit/test_rag_qa.py tests/unit/test_design_registry.py`：125 passed；含行情表格的桌面/平板/移动布局浏览器回归：3 passed；browser_qa `http://127.0.0.1:8129/#/chat` 三视口无 console/page errors，仅 favicon.ico 404；旧服务 PID 39237 已于 15:55 重启为 72424，健康接口 200，精准 broad-market 路由回归 1 passed；未推送远端 | 2026-10-12 |
 | <a id="multi-index-market-chart"></a>多指数行情图表 | [设计](specs/2026-10-12-multi-index-market-chart-design.md) | [实施计划](plans/2026-10-12-multi-index-market-chart.md) | 已实现 | — | 用户确认独立审查无问题后本地 fast-forward 合入 `main`，合并 1188365；reviewer Merge verdict: OK。`python3 -m pytest -q tests/unit/test_chat_rendering_js.py tests/unit/test_chat_market_charts_js.py`：43 passed；多指数图表/行情布局浏览器回归：6 passed；三个相关 JS `node --check` 与 `git diff --check` 通过。Browser QA `http://127.0.0.1:8137/#/chat` desktop/tablet/mobile 无 console/page errors，仅 favicon.ico 404；未推送远端；TASK-20261012-005 | 2026-10-12 |
 | <a id="chat-copy-polish"></a>智能问答对话链路文案优化 | [设计](specs/2026-10-12-chat-copy-polish.md) | [实施计划](plans/2026-10-12-chat-copy-polish.md) | 已实现 | — | 本地 `main` fast-forward 合并 b4d5c13；`python3 -m pytest tests/unit/test_chat_rendering_js.py tests/unit/test_chat_supplement_ui.py tests/unit/test_chat_execution_plan.py tests/unit/test_source_runtime_ui.py tests/unit/test_design_registry.py tests/unit/test_server_api.py tests/unit/test_chat_market_charts_js.py -q`：276 passed，3 warnings；对话浏览器回归 9 passed；browser_qa `http://127.0.0.1:8133/#/chat` desktop/tablet/mobile 无 console/page errors，仅 favicon.ico 404。策略评测 4 项与策略浏览器 2 项既有失败已在基线复现；未推送远端 | 2026-10-12 |
+| <a id="individual-stock-price-chart"></a>个股多期行情价格图表 | [设计](specs/2026-10-12-individual-stock-price-chart-design.md) | [实施计划](plans/2026-10-12-individual-stock-price-chart.md) | 实施中 | — | 实施分支 `feat/chat-contextual-market-charts`；基于当前 run 的安全价格 Facts，原始价格轴并在 tooltip 展示相对首点涨跌幅 | 2026-10-12 |
+| <a id="context-aware-followup-search-audit"></a>上下文追问与 WebSearch 查询词溯源 | [设计](specs/2026-10-12-context-aware-followup-search-audit-design.md) | [实施计划](plans/2026-10-12-context-aware-followup-search-audit.md) | 实施中 | — | 实施分支 `feat/chat-contextual-market-charts`；展示追问无外部检索，实际 WebSearch query 有界保存并可在来源详情查看 | 2026-10-12 |

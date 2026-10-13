@@ -32,6 +32,19 @@ def test_duplicate_success_invokes_provider_once():
     assert runtime.budget.snapshot()["total"] == 1
 
 
+def test_web_query_arguments_are_safely_attached_to_each_source_result():
+    import json
+
+    from webapp.chat_models import Scope
+    from webapp.source_runtime import CallBudget, SourceCall, SourceResult, SourceRuntime
+
+    runtime = SourceRuntime(Scope.whole_corpus(), CallBudget(1, 1, 1), lambda call: True)
+    call = SourceCall("web", "web_search", "web", {"query": "长江电力 api_key=do-not-save"})
+    result = runtime.call(call, lambda: SourceResult("", "web", "web_search", "web", "partial"))
+
+    assert json.loads(result.arguments_summary) == {"query": "长江电力 api_key=[已隐藏]"}
+
+
 def test_failed_attempt_consumes_budget_and_is_cached():
     from webapp.chat_models import Scope
     from webapp.source_runtime import CallBudget, SourceCall, SourceResult, SourceRuntime

@@ -4745,6 +4745,147 @@ class TestResearchWorkspaceMemoryExportQualityApi:
         assert [item["session_id"] for item in matched.json()["items"]] == [sid]
 
 
+def test_contextual_chart_followup_uses_previous_run_without_planner_or_external_sources(client, env, monkeypatch, tmp_path):
+    from webapp.chat_models import AnswerRun, Fact, Scope
+    from webapp.chat_store import ChatStore
+
+    store = ChatStore(str(tmp_path / "contextual-followup.json"))
+    session_id = store.create_session()["id"]
+    previous = AnswerRun(
+        content="长江电力近五日有多条日线采样。", status="completed",
+        scope=Scope.company_only("600900", "长江电力"),
+        facts=(Fact(
+            metric="price", value=29.38, unit="元/股", period="2026-10-12",
+            period_kind="daily", entity_scope="security", company_code="600900",
+            source_type="tool", evidence_ids=("source-1",), verification="reference",
+            as_of="2026-10-12", source_category="market",
+        ),),
+        execution_plan={"source_mode": "external_market", "steps": [{"kind": "market_kline"}]},
+        id="previous-run",
+    )
+    store.append_turn(session_id, question="分析长江电力近五个交易日走势", run=previous)
+    monkeypatch.setattr(server, "chat_store", store)
+    monkeypatch.setattr(server, "_require_ai", lambda: None)
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: type("Cfg", (), {
+        "mcp_tools": False, "web_search": False, "mcp_max_tool_calls": 2,
+        "mcp_max_tool_rounds": 1, "mcp_tool_whitelist": [], "top_k": 4,
+    })()))
+
+    class ForbiddenPlanner:
+        def __init__(self, *_args):
+            raise AssertionError("展示追问不应调用规划模型")
+
+    class ContextAnswerer:
+        calls = []
+        def answer_stream(self, **kwargs):
+            self.calls.append(kwargs)
+            yield {"type": "done", "answer": "本轮解释只参考上一轮行情结果。", "reasoning": "",
+                   "citations": [], "model": "fixture", "usage": {}}
+
+    answerer = ContextAnswerer()
+    monkeypatch.setattr(server, "ExecutionPlanner", ForbiddenPlanner)
+    monkeypatch.setattr(server, "rag_qa", answerer)
+
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "这个为什么没画图？", "session_id": session_id,
+    }))
+    done = _event(events, "done")
+    run = done["run"]
+
+    assert run["execution_plan"]["source_mode"] == "conversation_context"
+    assert run["execution_steps"] == []
+    assert len(answerer.calls) == 1
+    assert answerer.calls[0]["skip_retrieval"] is True
+    assert answerer.calls[0]["tools"] is None
+    history_text = " ".join(item["content"] for item in answerer.calls[0]["history"])
+    assert "长江电力" in history_text and "29.38" in history_text
+
+
+@pytest.mark.parametrize(("planned_query", "expected_query"), [
+    ("长江电力 近五日收盘价 上涨原因 新闻", "长江电力 近五日收盘价 上涨原因 新闻"),
+    ("", "长江电力 那上涨原因呢？"),
+])
+def test_contextual_web_search_uses_planned_query_and_persists_exact_query(
+    client, env, monkeypatch, tmp_path, planned_query, expected_query,
+):
+    import json
+
+    from webapp.chat_models import AnswerRun, Fact, Scope
+    from webapp.chat_store import ChatStore
+    from webapp.execution_plan import ExecutionPlan
+    from webapp.execution_planner import PlanningResult
+    from webapp.source_runtime import CallBudget, SourceRuntime
+
+    store = ChatStore(str(tmp_path / "context-search-query.json"))
+    session_id = store.create_session()["id"]
+    previous = AnswerRun(
+        content="长江电力近五日收盘价数据。", status="completed",
+        scope=Scope.company_only("600900", "长江电力"),
+        facts=(Fact(
+            metric="price", value=29.38, unit="元/股", period="2026-10-12",
+            period_kind="daily", entity_scope="security", company_code="600900",
+            source_type="tool", evidence_ids=("source-1",), verification="reference",
+            as_of="2026-10-12", source_category="market",
+        ),),
+        execution_plan={"source_mode": "external_market", "steps": [{"kind": "market_kline"}]},
+        id="previous-run",
+    )
+    store.append_turn(session_id, question="分析长江电力近五个交易日走势", run=previous)
+    monkeypatch.setattr(server, "chat_store", store)
+    monkeypatch.setattr(server, "_require_ai", lambda: None)
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: type("Cfg", (), {
+        "mcp_tools": False, "web_search": True, "mcp_max_tool_calls": 2,
+        "mcp_max_tool_rounds": 1, "mcp_tool_whitelist": [], "top_k": 4,
+    })()))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: [
+        {"type": "function", "function": {"name": "web_search"}},
+    ])
+    monkeypatch.setattr(server, "_source_runtime_for_run", lambda scope, policy, cfg, **_kwargs:
+        SourceRuntime(scope, CallBudget(1, 0, 1), lambda call: call.provider == "web"))
+
+    plan = ExecutionPlan.from_dict({
+        "objective": "检索个股行情变化相关信息", "source_mode": "general_web",
+        "steps": [{"id": "web", "kind": "web_search", "required": True},
+                  {"id": "answer", "kind": "answer", "depends_on": ["web"]}],
+        "acceptance": ["搜索词结合当前问题和上一轮对象"], "search_query": planned_query,
+    })
+
+    class FixedPlanner:
+        def __init__(self, *_args):
+            pass
+        def plan(self, _question, _scope, _caps, **kwargs):
+            assert "分析长江电力近五个交易日走势" in kwargs["conversation_context"]
+            return PlanningResult("validated", plan)
+
+    class ContextAnswerer:
+        def answer_from_context(self, question, **_kwargs):
+            yield {"type": "done", "answer": "外部资料供本轮核对。", "reasoning": "",
+                   "citations": [], "model": "fixture", "usage": {}}
+        def answer_stream(self, **_kwargs):
+            yield {"type": "done", "answer": "外部资料供本轮核对。", "reasoning": "",
+                   "citations": [], "model": "fixture", "usage": {}}
+
+    searches = []
+    def execute_tool(name, arguments):
+        searches.append((name, dict(arguments)))
+        return json.dumps({"source": "web_search", "results": [{
+            "title": "相关资料", "url": "https://example.com/news", "content": "资料摘要",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: execute_tool)
+    monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+    monkeypatch.setattr(server, "rag_qa", ContextAnswerer())
+
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "那上涨原因呢？", "session_id": session_id, "use_mcp": True,
+    }))
+    run = _event(events, "done")["run"]
+
+    assert searches == [("web_search", {"query": expected_query})]
+    query_artifact = next(item for item in run["tool_artifacts"] if item["tool_name"] == "web_search")
+    assert json.loads(query_artifact["arguments_summary"]) == {"query": expected_query}
+
+
 def test_market_recap_missing_overview_uses_verified_index_only_fallback(client, env, monkeypatch, tmp_path):
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo

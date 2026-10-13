@@ -42,6 +42,22 @@ def test_unknown_time_source_is_partial_and_keeps_acquisition_time():
     assert projection.facts == ()
 
 
+def test_web_search_projection_preserves_safe_query_summary():
+    import json
+
+    from webapp.chat_execution import project_sources
+    from webapp.chat_models import Scope
+    from webapp.source_runtime import SourceResult
+
+    result = SourceResult(
+        "web-1", "web", "web_search", "web", "partial", content="bounded",
+        arguments_summary='{"query":"长江电力 近五日趋势"}',
+    )
+    projection = project_sources([result], Scope.whole_corpus())
+
+    assert json.loads(projection.tool_artifacts[0].arguments_summary) == {"query": "长江电力 近五日趋势"}
+
+
 def test_local_retrieval_is_not_fabricated_as_external_tool_artifact():
     from webapp.chat_execution import project_sources
     from webapp.chat_models import Scope

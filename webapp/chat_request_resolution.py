@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Mapping
 
+from webapp.chat_followups import PreviousTurnContext, is_context_only_followup
 from webapp.chat_policy import QuestionRoute, QuestionRouter
 from webapp.chat_scope import ScopeRequest
 from webapp.chat_time import (
@@ -33,6 +34,7 @@ class ResolvedRequest:
     window_origin: Literal["explicit", "fuzzy_default", "clarification", "none"]
     allowed_source_kinds: frozenset[str]
     consumed_pending_version: str | None = None
+    context_only_followup: bool = False
 
 
 _SOURCE_KINDS = {
@@ -139,6 +141,8 @@ def resolve_chat_request(
     scope_request: ScopeRequest,
     pending: Mapping[str, Any] | None,
     now: datetime,
+    *,
+    previous_context: PreviousTurnContext | None = None,
 ) -> ResolvedRequest | Clarification:
     """Freeze intent/window/source families using only this turn and a trusted slot.
 
@@ -155,6 +159,12 @@ def resolve_chat_request(
     text = question.strip()
     router = QuestionRouter()
     route = router.classify(text)
+    context_only_followup = (
+        not (isinstance(pending, Mapping) and _pending_is_fresh(pending, now))
+        and is_context_only_followup(text, previous_context)
+    )
+    if context_only_followup:
+        route = QuestionRoute("general_knowledge", False, False)
     window = resolve_market_window(text, now)
     financial_period = (None if route.intent in {"market_quote", "market_trend", "market_recap"}
                         else resolve_financial_period(text))
@@ -211,4 +221,5 @@ def resolve_chat_request(
         financial_period=financial_period, window_origin=window_origin,
         allowed_source_kinds=_SOURCE_KINDS.get(route.intent, frozenset()),
         consumed_pending_version=consumed_version,
+        context_only_followup=context_only_followup,
     )

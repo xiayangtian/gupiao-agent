@@ -85,6 +85,7 @@ class SourceResult:
     artifacts: tuple[EvidenceArtifact, ...] = ()
     tool_artifacts: tuple[ToolArtifact, ...] = ()
     coverage: SourceCoverage = SourceCoverage()
+    arguments_summary: str = ""
 
     def __post_init__(self) -> None:
         if self.status not in {"success", "partial", "failed", "unavailable"}:
@@ -93,7 +94,9 @@ class SourceResult:
             raise ValueError("unsupported source category")
         if not isinstance(self.coverage, SourceCoverage):
             raise ValueError("coverage must be SourceCoverage")
-        if not all(isinstance(value, str) for value in (self.content, self.as_of, self.fetched_at, self.error_code)):
+        if not all(isinstance(value, str) for value in (
+            self.content, self.as_of, self.fetched_at, self.error_code, self.arguments_summary,
+        )):
             raise ValueError("source text fields must be strings")
         object.__setattr__(self, "payload", copy.deepcopy(self.payload))
         object.__setattr__(self, "retrieval_hits", tuple(copy.deepcopy(self.retrieval_hits)))
@@ -199,15 +202,19 @@ class SourceRuntime:
                 return cached
             if not self.budget.reserve(call.category):
                 return self.unavailable(call, "budget_exhausted")
+            from webapp.chat_evidence import safe_arguments_summary
+            arguments_summary = safe_arguments_summary(call.arguments)
             try:
                 result = invoke()
                 if not isinstance(result, SourceResult):
                     raise TypeError("source invoker must return SourceResult")
-                # Identity fields always come from the server-created SourceCall.
+                # Identity and the redacted argument summary always come from the server-created SourceCall.
                 result = replace(result, call_id=self._next_id(), provider=call.provider,
-                                 operation=call.operation, category=call.category)
+                                 operation=call.operation, category=call.category,
+                                 arguments_summary=arguments_summary)
             except Exception:
                 result = SourceResult(self._next_id(), call.provider, call.operation,
-                                      call.category, "failed", error_code="source_failed")
+                                      call.category, "failed", error_code="source_failed",
+                                      arguments_summary=arguments_summary)
             self._cache[key] = result
             return result
