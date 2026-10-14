@@ -426,6 +426,17 @@ class InvestmentNewsStore:
             ).fetchone()
         return self._run_row(row) if row else None
 
+    def get_latest_successful_run(self, kind: str) -> dict[str, Any] | None:
+        if kind not in {"collection", "digest"}:
+            raise ValueError("kind must be collection or digest")
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM news_runs WHERE kind = ? AND status = 'succeeded' "
+                "ORDER BY finished_at DESC, started_at DESC LIMIT 1",
+                (kind,),
+            ).fetchone()
+        return self._run_row(row) if row else None
+
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         if not 1 <= int(limit) <= 100:
             raise ValueError("limit must be between 1 and 100")

@@ -112,5 +112,11 @@ def test_manual_collection_and_digest_are_distinct_api_operations(news_client):
     assert service.ai_client.calls
     assert len(service.source.calls) == source_calls_after_collection
     assert client.get("/api/investment-news/runs").status_code == 200
-    assert client.get("/api/investment-news/status").status_code == 200
+    status = client.get("/api/investment-news/status")
+    assert status.status_code == 200
+    latest = status.json()["latest_successful_runs"]
+    assert latest["collection"]["status"] == "succeeded"
+    assert latest["digest"]["status"] == "succeeded"
+    assert latest["collection"]["finished_at"]
+    assert latest["digest"]["finished_at"]
     assert client.get("/api/investment-news/digest", params={"day": "2026-10-14"}).status_code == 200

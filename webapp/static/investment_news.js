@@ -4,6 +4,8 @@
 
   var PAGE = '#/investment-news';
   var PAGE_SIZE = 20;
+  var OPERATION_STATUS_TIMEOUT_MS = 5000;
+  var statusTimers = {};
   var state = {
     initialized: false,
     busy: { collection: false, digest: false },
@@ -76,12 +78,23 @@
     return payload;
   }
 
-  function setStatus(id, message, stateName) {
+  function setStatus(id, message, stateName, autoHide) {
     var element = byId(id);
     if (!element) return;
+    if (statusTimers[id]) {
+      window.clearTimeout(statusTimers[id]);
+      delete statusTimers[id];
+    }
     element.textContent = message || '';
     element.classList.toggle('error', stateName === 'error');
     element.classList.toggle('success', stateName === 'success');
+    if (autoHide && message) {
+      statusTimers[id] = window.setTimeout(function () {
+        element.textContent = '';
+        element.classList.remove('error', 'success');
+        delete statusTimers[id];
+      }, OPERATION_STATUS_TIMEOUT_MS);
+    }
   }
 
   function runStatusLabel(status) {
@@ -109,17 +122,12 @@
   async function loadStatus() {
     try {
       state.status = await requestJson('/api/investment-news/status');
-      var runs = state.status.recent_runs || [];
-      var latestCollection = runs.find(function (run) { return run.kind === 'collection'; });
       var messages = ['定时采集：每日 09:00–16:00 整点（Asia/Shanghai）；自动综述：09:00、16:00。'];
-      if (latestCollection) {
-        messages.push('最近采集：' + runStatusLabel(latestCollection.status) + '，' + formatTime(latestCollection.finished_at || latestCollection.started_at));
-        if (latestCollection.error) messages.push('错误：' + latestCollection.error);
-      } else {
-        messages.push('尚无采集记录。');
-      }
       if (!state.status.ai_configured) messages.push('AI 未配置，综述生成可能失败。');
       setStatus('news-status', messages.join(' '));
+      var latest = state.status.latest_successful_runs || {};
+      setStatus('news-last-collection-success', latest.collection ? formatTime(latest.collection.finished_at) : '暂无成功记录');
+      setStatus('news-last-digest-success', latest.digest ? formatTime(latest.digest.finished_at) : '暂无成功记录');
     } catch (error) {
       setStatus('news-status', '暂时无法读取运行状态：' + error.message, 'error');
     }
@@ -329,12 +337,13 @@
       var run = await pollRun(response.run_id, kind);
       var stateText = runStatusLabel(run.status);
       if (run.error) stateText += '：' + run.error;
-      setStatus(statusId, stateText, run.status === 'failed' ? 'error' : (run.status === 'succeeded' ? 'success' : ''));
+      setStatus(statusId, stateText, run.status === 'failed' ? 'error' : (run.status === 'succeeded' ? 'success' : ''),
+        ['succeeded', 'partial', 'failed', 'skipped'].indexOf(run.status) !== -1);
       await loadStatus();
       if (isCollection) await Promise.all([loadNews(), loadDigest(), loadWatchlist()]);
       else await loadDigest();
     } catch (error) {
-      setStatus(statusId, '任务失败：' + error.message, 'error');
+      setStatus(statusId, '任务失败：' + error.message, 'error', true);
     } finally {
       state.busy[kind] = false;
       updateActionButtons();

@@ -2931,6 +2931,10 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .investment-news-actions .btn, .news-watchlist-add-row .btn, .news-pagination .btn { min-height: 40px; }
 .news-live-status, .news-operation-status, .news-list-status { min-height: 20px; color: var(--text-secondary); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .news-live-status:empty, .news-operation-status:empty { display: none; }
+.news-success-times { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-sm); }
+.news-success-time { display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border: 1px solid var(--accent-border); border-radius: var(--radius-sm); background: var(--accent-light); }
+.news-success-time span { color: var(--text-secondary); font-size: 12px; }
+.news-success-time strong { color: var(--text-primary); font-size: 15px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .news-operation-status { padding: 8px 10px; border-left: 3px solid var(--accent); background: var(--accent-light); }
 .news-operation-status.error { border-color: var(--danger); background: var(--danger-light); color: var(--text-primary); }
 .news-operation-status.success { border-color: var(--success); background: var(--success-light); color: var(--text-primary); }
