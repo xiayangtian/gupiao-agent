@@ -25,6 +25,30 @@ def test_manual_digest_reads_all_day_items_in_batches_without_collecting(tmp_pat
     service.shutdown()
 
 
+def test_digest_retries_once_when_model_output_is_truncated(tmp_path):
+    class TruncatedOnceAI(RecordingAIClient):
+        def chat(self, messages, **kwargs):
+            if not self.calls:
+                self.calls.append({"messages": messages, "kwargs": kwargs})
+                return {"content": '{"market_themes": [{"text": "cut off', "finish_reason": "length"}
+            return super().chat(messages, **kwargs)
+
+    ai = TruncatedOnceAI()
+    service, store = make_service(
+        tmp_path,
+        source=FakeNewsSource(market_items=[make_item(1)]),
+        ai_client=ai,
+    )
+    service.collect_now("manual")
+
+    result = service.generate_digest("2026-10-14", force=True)
+
+    assert result["status"] == "succeeded"
+    assert len(ai.calls) == 3  # truncated batch, retried batch, then daily combine
+    assert all(call["kwargs"]["max_tokens"] == 8192 for call in ai.calls)
+    service.shutdown()
+
+
 def test_digest_prompt_includes_watchlist_scope_and_symbols(tmp_path):
     market_item = make_item(101)
     stock_item = make_item(102, symbol="600900")

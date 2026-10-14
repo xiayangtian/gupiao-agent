@@ -302,20 +302,39 @@ class InvestmentNewsService:
         return sections, had_claim
 
     def _call_digest_model(self, content: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], str]:
-        response = self.ai_client.chat(
-            messages=[{"role": "user", "content": json.dumps(content, ensure_ascii=False)}],
-            system=(
-                "你是财经资讯归纳助手。只根据输入条目归纳，不引入外部事实；每个要点都必须附上"
-                "输入中存在的 item_ids。watchlist 要点只引用 kind=watchlist 的条目并标明关联股票；"
-                "不得把转载或同题报道声称为独立佐证。不得推断新闻导致股价涨跌，不给买卖建议；不确定处明确说明。"
-                "只返回 JSON 对象，包含 market_themes、policy_regulatory、watchlist、risks 四个数组，"
-                "数组元素格式为 {text, item_ids}。"
-            ),
-            temperature=0.2,
-            max_tokens=4096,
-            response_format={"type": "json_object"},
+        messages = [{"role": "user", "content": json.dumps(content, ensure_ascii=False)}]
+        system = (
+            "你是财经资讯归纳助手。只根据输入条目归纳，不引入外部事实；每个要点都必须附上"
+            "输入中存在的 item_ids。watchlist 要点只引用 kind=watchlist 的条目并标明关联股票；"
+            "不得把转载或同题报道声称为独立佐证。不得推断新闻导致股价涨跌，不给买卖建议；不确定处明确说明。"
+            "只返回 JSON 对象，包含 market_themes、policy_regulatory、watchlist、risks 四个数组，"
+            "数组元素格式为 {text, item_ids}。每个数组最多 5 条，每条 text 不超过 100 字。"
         )
-        payload = self._decode_ai_json(response)
+        for attempt in range(2):
+            response = self.ai_client.chat(
+                messages=messages,
+                system=system,
+                temperature=0.2,
+                max_tokens=8192,
+                response_format={"type": "json_object"},
+            )
+            finish_reason = response.get("finish_reason") if isinstance(response, dict) else None
+            try:
+                if finish_reason == "length":
+                    raise ValueError("AI digest response was truncated at the output token limit")
+                payload = self._decode_ai_json(response)
+                break
+            except (json.JSONDecodeError, ValueError):
+                if attempt:
+                    raise
+                messages.append({
+                    "role": "assistant",
+                    "content": response.get("content", "") if isinstance(response, dict) else "",
+                })
+                messages.append({
+                    "role": "user",
+                    "content": "上次输出不完整或不是有效 JSON。请缩短内容，只输出完整 JSON 对象，四个数组各最多 3 条。",
+                })
         allowed = set(content.get("allowed_item_ids", []))
         sections, had_claim = self._validated_sections(payload, allowed)
         if had_claim and not any(sections.values()):
