@@ -63,3 +63,8 @@ data/research_quality_summary.json
 
 # 后台任务状态数据库
 data/tasks.sqlite3
+
+# 本机投资资讯数据库
+data/investment_news.sqlite3
+data/investment_news.sqlite3-shm
+data/investment_news.sqlite3-wal

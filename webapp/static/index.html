@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="data:," />
   <title>财报分析工具</title>
   <link rel="stylesheet" href="/static/style.css?v=__APP_VERSION__" />
 </head>
@@ -16,6 +17,7 @@
       <a href="#/history" class="nav-link">历史记录</a>
       <a href="#/rag" class="nav-link">RAG 知识库</a>
       <a href="#/chat" class="nav-link">智能问答</a>
+      <a href="#/investment-news" class="nav-link">投资资讯</a>
     </div>
     <span id="ai-status" class="badge badge-warn">AI 未连接</span>
   </nav>
@@ -263,6 +265,90 @@
     <div id="rag-files" class="rag-files"></div>
   </section>
 
+  <!-- ═══════════ 投资资讯页 ═══════════ -->
+  <section id="page-investment-news" class="page hidden" aria-labelledby="investment-news-title">
+    <div id="investment-news-page" class="investment-news-page">
+      <header class="investment-news-header">
+        <div>
+          <h1 id="investment-news-title">投资资讯</h1>
+          <p>查看本地已采集的 A 股市场与自选股资讯，并追溯原文来源。</p>
+        </div>
+        <div class="investment-news-actions">
+          <button id="news-collect" class="btn" type="button">采集资讯</button>
+          <button id="news-generate-digest" class="btn primary" type="button">生成今日综述</button>
+        </div>
+      </header>
+
+      <div id="news-status" class="news-live-status" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="news-collection-status" class="news-operation-status" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="news-digest-run-status" class="news-operation-status" role="status" aria-live="polite" aria-atomic="true"></div>
+
+      <section class="news-digest-card panel" aria-labelledby="news-digest-title">
+        <div class="news-panel-head">
+          <div>
+            <h2 id="news-digest-title">今日 AI 综述</h2>
+            <p id="news-digest-meta" class="hint">综述仅涵盖本地已采集资讯；自动生成时间为 09:00 和 16:00（Asia/Shanghai）。</p>
+          </div>
+          <span id="news-digest-badge" class="badge badge-info">尚未生成</span>
+        </div>
+        <div id="news-digest" class="news-digest-content">
+          <p class="hint">今日综述尚未生成。手动生成只读取已入库资讯，不会触发采集。</p>
+        </div>
+      </section>
+
+      <div class="news-content-grid">
+        <aside class="news-watchlist-panel panel" aria-labelledby="news-watchlist-title">
+          <div class="news-panel-head">
+            <div>
+              <h2 id="news-watchlist-title">共享自选股</h2>
+              <p class="hint"><span id="news-watchlist-count">0</span> / 20 只，仅用于资讯筛选</p>
+            </div>
+          </div>
+          <form id="news-watchlist-form" class="news-watchlist-form">
+            <label for="news-stock-input">添加 A 股</label>
+            <div class="news-watchlist-add-row">
+              <input id="news-stock-input" type="text" inputmode="text" maxlength="30"
+                     list="news-stock-suggestions" autocomplete="off" placeholder="代码或名称" aria-label="股票代码或名称" />
+              <datalist id="news-stock-suggestions"></datalist>
+              <button class="btn" type="submit">添加</button>
+            </div>
+            <p id="news-watchlist-help" class="hint">单机共享列表；最多 20 只。</p>
+          </form>
+          <ul id="news-watchlist" class="news-watchlist-list" aria-label="当前自选股"></ul>
+        </aside>
+
+        <section class="news-list-panel panel" aria-labelledby="news-list-title">
+          <div class="news-panel-head news-list-heading">
+            <div>
+              <h2 id="news-list-title">资讯列表</h2>
+              <p id="news-list-meta" class="hint">仅展示已采集条目；页面分页不限制采集或综述输入。</p>
+            </div>
+            <label class="news-date-filter">浏览日期<input id="news-day" type="date" /></label>
+          </div>
+          <div class="news-list-controls">
+            <div class="news-kind-tabs" role="group" aria-label="资讯范围">
+              <button type="button" class="news-kind-button active" data-news-kind="market" aria-pressed="true">市场资讯</button>
+              <button type="button" class="news-kind-button" data-news-kind="watchlist" aria-pressed="false">自选股资讯</button>
+            </div>
+            <label for="news-symbol-filter">股票筛选</label>
+            <select id="news-symbol-filter" aria-label="按自选股筛选"><option value="">全部自选股</option></select>
+            <label for="news-sort">排序</label>
+            <select id="news-sort"><option value="importance">重要性提示优先</option><option value="latest">最新优先</option></select>
+          </div>
+          <div id="news-list-status" class="news-list-status" role="status" aria-live="polite"></div>
+          <ul id="news-list" class="news-list" aria-label="资讯列表"></ul>
+          <div class="news-pagination">
+            <button id="news-page-prev" class="btn" type="button" disabled>上一页</button>
+            <span id="news-page-label" aria-live="polite">第 1 页</span>
+            <button id="news-page-next" class="btn" type="button" disabled>下一页</button>
+          </div>
+        </section>
+      </div>
+
+      <p class="news-source-disclaimer">数据源：东方财富公开资讯接口（经 AKShare 调用）。当前仅供本机个人非商用使用；此范围说明不代表已获平台转载或 AI 使用许可，也不构成法律意见。请通过原文链接查看完整内容。</p>
+    </div>
+  </section>
+
   <!-- ═══════════ 智能问答页 ═══════════ -->
   <section id="page-chat" class="page hidden">
     <div class="chat-header">
@@ -346,6 +432,7 @@
   <script src="/static/analysis_workflow.js?v=__APP_VERSION__"></script>
   <script src="/static/chat_rendering.js?v=__APP_VERSION__"></script>
   <script src="/static/chat_market_charts.js?v=__APP_VERSION__"></script>
+  <script src="/static/investment_news.js?v=__APP_VERSION__"></script>
   <!-- 版本号由服务端按 app.js 修改时间自动注入，改 JS 后无需手动维护 -->
   <script src="/static/app.js?v=__APP_VERSION__"></script>
 </body>

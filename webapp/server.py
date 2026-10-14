@@ -26,11 +26,12 @@ import re
 import threading
 from pathlib import Path
 import time
+from zoneinfo import ZoneInfo
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import requests
@@ -116,6 +117,10 @@ from .history import (
     retire_superseded_analysis_files,
 )
 from .tasks import TaskManager
+from .investment_news import InvestmentNewsService
+from .investment_news_scheduler import InvestmentNewsScheduler
+from .investment_news_sources import EastmoneyNewsSource
+from .investment_news_store import InvestmentNewsStore, WatchlistLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +155,9 @@ analyzer = ReportAnalyzer(ai_client)
 progressive_pipeline = None
 downloader = ReportDownloader()
 task_manager: Optional[TaskManager] = None
+investment_news_service: Optional[InvestmentNewsService] = None
+investment_news_scheduler: Optional[InvestmentNewsScheduler] = None
+_investment_news_lifecycle_lock = threading.Lock()
 _task_manager_lifecycle_lock = threading.Lock()
 chat_sessions: Dict[str, List[Dict[str, str]]] = {}
 # 单报告会话内存表并发读改写锁
@@ -194,6 +202,66 @@ def _shutdown_task_manager() -> None:
 app.router.add_event_handler("startup", _remove_legacy_research_memory_sidecar)
 app.router.add_event_handler("startup", _startup_task_manager)
 app.router.add_event_handler("shutdown", _shutdown_task_manager)
+
+
+def _investment_news_db_path() -> str:
+    configured = os.getenv("INVESTMENT_NEWS_DB_PATH")
+    return configured or str(DATA_DIR / "investment_news.sqlite3")
+
+
+def _build_investment_news_service() -> InvestmentNewsService:
+    store = InvestmentNewsStore(_investment_news_db_path())
+    return InvestmentNewsService(
+        store=store,
+        source=EastmoneyNewsSource(),
+        ai_client=ai_client,
+        stock_name_lookup=lambda code: stock_index.company_name(code),
+    )
+
+
+def _build_investment_news_scheduler(service: InvestmentNewsService) -> InvestmentNewsScheduler:
+    return InvestmentNewsScheduler(
+        service=service,
+        store=service.store,
+        clock=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
+investment_news_service_factory: Callable[[], InvestmentNewsService] = _build_investment_news_service
+investment_news_scheduler_factory: Callable[[InvestmentNewsService], InvestmentNewsScheduler] = _build_investment_news_scheduler
+
+
+def _investment_news_scheduler_enabled() -> bool:
+    return os.getenv("INVESTMENT_NEWS_SCHEDULER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _startup_investment_news() -> None:
+    global investment_news_service, investment_news_scheduler
+    with _investment_news_lifecycle_lock:
+        if investment_news_service is None:
+            investment_news_service = investment_news_service_factory()
+        if investment_news_scheduler is None and _investment_news_scheduler_enabled():
+            investment_news_scheduler = investment_news_scheduler_factory(investment_news_service)
+        scheduler = investment_news_scheduler
+    if scheduler is not None:
+        scheduler.start()
+
+
+def _shutdown_investment_news() -> None:
+    global investment_news_service, investment_news_scheduler
+    with _investment_news_lifecycle_lock:
+        scheduler = investment_news_scheduler
+        service = investment_news_service
+        investment_news_scheduler = None
+        investment_news_service = None
+    if scheduler is not None:
+        scheduler.stop()
+    if service is not None:
+        service.shutdown(wait=True)
+
+
+app.router.add_event_handler("startup", _startup_investment_news)
+app.router.add_event_handler("shutdown", _shutdown_investment_news)
 
 
 # ── RAG 知识库（惰性初始化；未配置 rag.enabled 时保持 None）──
@@ -906,6 +974,135 @@ def _mcp_call_json(tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ── 健康检查 ───────────────────────────────────────────────
+
+class InvestmentNewsWatchlistRequest(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+def _investment_news_or_503() -> InvestmentNewsService:
+    service = investment_news_service
+    if service is None:
+        raise HTTPException(status_code=503, detail="投资资讯服务尚未就绪")
+    return service
+
+
+def _investment_news_day(value: str | None) -> str:
+    if value is None:
+        return dt.datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    try:
+        return dt.date.fromisoformat(value).isoformat()
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="day 必须是 YYYY-MM-DD") from exc
+
+
+@app.get("/api/investment-news")
+def get_investment_news(
+    day: Optional[str] = None,
+    kind: str = "market",
+    symbol: Optional[str] = None,
+    sort: str = "importance",
+    limit: int = Query(20, ge=1, le=20),
+    offset: int = Query(0, ge=0),
+):
+    service = _investment_news_or_503()
+    day_value = _investment_news_day(day)
+    try:
+        service.store.cleanup_expired()
+        return service.store.list_items(day_value, kind, symbol, sort, limit, offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/investment-news/watchlist")
+def get_investment_news_watchlist():
+    service = _investment_news_or_503()
+    return {"items": service.store.get_watchlist(), "limit": 20}
+
+
+@app.post("/api/investment-news/watchlist", status_code=201)
+def add_investment_news_watchlist(request: InvestmentNewsWatchlistRequest):
+    service = _investment_news_or_503()
+    code = request.code
+    try:
+        stock_index.start()
+        if not stock_index.wait_ready(timeout=5.0):
+            raise HTTPException(status_code=503, detail="股票代码索引尚未就绪")
+        valid = stock_index.is_valid_code(code)
+        name = stock_index.company_name(code)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="股票代码校验暂不可用") from exc
+    if not valid or not name:
+        raise HTTPException(status_code=422, detail="请输入有效的 A 股代码")
+    try:
+        return service.store.add_watchlist(code, name)
+    except WatchlistLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/investment-news/watchlist/{code}", status_code=204)
+def delete_investment_news_watchlist(code: str):
+    service = _investment_news_or_503()
+    if not re.fullmatch(r"\d{6}", code):
+        raise HTTPException(status_code=422, detail="code 必须是六位 A 股代码")
+    if not service.store.remove_watchlist(code):
+        raise HTTPException(status_code=404, detail="自选股不存在")
+    return Response(status_code=204)
+
+
+@app.post("/api/investment-news/collect", status_code=202)
+def collect_investment_news():
+    service = _investment_news_or_503()
+    try:
+        return service.submit_collection("manual")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="投资资讯服务正在关闭") from exc
+
+
+@app.post("/api/investment-news/digest", status_code=202)
+def generate_investment_news_digest():
+    service = _investment_news_or_503()
+    if isinstance(service.ai_client, AIClient) and not getattr(service.ai_client, "api_key", None):
+        raise HTTPException(status_code=503, detail="AI 尚未配置，无法生成综述")
+    try:
+        return service.submit_digest("manual", force=True)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="投资资讯服务正在关闭") from exc
+
+
+@app.get("/api/investment-news/digest")
+def get_investment_news_digest(day: Optional[str] = None):
+    service = _investment_news_or_503()
+    day_value = _investment_news_day(day)
+    service.store.cleanup_expired()
+    digest = service.store.get_digest(day_value)
+    current_hash = service.store.daily_input_hash(day_value)
+    return {
+        "day": day_value,
+        "digest": digest,
+        "current_input_hash": current_hash,
+        "stale": bool(digest and digest["input_hash"] != current_hash),
+    }
+
+
+@app.get("/api/investment-news/runs")
+def get_investment_news_runs(limit: int = Query(20, ge=1, le=100)):
+    service = _investment_news_or_503()
+    return {"items": service.store.list_runs(limit)}
+
+
+@app.get("/api/investment-news/status")
+def get_investment_news_status():
+    service = _investment_news_or_503()
+    result = service.status()
+    result["ai_configured"] = not isinstance(service.ai_client, AIClient) or bool(
+        getattr(service.ai_client, "api_key", None)
+    )
+    return result
+
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
@@ -4011,6 +4208,7 @@ def _render_index() -> HTMLResponse:
         os.path.join(STATIC_DIR, "analysis_workflow.js"),
         os.path.join(STATIC_DIR, "analysis_visualizations.js"),
         os.path.join(STATIC_DIR, "chat_rendering.js"),
+        os.path.join(STATIC_DIR, "investment_news.js"),
         os.path.join(STATIC_DIR, "style.css"),
     )
     with open(index_path, encoding="utf-8") as f:

@@ -116,6 +116,9 @@ function handleRoute() {
   if (page === 'history') initHistoryPage();
   if (page === 'rag') initRagPage();
   if (page === 'chat') initChatPage();
+  if (page === 'investment-news' && typeof window.initInvestmentNewsPage === 'function') {
+    window.initInvestmentNewsPage();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
