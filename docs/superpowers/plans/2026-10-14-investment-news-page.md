@@ -394,11 +394,11 @@ Expected: JavaScript 语法通过；2 项页面契约测试通过。实际 brows
 
 - [x] **Step 3: 对本地应用运行 browser QA**。使用 `tests/browser/investment_news_test_app.py` 以隔离临时 SQLite、假来源和假 AI 启动真实 FastAPI 应用；在 `http://127.0.0.1:8765/#/investment-news` 执行 desktop/tablet/mobile QA，页面错误/控制台为零、4xx/5xx 为零；390px 下 `document.documentElement.scrollWidth == 390`。手动点击验证采集只调用假 source、综述只调用假 AI；不触碰真实 Eastmoney 或 AI 凭证。
 
-- [ ] **Step 4: 合入后更新 README 和功能目录**。按仓库规则仅在本地合入后说明实际可见能力、Asia/Shanghai 调度、手动动作独立、90 天保留、Eastmoney 来源及个人自用边界；功能目录记录合入短 SHA、入口、不变量与验证结果。设计台账保持实施中直到合并证据写入。
+- [x] **Step 4: 合入后更新 README 和功能目录**。本地合入 `7df28fa` 后已更新 `README.md`、`docs/FEATURE-CATALOG.md` 和方案设计台账，明确 Asia/Shanghai 调度、手动动作独立、90 天内容保留、Eastmoney 来源及个人自用边界。
 
-- [ ] **Step 5: 最终检查并提交**。
+- [x] **Step 5: 最终检查并提交**。
 
 Run: `git diff --check && git status --short && git diff --stat`  
-Expected: 变更仅在本 feature worktree；无用户 root 未提交文件混入；只提交代码、测试与文档，不提交 SQLite、日志、截图或浏览器认证状态。
+Expected: feature worktree 仅含计划代码/测试/设计文档；主工作区未跟踪的 `.pi/`、两个 chat-guidance 预览和 `docs/investment-news-design.md` 均保持未修改。Feature 提交 `7df28fa`，未提交 SQLite、日志、截图或浏览器认证状态。
 
-- [ ] **Step 6: 验证后本地合入**。运行适用测试全部通过后，将 feature branch fast-forward 合入本地 `main`，更新 `FEATURE-CATALOG.md` 和设计台账合并短 SHA/验证证据；不推送远端。
+- [x] **Step 6: 验证后本地合入**。聚焦回归通过后，`main` fast-forward 至 `7df28fa`；更新 `FEATURE-CATALOG.md` 和设计台账合并短 SHA/验证证据；未推送远端。
