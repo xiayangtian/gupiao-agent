@@ -349,8 +349,9 @@
             </div>
             <div class="news-secondary-control-row">
               <label class="news-control-field" for="news-symbol-filter">
-                <span>股票筛选</span>
-                <select id="news-symbol-filter" aria-label="按自选股筛选"><option value="">全部自选股</option></select>
+                <span id="news-symbol-filter-label">股票筛选（市场资讯不可用）</span>
+                <select id="news-symbol-filter" aria-label="股票筛选，仅自选股资讯可用" aria-describedby="news-symbol-filter-help" disabled><option value="">全部自选股</option></select>
+                <small id="news-symbol-filter-help" class="hint news-control-field-help">市场资讯没有个股关联，切换至“自选股资讯”后可按股票筛选。</small>
               </label>
               <label class="news-control-field" for="news-sort">
                 <span>排序</span>

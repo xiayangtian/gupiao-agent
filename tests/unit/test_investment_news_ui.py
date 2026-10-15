@@ -18,6 +18,11 @@ def test_index_has_investment_news_route_and_separate_actions():
     assert 'data-news-window="market-today"' in html
     assert 'data-news-window="market-yesterday"' in html
     assert 'data-news-window="watchlist-today"' in html
+    assert 'id="news-symbol-filter-label"' in html
+    assert '股票筛选（市场资讯不可用）' in html
+    assert 'id="news-symbol-filter-help"' in html
+    assert 'aria-describedby="news-symbol-filter-help"' in html
+    assert 'id="news-symbol-filter" aria-label="股票筛选，仅自选股资讯可用" aria-describedby="news-symbol-filter-help" disabled' in html
     assert html.index("investment_news_polling.js") < html.index("investment_news.js")
     assert "/static/investment_news.js?v=" in html
 

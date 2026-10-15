@@ -156,6 +156,33 @@ def test_scheduled_collection_refreshes_the_open_page_on_visibility_check(app_ur
         _browser(session, "close", allow_failure=True)
 
 
+def test_symbol_filter_availability_is_explained_for_each_news_kind(app_url):
+    session = "news-filter-availability-" + uuid.uuid4().hex[:12]
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
+        market = _browser(session, "eval", "JSON.stringify({disabled:document.querySelector('#news-symbol-filter').disabled,"
+                            "label:document.querySelector('#news-symbol-filter-label').textContent,"
+                            "help:document.querySelector('#news-symbol-filter-help').textContent})")
+        market_state = json.loads(market["data"]["result"])
+        assert market_state["disabled"] is True
+        assert "不可用" in market_state["label"]
+        assert "市场资讯没有个股关联" in market_state["help"]
+        assert "自选股资讯" in market_state["help"]
+
+        _browser(session, "click", '[data-news-kind="watchlist"]')
+        watchlist = _browser(session, "eval", "JSON.stringify({disabled:document.querySelector('#news-symbol-filter').disabled,"
+                               "label:document.querySelector('#news-symbol-filter-label').textContent,"
+                               "help:document.querySelector('#news-symbol-filter-help').textContent})")
+        watchlist_state = json.loads(watchlist["data"]["result"])
+        assert watchlist_state["disabled"] is False
+        assert watchlist_state["label"] == "股票筛选"
+        assert "当前共享自选股" in watchlist_state["help"]
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
 def test_watchlist_filter_and_sort_controls_have_deliberate_rows(app_url):
     session = "news-sort-layout-" + uuid.uuid4().hex[:12]
     _browser(session, "open", app_url + "/#/investment-news")

@@ -2966,8 +2966,10 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .news-primary-control-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); }
 .news-kind-tabs { display: flex; gap: 4px; margin-right: auto; }
 .news-secondary-control-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-md); }
-.news-control-field { display: grid; gap: 4px; min-width: 0; }
+.news-control-field { display: grid; align-content: start; gap: 4px; min-width: 0; }
 .news-control-field select { width: 100%; }
+.news-control-field--unavailable select { background: var(--surface-alt); border-style: dashed; color: var(--text-secondary); cursor: not-allowed; }
+.news-control-field-help { font-size: 12px; font-weight: 400; }
 .news-kind-button { min-height: 38px; padding: 7px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-secondary); cursor: pointer; }
 .news-kind-button.active { border-color: var(--accent); background: var(--accent-light); color: #1d4ed8; font-weight: 600; }
 .news-date-shortcuts { display: flex; flex-wrap: wrap; gap: 6px; }

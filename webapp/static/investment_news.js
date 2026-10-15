@@ -304,6 +304,26 @@
     }
   }
 
+  function updateSymbolFilterAvailability() {
+    var filter = byId('news-symbol-filter');
+    var label = byId('news-symbol-filter-label');
+    var help = byId('news-symbol-filter-help');
+    if (!filter) return;
+    var watchlistMode = state.kind === 'watchlist';
+    filter.disabled = !watchlistMode || state.watchlist.length === 0;
+    if (label) label.textContent = watchlistMode ? '股票筛选' : '股票筛选（市场资讯不可用）';
+    var field = filter.closest('.news-control-field');
+    if (field) field.classList.toggle('news-control-field--unavailable', filter.disabled);
+    filter.setAttribute('aria-label', watchlistMode ? '按自选股筛选' : '股票筛选，仅自选股资讯可用');
+    if (help) {
+      help.textContent = !watchlistMode
+        ? '市场资讯没有个股关联，切换至“自选股资讯”后可按股票筛选。'
+        : state.watchlist.length
+          ? '可按当前共享自选股筛选。'
+          : '添加共享自选股后可按股票筛选。';
+    }
+  }
+
   function renderWatchlist() {
     var list = byId('news-watchlist');
     var count = byId('news-watchlist-count');
@@ -328,7 +348,7 @@
     });
     if (count) count.textContent = String(state.watchlist.length);
     filter.value = state.symbol;
-    filter.disabled = state.kind !== 'watchlist' || state.watchlist.length === 0;
+    updateSymbolFilterAvailability();
     if (!state.watchlist.length) {
       list.appendChild(node('li', 'news-empty', '尚未添加自选股；市场资讯可独立浏览。'));
     }
@@ -581,8 +601,7 @@
           tab.classList.toggle('active', active);
           tab.setAttribute('aria-pressed', String(active));
         });
-        var filter = byId('news-symbol-filter');
-        if (filter) filter.disabled = state.kind !== 'watchlist' || state.watchlist.length === 0;
+        updateSymbolFilterAvailability();
         loadNews();
       });
     });
