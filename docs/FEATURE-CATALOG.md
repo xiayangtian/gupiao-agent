@@ -21,7 +21,7 @@
 | [RAG 知识库与检索](#rag) | 摄取 PDF、跨报告或限定范围问答、可选重排序 | `financial_report_fetcher/rag/ingest.py`、`financial_report_fetcher/rag/qa.py`、`financial_report_fetcher/rag/reranker.py` | `test_rag_*.py` | 见设计台账登记证据 |
 | [可信智能问答](#trusted-chat) | 多轮聊天、受限研究计划、研究工作台、研究纪要导出、离线质量观测与运行级评测、检索证据窗口与上下文预算、冻结范围与时间、运行级来源授权/预算/去重、证据持久化与诚实失败状态、数字/期间核验、来源链接、短期行情正文表格、多指数相对走势与个股原价折线图、上下文展示追问及 WebSearch 查询词溯源、会话历史与授权补充财报、受限未检索常识回答、异步执行/进度/协作取消 | `webapp/chat_scope.py`、`chat_policy.py`、`chat_facts.py`、`chat_verifier.py`、`webapp/chat_followups.py`、`chat_request_resolution.py`、`execution_plan.py`、`execution_planner.py`、`webapp/chat_runs.py`、`webapp/source_runtime.py`、`source_adapters.py`、`chat_execution.py`、`webapp/execution_executor.py`、`webapp/evidence_identity.py`、`webapp/research_*.py`、`webapp/chat_evaluation.py`、`webapp/chat_runtime_eval_cases.py`、`webapp/chat_runtime_eval_runner.py`、`webapp/chat_runtime_eval_report.py`、`webapp/chat_retrieval_window.py`、`webapp/chat_context_budget.py`、`scripts/run_chat_evaluation.py`、`scripts/run_chat_runtime_evaluation.py`、`scripts/probe_chat_live.py`、`financial_report_fetcher/rag/qa.py`、`webapp/static/app.js`、`webapp/static/chat_rendering.js`、`webapp/static/chat_market_charts.js`、`webapp/static/style.css` | `test_chat_*.py`、`test_chat_runs.py`、`test_execution_executor.py`、`test_source_runtime.py`、`test_source_adapters.py`、`test_rag_context.py`、`test_research_*.py`、`test_evidence_identity.py`、`test_rag_policy_m2.py`、`test_chat_source_runtime.py`、`test_chat_reliability_p2.py`、`test_chat_reliability_p3.py`、`test_chat_runtime_eval_*.py`、`test_chat_retrieval_window.py`、`test_chat_context_budget.py`、`test_chat_live_probe.py`、`test_chat_trust_flow.py`、`test_research_agent_flow.py`、`test_research_workspace_flow.py` | `4d79eb8`：短期行情正文表格；`03df820`：第四阶段运行级离线评测、检索证据窗口与上下文预算；第三阶段异步执行见 `ee3c3d6`；`1188365`：多指数行情图表 |
 | [行情与 MCP 基本面](#market-mcp) | 实时行情、K 线、基本面/MCP 工具与 A 股日/周复盘 | `financial_report_fetcher/market/tencent.py`、`financial_report_fetcher/market/mcp_client.py`、`financial_report_fetcher/rag/mcp_tools.py`、`webapp/execution_executor.py`、`webapp/mcp_guard.py` | `test_market_*.py`、`test_mcp_*.py`、`test_execution_*recap.py` | `61135a2`：受控 A 股复盘市场概览 |
-| [投资资讯](#investment-news) | 本地市场与最多 20 只共享自选股资讯、原文回链、独立采集和 AI 日综述 | `webapp/investment_news_store.py`、`investment_news_sources.py`、`investment_news.py`、`investment_news_scheduler.py`、`webapp/server.py`、`webapp/static/investment_news.js` | `test_investment_news_*.py`、`test_server_api.py`、`test_investment_news_status_ui.py`、browser QA fixture `investment_news_test_app.py` | `53fc9e5`：突出显示最近成功运行时间并自动隐藏终态提示；`7df28fa`：单机投资资讯与独立综述流程 |
+| [投资资讯](#investment-news) | 本地市场与最多 20 只共享自选股资讯、原文回链、独立采集、7/30 天自选股筛选及按日回看的 AI 综述 | `webapp/investment_news_store.py`、`investment_news_sources.py`、`investment_news.py`、`investment_news_scheduler.py`、`webapp/server.py`、`webapp/static/investment_news.js` | `test_investment_news_*.py`、`test_server_api.py`、`test_investment_news_status_ui.py`、browser QA fixture `investment_news_test_app.py` | `21b3d2a`：采集后定位最新资讯日、自选股日期区间与历史综述回看；`53fc9e5`：突出显示最近成功运行时间并自动隐藏终态提示；`7df28fa`：单机投资资讯与独立综述流程 |
 | [任务与运行可靠性](#runtime) | 分析任务后台执行、取消、恢复和 SSE/轮询 | `webapp/tasks.py`、`task_store.py`、`server.py` | `test_tasks.py`、`test_server_api.py` | 见设计台账登记证据 |
 
 ---
@@ -173,13 +173,13 @@
 <a id="investment-news"></a>
 ## 投资资讯
 
-**用户行为**：查看本地已采集的 A 股市场和最多 20 只共享自选股资讯，按日期/股票筛选并跳转原文；手动或按时段采集，在采集完成后生成可回溯的每日 AI 综述。
+**用户行为**：查看本地已采集的 A 股市场和最多 20 只共享自选股资讯，按日期/股票筛选并跳转原文；自选股可用 7/30 天区间查看；采集后自动定位到最新资讯日；按日期回看每日 AI 综述。
 
 | 项目 | 定位信息 |
 | --- | --- |
 | 核心代码 | `webapp/investment_news_sources.py`（Eastmoney/AKShare 字段规范化）、`webapp/investment_news_store.py`（SQLite、分页、保留、指纹与最近成功运行查询）、`webapp/investment_news.py`（运行/采集/摘要协调）、`webapp/investment_news_scheduler.py`（Asia/Shanghai 调度）、`webapp/server.py`（API/生命周期） |
-| 前端与 API | `webapp/static/investment_news.js`；`GET /api/investment-news`、`/watchlist`、`/digest`、`/runs`、`/status`；`POST /collect`、`/digest`、`/watchlist`；`DELETE /watchlist/{code}` |
-| 关键不变量 | 仅限用户选定的本机个人非商用范围；Eastmoney/AKShare 可用不证明授权、SLA 或覆盖。手动采集不调 AI、手动摘要不采集；自动采集每日 09:00–16:00 整点，自动摘要仅 09:00/16:00 且等待当时采集完成。最多 20 只共享自选股；页面每页最多 20 条不限制收集和摘要输入。资讯片段与内容型日综述最多保留 90 天，运行状态元数据与摘要内容分开保存。页面持续展示最近一次成功采集与综述时间；终态操作提示短暂展示后清空，运行中进度保持可见。来源失败不清空旧数据；摘要要点须引用有效条目；来源时间未知不得伪装为新鲜；同题转载不表示独立佐证；不提供投资建议。 |
+| 前端与 API | `webapp/static/investment_news.js`；`GET /api/investment-news`（单日 `day` 或包含端点的 `start_day`/`end_day`）、`/watchlist`、`/digest?day=...`、`/runs`、`/status`；`POST /collect`、`/digest`、`/watchlist`；`DELETE /watchlist/{code}` |
+| 关键不变量 | 仅限用户选定的本机个人非商用范围；Eastmoney/AKShare 可用不证明授权、SLA 或覆盖。手动采集不调 AI、手动摘要不采集；自动采集每日 09:00–16:00 整点，自动摘要仅 09:00/16:00 且等待当时采集完成。最多 20 只共享自选股；仅自选股提供按所选结束日期含当天计算的 7/30 日历天区间；采集成功/部分成功后将日期定位到最新资讯日。综述按日期保存，每日仅保留最新一份，所选日期驱动历史综述查看。页面每页最多 20 条不限制收集和摘要输入。资讯片段与内容型日综述最多保留 90 天，运行状态元数据与摘要内容分开保存。页面持续展示最近一次成功采集与综述时间；终态操作提示短暂展示后清空，运行中进度保持可见。来源失败不清空旧数据；摘要要点须引用有效条目；来源时间未知不得伪装为新鲜；同题转载不表示独立佐证；不提供投资建议。 |
 | 验证 | `tests/unit/test_investment_news_store.py`、`test_investment_news_sources.py`、`test_investment_news.py`、`test_investment_news_digest.py`、`test_investment_news_scheduler.py`、`test_investment_news_api.py`、`test_investment_news_ui.py`、`tests/unit/test_server_api.py`、`tests/browser/test_investment_news_status_ui.py`；浏览器仅使用 `tests/browser/investment_news_test_app.py` 假来源/假 AI |
 | 设计与记录 | [投资资讯页设计](superpowers/specs/2026-10-14-investment-news-page-design.md)、[实施计划](superpowers/plans/2026-10-14-investment-news-page.md) |
 
@@ -187,6 +187,7 @@
 
 - `7df28fa`：新增本机 A 股投资资讯页、Eastmoney/AKShare 来源规范化、90 天 SQLite 保留、最多 20 只共享自选股及 09/16 自动 AI 综述；采集与摘要可分开触发，摘要要点保留可验证原文链接。浏览器/测试只使用本地 fake source 与 fake AI。当前来源选择不代表 Eastmoney 许可，适用范围仅本机个人非商用。
 - `53fc9e5`：页面长期突出显示最近成功采集/综述的本地时间，成功、失败等终态操作提示 5 秒后自动隐藏，运行中进度保持可见；不自动推断数据过期或要求手动触发。
+- `21b3d2a`：采集成功/部分成功后日期自动切至最新资讯所属日；自选股资讯增加按所选结束日计算的近 7/30 天筛选；切换日期同步查看当日综述，综述保留每日最新一份。
 
 ## 维护规则
 
