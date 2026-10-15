@@ -2962,8 +2962,12 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .news-watchlist-item button { flex: none; }
 .news-list-heading { align-items: center; }
 .news-date-filter { display: grid; gap: 4px; }
-.news-list-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); }
+.news-list-controls { display: grid; gap: var(--space-sm); }
+.news-primary-control-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); }
 .news-kind-tabs { display: flex; gap: 4px; margin-right: auto; }
+.news-secondary-control-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-md); }
+.news-control-field { display: grid; gap: 4px; min-width: 0; }
+.news-control-field select { width: 100%; }
 .news-kind-button { min-height: 38px; padding: 7px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-secondary); cursor: pointer; }
 .news-kind-button.active { border-color: var(--accent); background: var(--accent-light); color: #1d4ed8; font-weight: 600; }
 .news-date-shortcuts { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -2994,11 +2998,10 @@ details.citation-card .citation-snippet { margin-top: 6px; }
   .investment-news-actions .btn { width: 100%; }
   .news-date-filter { max-width: 100%; }
   .news-digest-controls { flex-direction: column; align-items: stretch; }
-  .news-list-controls { align-items: stretch; }
+  .news-primary-control-row { display: grid; gap: 8px; }
   .news-kind-tabs { width: 100%; }
   .news-kind-button { flex: 1; }
-  .news-list-controls label { align-self: center; }
-  .news-list-controls select { flex: 1 1 40%; width: auto; }
+  .news-secondary-control-row { gap: var(--space-sm); }
   .news-pagination .btn { flex: 1; }
 }
 @media (max-width: 390px) {
@@ -3007,6 +3010,6 @@ details.citation-card .citation-snippet { margin-top: 6px; }
   .news-digest-card, .news-watchlist-panel, .news-list-panel { padding: var(--space-md); }
   .investment-news-actions { grid-template-columns: 1fr; }
   .news-list-controls { gap: 6px; }
-  .news-list-controls label { flex-basis: auto; }
+  .news-secondary-control-row { gap: 6px; }
   .news-item { padding: 10px; }
 }

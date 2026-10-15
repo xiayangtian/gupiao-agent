@@ -28,6 +28,7 @@ from webapp.investment_news_store import InvestmentNewsStore, NewsItem  # noqa: 
 
 
 _CALLS: list[str] = []
+_COLLECTION_COUNTER = 0
 
 
 def _write_calls() -> None:
@@ -57,11 +58,13 @@ class FakeStockIndex:
 
 class FakeNewsSource:
     def fetch_market(self):
+        global _COLLECTION_COUNTER
+        _COLLECTION_COUNTER += 1
         _CALLS.append("collect_market")
         _write_calls()
         now = datetime.now(timezone.utc).isoformat()
         return [NewsItem(
-            id="fixture-collected-market", title="测试采集的新市场资讯",
+            id=f"fixture-collected-market-{_COLLECTION_COUNTER}", title=f"测试采集的新市场资讯 {_COLLECTION_COUNTER}",
             url="https://example.test/collected-market", snippet="测试来源片段",
             source_id="eastmoney_market", source_name="测试市场来源",
             published_at=now, collected_at=now, kind="market", symbols=(),
@@ -166,6 +169,18 @@ def _service_factory():
 
 server.stock_index = FakeStockIndex()
 server.investment_news_service_factory = _service_factory
+
+
+@server.app.post("/__test__/scheduled-collection")
+def _run_scheduled_collection_fixture():
+    service = server._investment_news_or_503()
+    queued = service.submit_collection("scheduled")
+    completed = service.wait_for_run(queued["run_id"], timeout=30)
+    return {
+        "run": completed or {"run_id": queued["run_id"], "status": "running"},
+        "title": f"测试采集的新市场资讯 {_COLLECTION_COUNTER}",
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

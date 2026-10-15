@@ -20,6 +20,11 @@
     watchlist: [],
     status: null,
     autocompleteTimer: null,
+    observedRunStatuses: null,
+    scheduledPollTimer: null,
+    scheduledPollInFlight: false,
+    scheduledPollUntil: 0,
+    visibilityListenerBound: false,
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -129,6 +134,7 @@
   async function loadStatus() {
     try {
       state.status = await requestJson('/api/investment-news/status');
+      if (state.observedRunStatuses === null) state.observedRunStatuses = runStatusSnapshot(state.status.recent_runs);
       var messages = ['定时采集：每日 09:00–16:00 整点（Asia/Shanghai）；自动综述：09:00、16:00。'];
       if (!state.status.ai_configured) messages.push('AI 未配置，综述生成可能失败。');
       setStatus('news-status', messages.join(' '));
@@ -139,6 +145,104 @@
       setStatus('news-status', '暂时无法读取运行状态：' + error.message, 'error');
     }
     updateActionButtons();
+  }
+
+  function runStatusSnapshot(runs) {
+    var snapshot = {};
+    (Array.isArray(runs) ? runs : []).forEach(function (run) {
+      if (run && run.run_id) snapshot[run.run_id] = run.status;
+    });
+    return snapshot;
+  }
+
+  function isAutomatedRun(run) {
+    return run && ['scheduled', 'startup_catchup'].indexOf(run.trigger) !== -1;
+  }
+
+  function hasActiveRuns(status) {
+    return Boolean(status && (status.active_collection || status.active_digest));
+  }
+
+  function applyLatestCollectionDay() {
+    var latestDay = state.status && state.status.latest_news_day;
+    var today = shanghaiToday();
+    if (latestDay === today) state.marketDay = 'today';
+    else if (latestDay === shiftDay(today, -1)) state.marketDay = 'yesterday';
+    updateDateShortcuts();
+  }
+
+  async function refreshForAutomatedRuns(runs) {
+    var collectionRuns = runs.filter(function (run) { return run.kind === 'collection'; });
+    var digestRuns = runs.filter(function (run) { return run.kind === 'digest'; });
+    var digestRefreshed = false;
+    if (collectionRuns.some(function (run) { return ['succeeded', 'partial'].indexOf(run.status) !== -1; })) {
+      applyLatestCollectionDay();
+      digestRefreshed = state.digestDay === shanghaiToday();
+      await Promise.all([loadNews(), digestRefreshed ? loadDigest() : Promise.resolve()]);
+      setStatus('news-collection-status', '定时采集完成，资讯已更新。', 'success', true);
+    } else if (collectionRuns.some(function (run) { return run.status === 'failed'; })) {
+      var failedCollection = collectionRuns.find(function (run) { return run.status === 'failed'; });
+      setStatus('news-collection-status', '定时采集失败：' + (failedCollection.error || '请查看运行记录。'), 'error', true);
+    }
+    for (var index = 0; index < digestRuns.length; index += 1) {
+      var run = digestRuns[index];
+      if (run.status === 'succeeded' && run.result && run.result.day === state.digestDay) {
+        if (!digestRefreshed) await loadDigest();
+        digestRefreshed = true;
+        setStatus('news-digest-run-status', '定时综述已更新。', 'success', true);
+      } else if (run.status === 'succeeded' && run.result && run.result.day) {
+        setStatus('news-digest-run-status', '定时综述已生成（' + run.result.day + '），可选择该日期回看。', 'success', true);
+      } else if (run.status === 'failed') {
+        setStatus('news-digest-run-status', '定时综述失败：' + (run.error || '请查看运行记录。'), 'error', true);
+      }
+    }
+  }
+
+  async function pollAutomatedUpdates(force) {
+    if (!window.location.hash.startsWith(PAGE) || document.visibilityState !== 'visible' || state.scheduledPollInFlight) return;
+    var inScheduleWindow = window.InvestmentNewsPolling &&
+      window.InvestmentNewsPolling.isWithinScheduleWindow(new Date());
+    if (!force && !inScheduleWindow && !hasActiveRuns(state.status) && Date.now() > state.scheduledPollUntil) return;
+    state.scheduledPollInFlight = true;
+    var previous = state.observedRunStatuses || {};
+    try {
+      await loadStatus();
+      var runs = state.status && Array.isArray(state.status.recent_runs) ? state.status.recent_runs : [];
+      var changedRuns = runs.filter(function (run) {
+        return isAutomatedRun(run) && ['succeeded', 'partial', 'failed', 'skipped'].indexOf(run.status) !== -1 &&
+          previous[run.run_id] !== run.status;
+      });
+      state.observedRunStatuses = runStatusSnapshot(runs);
+      if (hasActiveRuns(state.status)) {
+        if (state.status.active_collection && isAutomatedRun(state.status.active_collection)) {
+          setStatus('news-collection-status', '定时采集运行中…');
+        }
+        if (state.status.active_digest && isAutomatedRun(state.status.active_digest)) {
+          setStatus('news-digest-run-status', '定时综述运行中…');
+        }
+      }
+      if (changedRuns.length) {
+        state.scheduledPollUntil = Date.now() + 5 * 60 * 1000;
+        await refreshForAutomatedRuns(changedRuns);
+      }
+    } catch (error) {
+      setStatus('news-status', '自动更新检查失败：' + error.message, 'error');
+    } finally {
+      state.scheduledPollInFlight = false;
+    }
+  }
+
+  function startAutomatedUpdatePolling() {
+    if (state.scheduledPollTimer === null) {
+      var interval = window.InvestmentNewsPolling ? window.InvestmentNewsPolling.intervalMs : 30000;
+      state.scheduledPollTimer = window.setInterval(function () { pollAutomatedUpdates(false); }, interval);
+    }
+    if (!state.visibilityListenerBound) {
+      state.visibilityListenerBound = true;
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') pollAutomatedUpdates(true);
+      });
+    }
   }
 
   function appendDigestSection(container, title, points) {
@@ -378,10 +482,7 @@
         ['succeeded', 'partial', 'failed', 'skipped'].indexOf(run.status) !== -1);
       await loadStatus();
       if (isCollection && ['succeeded', 'partial'].indexOf(run.status) !== -1 && state.status && state.status.latest_news_day) {
-        var today = shanghaiToday();
-        if (state.status.latest_news_day === today) state.marketDay = 'today';
-        else if (state.status.latest_news_day === shiftDay(today, -1)) state.marketDay = 'yesterday';
-        updateDateShortcuts();
+        applyLatestCollectionDay();
         state.offset = 0;
       }
       if (isCollection) await Promise.all([loadNews(), loadDigest(), loadWatchlist()]);
@@ -519,6 +620,6 @@
     bindEvents();
     updateDateShortcuts();
     renderWatchlist();
-    loadAll();
+    loadAll().finally(startAutomatedUpdatePolling);
   };
 }());

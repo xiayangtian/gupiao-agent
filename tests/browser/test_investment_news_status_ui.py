@@ -136,6 +136,47 @@ def test_summary_date_and_news_day_shortcuts_are_separate(app_url):
         _browser(session, "close", allow_failure=True)
 
 
+def test_scheduled_collection_refreshes_the_open_page_on_visibility_check(app_url):
+    session = "news-scheduled-refresh-" + uuid.uuid4().hex[:12]
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        before = _browser(session, "eval", "document.querySelector('#news-list')?.textContent")
+        scheduled = _browser(session, "eval", "fetch('/__test__/scheduled-collection',{method:'POST'}).then(r=>r.json())")
+        title = scheduled["data"]["result"]["title"]
+        assert title not in before["data"]["result"]
+        _browser(session, "eval", "document.dispatchEvent(new Event('visibilitychange'))")
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 500))")
+        after = _browser(session, "eval", "JSON.stringify({list:document.querySelector('#news-list')?.textContent,"
+                  "time:document.querySelector('#news-last-collection-success')?.textContent})")
+        result = json.loads(after["data"]["result"])
+        assert title in result["list"]
+        assert result["time"] != "暂无成功记录"
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
+def test_watchlist_filter_and_sort_controls_have_deliberate_rows(app_url):
+    session = "news-sort-layout-" + uuid.uuid4().hex[:12]
+    _browser(session, "open", app_url + "/#/investment-news")
+    _browser(session, "set", "viewport", "1280", "900")
+    try:
+        _browser(session, "click", '[data-news-kind="watchlist"]')
+        layout = _browser(session, "eval", "(()=>{const rect=s=>{const r=document.querySelector(s).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}};"
+                  "return JSON.stringify({primary:rect('.news-primary-control-row'),secondary:rect('.news-secondary-control-row'),"
+                  "symbol:rect('#news-symbol-filter'),sort:rect('#news-sort')})})()")
+        metrics = json.loads(layout["data"]["result"])
+        assert metrics["primary"]["y"] < metrics["secondary"]["y"]
+        assert abs(metrics["symbol"]["y"] - metrics["sort"]["y"]) < 2
+        _browser(session, "set", "viewport", "390", "844")
+        mobile = _browser(session, "eval", "JSON.stringify({viewport:innerWidth,document:document.documentElement.scrollWidth})")
+        mobile_width = json.loads(mobile["data"]["result"])
+        assert mobile_width["document"] == mobile_width["viewport"]
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
 def test_success_times_stay_visible_while_operation_notices_auto_hide(app_url):
     session = "investment-news-status-" + uuid.uuid4().hex
     _browser(session, "open", app_url + "/#/investment-news")

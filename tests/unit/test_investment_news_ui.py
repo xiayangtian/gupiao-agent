@@ -18,6 +18,7 @@ def test_index_has_investment_news_route_and_separate_actions():
     assert 'data-news-window="market-today"' in html
     assert 'data-news-window="market-yesterday"' in html
     assert 'data-news-window="watchlist-today"' in html
+    assert html.index("investment_news_polling.js") < html.index("investment_news.js")
     assert "/static/investment_news.js?v=" in html
 
 
