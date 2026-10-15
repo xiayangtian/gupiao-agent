@@ -13,6 +13,7 @@
     day: '',
     sort: 'importance',
     symbol: '',
+    rangeDays: 0,
     offset: 0,
     total: 0,
     watchlist: [],
@@ -55,6 +56,11 @@
     } catch (_) {
       return null;
     }
+  }
+
+  function shiftDay(value, offset) {
+    var parts = value.split('-').map(Number);
+    return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] + offset)).toISOString().slice(0, 10);
   }
 
   function formatTime(value) {
@@ -162,14 +168,16 @@
     var content = byId('news-digest');
     if (!content) return;
     try {
-      var response = await requestJson('/api/investment-news/digest');
+      var response = await requestJson('/api/investment-news/digest?day=' + encodeURIComponent(state.day));
       var digest = response.digest;
       content.replaceChildren();
+      var digestTitle = byId('news-digest-title');
+      if (digestTitle) digestTitle.textContent = state.day === shanghaiToday() ? '今日 AI 综述' : state.day + ' AI 综述';
       var badge = byId('news-digest-badge');
       var meta = byId('news-digest-meta');
       if (!digest) {
         if (badge) { badge.textContent = '尚未生成'; badge.className = 'badge badge-info'; }
-        content.appendChild(node('p', 'news-empty', '今日综述尚未生成。手动生成只读取已入库资讯，不会触发采集。'));
+        content.appendChild(node('p', 'news-empty', state.day + ' 的综述尚未生成。手动生成只读取已入库资讯，不会触发采集。'));
         return;
       }
       if (badge) {
@@ -287,17 +295,25 @@
     if (previous) previous.disabled = state.offset <= 0;
     if (next) next.disabled = state.offset + PAGE_SIZE >= state.total;
     var meta = byId('news-list-meta');
-    if (meta) meta.textContent = '已采集 ' + state.total + ' 条 · 每页最多 ' + PAGE_SIZE + ' 条；页面分页不限制采集或综述输入。';
+    if (meta) {
+      var rangeLabel = data.start_day && data.end_day ? ' · 日期：' + data.start_day + ' 至 ' + data.end_day : '';
+      meta.textContent = '已采集 ' + state.total + ' 条' + rangeLabel + ' · 每页最多 ' + PAGE_SIZE + ' 条；页面分页不限制采集或综述输入。';
+    }
   }
 
   async function loadNews() {
     var query = new URLSearchParams({
-      day: state.day,
       kind: state.kind,
       sort: state.sort,
       limit: String(PAGE_SIZE),
       offset: String(state.offset),
     });
+    if (state.kind === 'watchlist' && state.rangeDays) {
+      query.set('start_day', shiftDay(state.day, 1 - state.rangeDays));
+      query.set('end_day', state.day);
+    } else {
+      query.set('day', state.day);
+    }
     if (state.symbol && state.kind === 'watchlist') query.set('symbol', state.symbol);
     setStatus('news-list-status', '正在读取资讯…');
     try {
@@ -337,11 +353,22 @@
       var run = await pollRun(response.run_id, kind);
       var stateText = runStatusLabel(run.status);
       if (run.error) stateText += '：' + run.error;
+      if (!isCollection && run.result && run.result.day) {
+        state.day = run.result.day;
+        var selectedDate = byId('news-day');
+        if (selectedDate) selectedDate.value = state.day;
+      }
       setStatus(statusId, stateText, run.status === 'failed' ? 'error' : (run.status === 'succeeded' ? 'success' : ''),
         ['succeeded', 'partial', 'failed', 'skipped'].indexOf(run.status) !== -1);
       await loadStatus();
+      if (isCollection && ['succeeded', 'partial'].indexOf(run.status) !== -1 && state.status && state.status.latest_news_day) {
+        state.day = state.status.latest_news_day;
+        var dateInput = byId('news-day');
+        if (dateInput) dateInput.value = state.day;
+        state.offset = 0;
+      }
       if (isCollection) await Promise.all([loadNews(), loadDigest(), loadWatchlist()]);
-      else await loadDigest();
+      else await Promise.all([loadNews(), loadDigest()]);
     } catch (error) {
       setStatus(statusId, '任务失败：' + error.message, 'error', true);
     } finally {
@@ -405,7 +432,22 @@
     var form = byId('news-watchlist-form');
     if (form) form.addEventListener('submit', addWatchlist);
     var date = byId('news-day');
-    if (date) date.addEventListener('change', function () { state.day = date.value || shanghaiToday(); state.offset = 0; loadNews(); });
+    if (date) date.addEventListener('change', function () {
+      state.day = date.value || shanghaiToday();
+      state.offset = 0;
+      Promise.all([loadNews(), loadDigest()]);
+    });
+    var rangeButtons = document.querySelectorAll('[data-news-days]');
+    rangeButtons.forEach(function (button) {
+      button.addEventListener('click', function () {
+        state.rangeDays = Number(button.dataset.newsDays);
+        rangeButtons.forEach(function (candidate) {
+          candidate.setAttribute('aria-pressed', String(candidate === button));
+        });
+        state.offset = 0;
+        loadNews();
+      });
+    });
     var sort = byId('news-sort');
     if (sort) sort.addEventListener('change', function () { state.sort = sort.value; state.offset = 0; loadNews(); });
     var symbol = byId('news-symbol-filter');
@@ -414,6 +456,8 @@
       button.addEventListener('click', function () {
         state.kind = button.dataset.newsKind;
         state.offset = 0;
+        var dateRange = byId('news-date-range');
+        if (dateRange) dateRange.classList.toggle('hidden', state.kind !== 'watchlist');
         document.querySelectorAll('[data-news-kind]').forEach(function (tab) {
           var active = tab.dataset.newsKind === state.kind;
           tab.classList.toggle('active', active);
@@ -456,6 +500,8 @@
     if (date && !date.value) date.value = shanghaiToday();
     state.day = date ? date.value : shanghaiToday();
     bindEvents();
+    var dateRange = byId('news-date-range');
+    if (dateRange) dateRange.classList.toggle('hidden', state.kind !== 'watchlist');
     renderWatchlist();
     loadAll();
   };

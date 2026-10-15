@@ -24,6 +24,17 @@ def test_url_dedup_preserves_distinct_related_stories(tmp_path):
     }
 
 
+def test_daily_digest_keeps_only_the_latest_snapshot_per_day(tmp_path):
+    store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
+    store.save_digest("2026-10-14", {"summary": "morning"}, "hash-a", "model-a")
+    store.save_digest("2026-10-14", {"summary": "afternoon"}, "hash-b", "model-b")
+    store.save_digest("2026-10-13", {"summary": "previous day"}, "hash-c", "model-c")
+
+    assert store.get_digest("2026-10-14")["payload"] == {"summary": "afternoon"}
+    assert store.get_digest("2026-10-14")["model"] == "model-b"
+    assert store.get_digest("2026-10-13")["payload"] == {"summary": "previous day"}
+
+
 def test_daily_digest_hash_includes_watchlist_scope_changes(tmp_path):
     store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
     market_item = make_item(31)

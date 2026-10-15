@@ -285,10 +285,20 @@ class InvestmentNewsStore:
                 now_count += 1
         return now_count
 
-    def _item_rows(self, day: str) -> list[dict[str, Any]]:
+    def _item_rows(
+        self, day: str | None = None, *, start_day: str | None = None, end_day: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if (start_day is None) != (end_day is None) or (day is None and start_day is None):
+            raise ValueError("provide either day or both start_day and end_day")
+        if start_day is not None:
+            where = "COALESCE(n.published_day, n.collected_day) BETWEEN ? AND ?"
+            params = (start_day, end_day)
+        else:
+            where = "n.published_day = ? OR (n.published_day IS NULL AND n.collected_day = ?)"
+            params = (day, day)
         with self._connect() as db:
             rows = db.execute(
-                """
+                f"""
                 SELECT n.*,
                        (SELECT COUNT(*) FROM news_items related WHERE related.story_group_id = n.story_group_id) AS related_count,
                        (SELECT json_group_array(json_object(
@@ -300,10 +310,10 @@ class InvestmentNewsStore:
                        (SELECT json_group_array(DISTINCT kind) FROM news_item_scopes x
                          WHERE x.item_id = n.id) AS kinds_json
                 FROM news_items n
-                WHERE n.published_day = ? OR (n.published_day IS NULL AND n.collected_day = ?)
+                WHERE {where}
                 ORDER BY COALESCE(n.published_at, n.last_seen_at) DESC, n.id
                 """,
-                (day, day),
+                params,
             ).fetchall()
         result = []
         for row in rows:
@@ -318,6 +328,14 @@ class InvestmentNewsStore:
             result.append(entry)
         return result
 
+    def latest_news_day(self) -> str | None:
+        """Return the latest Shanghai day represented by a stored news item."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT MAX(COALESCE(published_day, collected_day)) AS day FROM news_items"
+            ).fetchone()
+        return row["day"] if row and row["day"] else None
+
     def get_day_items(self, day: str) -> list[dict[str, Any]]:
         """Return every stored item assigned to the Shanghai business day, without paging."""
         return self._item_rows(day)
@@ -325,6 +343,7 @@ class InvestmentNewsStore:
     def list_items(
         self, day: str, kind: str | None = None, symbol: str | None = None,
         sort: str = "latest", limit: int = 20, offset: int = 0,
+        *, start_day: str | None = None, end_day: str | None = None,
     ) -> dict[str, Any]:
         if sort not in {"latest", "importance"}:
             raise ValueError("sort must be 'latest' or 'importance'")
@@ -337,7 +356,11 @@ class InvestmentNewsStore:
         if symbol is not None and not re.fullmatch(r"\d{6}", symbol):
             raise ValueError("symbol must be a six-digit A-share code")
 
-        rows = self._item_rows(day)
+        if (start_day is None) != (end_day is None):
+            raise ValueError("start_day and end_day must be provided together")
+        if start_day is not None and start_day > end_day:
+            raise ValueError("start_day must not be after end_day")
+        rows = self._item_rows(day if start_day is None else None, start_day=start_day, end_day=end_day)
         filtered = []
         for row in rows:
             if kind not in {None, "all"} and kind not in row["kinds"]:
@@ -354,7 +377,10 @@ class InvestmentNewsStore:
         else:
             filtered = known + unknown
         total = len(filtered)
-        return {"items": filtered[int(offset):int(offset) + int(limit)], "total": total, "day": day}
+        result = {"items": filtered[int(offset):int(offset) + int(limit)], "total": total, "day": end_day or day}
+        if start_day is not None:
+            result.update({"start_day": start_day, "end_day": end_day})
+        return result
 
     def get_watchlist(self) -> list[dict[str, str]]:
         with self._connect() as db:

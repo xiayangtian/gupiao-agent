@@ -49,6 +49,53 @@ def app_url():
             process.communicate(timeout=5)
 
 
+def test_collection_switches_the_date_filter_to_the_latest_news_day(app_url):
+    session = "investment-news-latest-day-" + uuid.uuid4().hex
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        _browser(session, "eval", "document.querySelector('#news-day').value='2026-10-13';"
+                  "document.querySelector('#news-day').dispatchEvent(new Event('change',{bubbles:true}))")
+        _browser(session, "click", "#news-collect")
+        _browser(session, "wait", "#news-collection-status.success")
+        selected_day = _browser(session, "eval", "(async()=>{const status=await fetch('/api/investment-news/status').then(r=>r.json());"
+                  "return JSON.stringify({selected:document.querySelector('#news-day')?.value,latest:status.latest_news_day});})()")
+        selected = json.loads(selected_day["data"]["result"])
+        assert selected["selected"] == selected["latest"]
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
+def test_watchlist_date_shortcuts_and_historical_digest_follow_selected_date(app_url):
+    session = "investment-news-date-window-" + uuid.uuid4().hex
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        _browser(session, "click", '[data-news-kind="watchlist"]')
+        _browser(session, "click", '[data-news-days="7"]')
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
+        seven_days = _browser(session, "eval", "document.querySelector('#news-list')?.textContent")
+        assert "长江电力三十天内资讯" not in seven_days["data"]["result"]
+
+        _browser(session, "click", '[data-news-days="30"]')
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
+        thirty_days = _browser(session, "eval", "document.querySelector('#news-list')?.textContent")
+        assert "长江电力七天内资讯" in thirty_days["data"]["result"]
+
+        _browser(session, "eval", "(()=>{const input=document.querySelector('#news-day');const d=new Date(input.value+'T00:00:00Z');"
+                  "d.setUTCDate(d.getUTCDate()-1);input.value=d.toISOString().slice(0,10);"
+                  "input.dispatchEvent(new Event('change',{bubbles:true}));})()")
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
+        historical = _browser(session, "eval", "JSON.stringify({day:document.querySelector('#news-day')?.value,"
+                    "title:document.querySelector('#news-digest-title')?.textContent,"
+                    "summary:document.querySelector('#news-digest')?.textContent})")
+        historical_dom = json.loads(historical["data"]["result"])
+        assert historical_dom["title"] == historical_dom["day"] + " AI 综述"
+        assert "历史日期综述 fixture" in historical_dom["summary"]
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
 def test_success_times_stay_visible_while_operation_notices_auto_hide(app_url):
     session = "investment-news-status-" + uuid.uuid4().hex
     _browser(session, "open", app_url + "/#/investment-news")

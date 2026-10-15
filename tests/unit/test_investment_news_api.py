@@ -79,6 +79,32 @@ def test_list_api_validates_day_kind_pagination_and_limits_page_to_twenty(news_c
     assert client.get("/api/investment-news", params={"day": "not-a-day"}).status_code == 422
     assert client.get("/api/investment-news", params={"kind": "unrecognized"}).status_code == 422
     assert client.get("/api/investment-news", params={"limit": 21}).status_code == 422
+    assert client.get("/api/investment-news", params={"start_day": "2026-10-14"}).status_code == 422
+    assert client.get("/api/investment-news", params={
+        "start_day": "2026-10-15", "end_day": "2026-10-14",
+    }).status_code == 422
+    assert client.get("/api/investment-news", params={
+        "day": "2026-10-14", "start_day": "2026-10-13", "end_day": "2026-10-14",
+    }).status_code == 422
+
+
+def test_news_api_filters_inclusive_watchlist_date_range(news_client):
+    client, service, store = news_client
+    store.upsert_items([
+        make_item(11, day="2026-10-12", symbol="600900"),
+        make_item(12, day="2026-10-13", symbol="600900"),
+        make_item(13, day="2026-10-14", symbol="600900"),
+        make_item(14, day="2026-10-15", symbol="600900"),
+    ])
+
+    response = client.get("/api/investment-news", params={
+        "kind": "watchlist", "symbol": "600900",
+        "start_day": "2026-10-13", "end_day": "2026-10-14",
+    })
+
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()["items"]} == {"item-12", "item-13"}
+    assert response.json()["total"] == 2
 
 
 def test_watchlist_api_enforces_a_share_code_and_twenty_item_cap(news_client):
@@ -115,6 +141,7 @@ def test_manual_collection_and_digest_are_distinct_api_operations(news_client):
     status = client.get("/api/investment-news/status")
     assert status.status_code == 200
     latest = status.json()["latest_successful_runs"]
+    assert status.json()["latest_news_day"] == "2026-10-14"
     assert latest["collection"]["status"] == "succeeded"
     assert latest["digest"]["status"] == "succeeded"
     assert latest["collection"]["finished_at"]

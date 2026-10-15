@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -117,6 +117,19 @@ def _service_factory():
         source_id="eastmoney_stock", source_name="测试个股来源",
         published_at=timestamp, collected_at=timestamp, kind="watchlist", symbols=("600900",),
     )])
+    shanghai_tz = ZoneInfo("Asia/Shanghai")
+    for days_ago, item_id, title in (
+        (5, "fixture-stock-7day", "长江电力七天内资讯"),
+        (20, "fixture-stock-30day", "长江电力三十天内资讯"),
+    ):
+        published_day = date.fromisoformat(today) - timedelta(days=days_ago)
+        published_at = datetime.combine(published_day, datetime_time(10, 0), tzinfo=shanghai_tz).isoformat()
+        store.upsert_items([NewsItem(
+            id=item_id, title=title, url="https://example.test/stock/" + item_id,
+            snippet="历史自选股 fixture 片段", source_id="eastmoney_stock",
+            source_name="测试个股来源", published_at=published_at,
+            collected_at=timestamp, kind="watchlist", symbols=("600900",),
+        )])
     digest_payload = {
         "market_themes": [{
             "text": "本地测试综述，引用链接应可打开且不执行 HTML。",
@@ -132,6 +145,15 @@ def _service_factory():
     }
     store.save_digest(today, digest_payload, store.daily_input_hash(today), "browser-fixture",
                       input_count=26, source_count=26, data_through=timestamp)
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+    historical_payload = {
+        "market_themes": [{"text": "历史日期综述 fixture", "item_ids": [], "citation_count": 0, "citations": []}],
+        "policy_regulatory": [], "watchlist": [], "risks": [],
+        "input_count": 0, "source_count": 0,
+        "data_through": datetime.combine(date.fromisoformat(yesterday), datetime_time(12, 0), tzinfo=shanghai_tz).isoformat(),
+    }
+    store.save_digest(yesterday, historical_payload, store.daily_input_hash(yesterday), "browser-fixture",
+                      input_count=0, source_count=0, data_through=historical_payload["data_through"])
     return service
 
 

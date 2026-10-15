@@ -478,6 +478,7 @@ class InvestmentNewsService:
             "active_collection": self.store.get_active_run("collection"),
             "active_digest": self.store.get_active_run("digest"),
             "recent_runs": self.store.list_runs(10),
+            "latest_news_day": self.store.latest_news_day(),
             "latest_successful_runs": {
                 "collection": self.store.get_latest_successful_run("collection"),
                 "digest": self.store.get_latest_successful_run("digest"),

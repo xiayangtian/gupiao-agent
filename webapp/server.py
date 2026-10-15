@@ -998,6 +998,8 @@ def _investment_news_day(value: str | None) -> str:
 @app.get("/api/investment-news")
 def get_investment_news(
     day: Optional[str] = None,
+    start_day: Optional[str] = None,
+    end_day: Optional[str] = None,
     kind: str = "market",
     symbol: Optional[str] = None,
     sort: str = "importance",
@@ -1005,10 +1007,24 @@ def get_investment_news(
     offset: int = Query(0, ge=0),
 ):
     service = _investment_news_or_503()
-    day_value = _investment_news_day(day)
+    has_range = start_day is not None or end_day is not None
+    if has_range:
+        if day is not None or start_day is None or end_day is None:
+            raise HTTPException(status_code=422, detail="start_day 和 end_day 必须同时提供，且不能与 day 混用")
+        start_value = _investment_news_day(start_day)
+        end_value = _investment_news_day(end_day)
+        if start_value > end_value:
+            raise HTTPException(status_code=422, detail="start_day 不能晚于 end_day")
+        day_value = end_value
+    else:
+        start_value = end_value = None
+        day_value = _investment_news_day(day)
     try:
         service.store.cleanup_expired()
-        return service.store.list_items(day_value, kind, symbol, sort, limit, offset)
+        return service.store.list_items(
+            day_value, kind, symbol, sort, limit, offset,
+            start_day=start_value, end_day=end_value,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -2965,6 +2965,9 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .news-kind-tabs { display: flex; gap: 4px; margin-right: auto; }
 .news-kind-button { min-height: 38px; padding: 7px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-secondary); cursor: pointer; }
 .news-kind-button.active { border-color: var(--accent); background: var(--accent-light); color: #1d4ed8; font-weight: 600; }
+.news-date-range { display: flex; flex-wrap: wrap; gap: 6px; }
+.news-date-range .btn { min-height: 38px; }
+.news-date-range .btn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-light); color: #1d4ed8; font-weight: 600; }
 .news-item { display: grid; gap: var(--space-sm); padding: var(--space-md); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); min-width: 0; }
 .news-item-title { color: var(--text-primary); font-weight: 650; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
 .news-item-title a:hover { color: var(--accent-hover); text-decoration: underline; }
