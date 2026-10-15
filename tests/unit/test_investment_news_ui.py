@@ -13,6 +13,11 @@ def test_index_has_investment_news_route_and_separate_actions():
     assert 'id="investment-news-page"' in html
     assert 'id="news-collect"' in html
     assert 'id="news-generate-digest"' in html
+    assert 'id="news-digest-day"' in html
+    assert 'id="news-market-day-controls"' in html
+    assert 'data-news-window="market-today"' in html
+    assert 'data-news-window="market-yesterday"' in html
+    assert 'data-news-window="watchlist-today"' in html
     assert "/static/investment_news.js?v=" in html
 
 

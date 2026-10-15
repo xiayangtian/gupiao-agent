@@ -118,6 +118,14 @@ def _service_factory():
         published_at=timestamp, collected_at=timestamp, kind="watchlist", symbols=("600900",),
     )])
     shanghai_tz = ZoneInfo("Asia/Shanghai")
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+    yesterday_published = datetime.combine(date.fromisoformat(yesterday), datetime_time(10, 0), tzinfo=shanghai_tz).isoformat()
+    store.upsert_items([NewsItem(
+        id="fixture-market-yesterday", title="昨日市场资讯 fixture",
+        url="https://example.test/market/yesterday", snippet="昨日市场快讯 fixture",
+        source_id="eastmoney_market", source_name="测试市场来源",
+        published_at=yesterday_published, collected_at=timestamp, kind="market", symbols=(),
+    )])
     for days_ago, item_id, title in (
         (5, "fixture-stock-7day", "长江电力七天内资讯"),
         (20, "fixture-stock-30day", "长江电力三十天内资讯"),
@@ -145,7 +153,6 @@ def _service_factory():
     }
     store.save_digest(today, digest_payload, store.daily_input_hash(today), "browser-fixture",
                       input_count=26, source_count=26, data_through=timestamp)
-    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
     historical_payload = {
         "market_themes": [{"text": "历史日期综述 fixture", "item_ids": [], "citation_count": 0, "citations": []}],
         "policy_regulatory": [], "watchlist": [], "risks": [],

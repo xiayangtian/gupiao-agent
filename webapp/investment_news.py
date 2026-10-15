@@ -279,7 +279,9 @@ class InvestmentNewsService:
         return payload
 
     @staticmethod
-    def _validated_sections(payload: dict[str, Any], allowed_ids: set[str]) -> tuple[dict[str, list[dict[str, Any]]], bool]:
+    def _validated_sections(
+        payload: dict[str, Any], allowed_ids: set[str], allowed_watchlist_ids: set[str]
+    ) -> tuple[dict[str, list[dict[str, Any]]], bool]:
         sections: dict[str, list[dict[str, Any]]] = {name: [] for name in _DIGEST_SECTIONS}
         had_claim = False
         for section in _DIGEST_SECTIONS:
@@ -296,7 +298,10 @@ class InvestmentNewsService:
                 had_claim = True
                 if not isinstance(ids, list):
                     continue
-                valid_ids = sorted({item_id for item_id in ids if isinstance(item_id, str) and item_id in allowed_ids})
+                referenced_ids = {item_id for item_id in ids if isinstance(item_id, str)}
+                valid_ids = sorted(referenced_ids & allowed_ids)
+                if section == "watchlist" and (not valid_ids or not referenced_ids <= allowed_watchlist_ids):
+                    continue
                 if valid_ids:
                     sections[section].append({"text": text.strip(), "item_ids": valid_ids})
         return sections, had_claim
@@ -305,7 +310,8 @@ class InvestmentNewsService:
         messages = [{"role": "user", "content": json.dumps(content, ensure_ascii=False)}]
         system = (
             "你是财经资讯归纳助手。只根据输入条目归纳，不引入外部事实；每个要点都必须附上"
-            "输入中存在的 item_ids。watchlist 要点只引用 kind=watchlist 的条目并标明关联股票；"
+            "输入中存在的 item_ids。watchlist 要点只引用 allowed_watchlist_item_ids 中的条目，"
+            "该列表只包含当前自选股对应的资讯；不得把市场资讯用于自选股重点，并标明关联股票；"
             "不得把转载或同题报道声称为独立佐证。不得推断新闻导致股价涨跌，不给买卖建议；不确定处明确说明。"
             "只返回 JSON 对象，包含 market_themes、policy_regulatory、watchlist、risks 四个数组，"
             "数组元素格式为 {text, item_ids}。每个数组最多 5 条，每条 text 不超过 100 字。"
@@ -336,7 +342,8 @@ class InvestmentNewsService:
                     "content": "上次输出不完整或不是有效 JSON。请缩短内容，只输出完整 JSON 对象，四个数组各最多 3 条。",
                 })
         allowed = set(content.get("allowed_item_ids", []))
-        sections, had_claim = self._validated_sections(payload, allowed)
+        allowed_watchlist = set(content.get("allowed_watchlist_item_ids", []))
+        sections, had_claim = self._validated_sections(payload, allowed, allowed_watchlist)
         if had_claim and not any(sections.values()):
             raise ValueError("AI digest produced claims without valid source item citations")
         model = str(response.get("model") or "unknown") if isinstance(response, dict) else "unknown"
@@ -382,15 +389,22 @@ class InvestmentNewsService:
                     "importance_tags": item["importance_tags"],
                 })
 
+            active_watchlist_codes = {str(entry["code"]) for entry in self.store.get_watchlist()}
+            watchlist_ids = {
+                item["id"] for item in model_items
+                if "watchlist" in item["kinds"] and active_watchlist_codes.intersection(item["symbols"])
+            }
             batch_summaries = []
             model_name = "unknown"
             for batch in self._digest_batches(model_items):
                 batch_ids = [item["id"] for item in batch]
+                batch_watchlist_ids = sorted(set(batch_ids) & watchlist_ids)
                 sections, model_name = self._call_digest_model({
                     "stage": "summarize_batch",
                     "day": day,
                     "items": batch,
                     "allowed_item_ids": batch_ids,
+                    "allowed_watchlist_item_ids": batch_watchlist_ids,
                 })
                 batch_summaries.append({
                     "item_ids": batch_ids,
@@ -402,6 +416,7 @@ class InvestmentNewsService:
                 "day": day,
                 "batch_summaries": batch_summaries,
                 "allowed_item_ids": sorted(all_ids),
+                "allowed_watchlist_item_ids": sorted(watchlist_ids),
             })
             items_by_id = {str(item["id"]): item for item in items}
             for section in final_sections.values():

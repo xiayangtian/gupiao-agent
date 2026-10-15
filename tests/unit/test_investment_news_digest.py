@@ -74,6 +74,39 @@ def test_digest_prompt_includes_watchlist_scope_and_symbols(tmp_path):
     service.shutdown()
 
 
+def test_market_items_cannot_be_classified_as_watchlist_highlights(tmp_path):
+    market_item = make_item(801)
+
+    class MisclassifyingAI:
+        def chat(self, messages, **kwargs):
+            content = json.loads(messages[-1]["content"])
+            ids = content.get("allowed_item_ids") or [item["id"] for item in content.get("items", [])]
+            return {
+                "content": json.dumps({
+                    "market_themes": [{"text": "市场快讯主题", "item_ids": ids[:1]}] if ids else [],
+                    "policy_regulatory": [],
+                    "watchlist": [{"text": "宁德时代（误分类）", "item_ids": ids[:1]}] if ids else [],
+                    "risks": [],
+                }, ensure_ascii=False),
+                "model": "misclassification-test",
+            }
+
+    service, store = make_service(
+        tmp_path,
+        source=FakeNewsSource(market_items=[market_item]),
+        ai_client=MisclassifyingAI(),
+    )
+    store.add_watchlist("600900", "长江电力")
+    service.collect_now("manual")
+
+    result = service.generate_digest("2026-10-14", force=True)
+
+    assert result["status"] == "succeeded"
+    assert result["watchlist"] == []
+    assert result["market_themes"][0]["text"] == "市场快讯主题"
+    service.shutdown()
+
+
 def test_automatic_digest_skips_unchanged_input_but_manual_force_regenerates(tmp_path):
     items = [make_item(index) for index in range(3)]
     service, store = make_service(tmp_path, source=FakeNewsSource(market_items=items))

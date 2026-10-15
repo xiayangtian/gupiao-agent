@@ -2940,6 +2940,7 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .news-operation-status.success { border-color: var(--success); background: var(--success-light); color: var(--text-primary); }
 .news-digest-card, .news-watchlist-panel, .news-list-panel { padding: var(--space-lg); min-width: 0; }
 .news-digest-card { display: grid; gap: var(--space-md); }
+.news-digest-controls { display: flex; align-items: center; gap: var(--space-md); }
 .news-digest-card h2, .news-watchlist-panel h2, .news-list-panel h2 { font-size: 17px; }
 .news-digest-content { display: grid; gap: var(--space-md); min-width: 0; }
 .news-digest-section { display: grid; gap: var(--space-sm); }
@@ -2954,7 +2955,7 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .news-watchlist-add-row { display: flex; gap: var(--space-sm); min-width: 0; }
 .news-watchlist-add-row input, .news-list-controls select, .news-date-filter input { min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border-hover); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-primary); font: inherit; }
 .news-watchlist-add-row input { flex: 1; width: 100%; }
-.news-watchlist-form input:focus-visible, .news-list-controls select:focus-visible, .news-date-filter input:focus-visible, .news-kind-button:focus-visible, .news-list button:focus-visible, .news-watchlist-list button:focus-visible, .investment-news-actions button:focus-visible, .news-pagination button:focus-visible { outline: 3px solid rgb(59 130 246 / 45%); outline-offset: 2px; }
+.news-watchlist-form input:focus-visible, .news-list-controls select:focus-visible, .news-date-filter input:focus-visible, .news-kind-button:focus-visible, .news-date-shortcuts .btn:focus-visible, .news-list button:focus-visible, .news-watchlist-list button:focus-visible, .investment-news-actions button:focus-visible, .news-pagination button:focus-visible { outline: 3px solid rgb(59 130 246 / 45%); outline-offset: 2px; }
 .news-watchlist-list, .news-list { list-style: none; display: grid; gap: var(--space-sm); min-width: 0; }
 .news-watchlist-item { display: flex; justify-content: space-between; align-items: center; gap: var(--space-sm); padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); min-width: 0; }
 .news-watchlist-item-label { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
@@ -2965,9 +2966,9 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .news-kind-tabs { display: flex; gap: 4px; margin-right: auto; }
 .news-kind-button { min-height: 38px; padding: 7px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-secondary); cursor: pointer; }
 .news-kind-button.active { border-color: var(--accent); background: var(--accent-light); color: #1d4ed8; font-weight: 600; }
-.news-date-range { display: flex; flex-wrap: wrap; gap: 6px; }
-.news-date-range .btn { min-height: 38px; }
-.news-date-range .btn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-light); color: #1d4ed8; font-weight: 600; }
+.news-date-shortcuts { display: flex; flex-wrap: wrap; gap: 6px; }
+.news-date-shortcuts .btn { min-height: 44px; }
+.news-date-shortcuts .btn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-light); color: #1d4ed8; font-weight: 600; }
 .news-item { display: grid; gap: var(--space-sm); padding: var(--space-md); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); min-width: 0; }
 .news-item-title { color: var(--text-primary); font-weight: 650; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
 .news-item-title a:hover { color: var(--accent-hover); text-decoration: underline; }
@@ -2988,10 +2989,11 @@ details.citation-card .citation-snippet { margin-top: 6px; }
   .news-list-panel { order: 1; }
 }
 @media (max-width: 560px) {
-  .investment-news-header, .news-list-heading { flex-direction: column; align-items: stretch; }
+  .investment-news-header, .news-list-heading, .news-digest-card .news-panel-head { flex-direction: column; align-items: stretch; }
   .investment-news-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .investment-news-actions .btn { width: 100%; }
   .news-date-filter { max-width: 100%; }
+  .news-digest-controls { flex-direction: column; align-items: stretch; }
   .news-list-controls { align-items: stretch; }
   .news-kind-tabs { width: 100%; }
   .news-kind-button { flex: 1; }

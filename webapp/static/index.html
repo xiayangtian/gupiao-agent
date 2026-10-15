@@ -293,7 +293,10 @@
             <h2 id="news-digest-title">今日 AI 综述</h2>
             <p id="news-digest-meta" class="hint">综述仅涵盖本地已采集资讯；自动生成时间为 09:00 和 16:00（Asia/Shanghai）。</p>
           </div>
-          <span id="news-digest-badge" class="badge badge-info">尚未生成</span>
+          <div class="news-digest-controls">
+            <label class="news-date-filter">查看综述日期<input id="news-digest-day" type="date" /></label>
+            <span id="news-digest-badge" class="badge badge-info">尚未生成</span>
+          </div>
         </div>
         <div id="news-digest" class="news-digest-content">
           <p class="hint">今日综述尚未生成。手动生成只读取已入库资讯，不会触发采集。</p>
@@ -327,16 +330,20 @@
               <h2 id="news-list-title">资讯列表</h2>
               <p id="news-list-meta" class="hint">仅展示已采集条目；页面分页不限制采集或综述输入。</p>
             </div>
-            <label class="news-date-filter">浏览日期<input id="news-day" type="date" /></label>
           </div>
           <div class="news-list-controls">
             <div class="news-kind-tabs" role="group" aria-label="资讯范围">
               <button type="button" class="news-kind-button active" data-news-kind="market" aria-pressed="true">市场资讯</button>
               <button type="button" class="news-kind-button" data-news-kind="watchlist" aria-pressed="false">自选股资讯</button>
             </div>
-            <div id="news-date-range" class="news-date-range hidden" role="group" aria-label="自选股资讯日期范围">
-              <button class="btn" type="button" data-news-days="7" aria-pressed="false">近 7 天</button>
-              <button class="btn" type="button" data-news-days="30" aria-pressed="false">近 30 天</button>
+            <div id="news-market-day-controls" class="news-date-shortcuts" role="group" aria-label="市场资讯日期">
+              <button class="btn" type="button" data-news-window="market-today" aria-pressed="true">今天</button>
+              <button class="btn" type="button" data-news-window="market-yesterday" aria-pressed="false">昨天</button>
+            </div>
+            <div id="news-watchlist-day-controls" class="news-date-shortcuts hidden" role="group" aria-label="自选股资讯日期范围">
+              <button class="btn" type="button" data-news-window="watchlist-today" aria-pressed="true">今日</button>
+              <button class="btn" type="button" data-news-window="watchlist-7" aria-pressed="false">近 7 天</button>
+              <button class="btn" type="button" data-news-window="watchlist-30" aria-pressed="false">近 30 天</button>
             </div>
             <label for="news-symbol-filter">股票筛选</label>
             <select id="news-symbol-filter" aria-label="按自选股筛选"><option value="">全部自选股</option></select>
