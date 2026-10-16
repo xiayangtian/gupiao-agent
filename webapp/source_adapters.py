@@ -24,6 +24,7 @@ class SourceAccess:
     mcp_allow: Callable[[], bool]
     web_enabled: bool
     tencent_enabled: bool
+    akshare_enabled: bool = False
 
     def permits(self, call: SourceCall) -> bool:
         if call.provider == "mcp":
@@ -37,6 +38,32 @@ class SourceAccess:
             return self.web_enabled
         if call.provider == "tencent":
             return self.tencent_enabled
+        if call.provider == "akshare":
+            if not self.akshare_enabled or call.category != "market":
+                return False
+            if call.operation == "a_share_market_snapshot":
+                trade_date = call.arguments.get("trade_date")
+                try:
+                    datetime.strptime(trade_date, "%Y-%m-%d")
+                    valid_date = isinstance(trade_date, str) and len(trade_date) == 10
+                except (TypeError, ValueError):
+                    valid_date = False
+                return set(call.arguments) == {"trade_date"} and valid_date
+            if call.operation == "a_share_index_kline":
+                if set(call.arguments) != {"symbol", "start_date", "end_date"}:
+                    return False
+                if call.arguments.get("symbol") not in {"sh000001", "sz399001", "sz399006", "sh000688"}:
+                    return False
+                start_raw, end_raw = call.arguments.get("start_date"), call.arguments.get("end_date")
+                try:
+                    start = date.fromisoformat(start_raw)
+                    end = date.fromisoformat(end_raw)
+                    if start.isoformat() != start_raw or end.isoformat() != end_raw:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+                return start <= end and (end - start).days <= 14
+            return False
         if call.category == "local":
             return True
         return False
@@ -133,6 +160,10 @@ def _request_coverage(call: SourceCall) -> SourceCoverage:
         raw_window = arguments.get("window") or arguments.get("period")
         if isinstance(raw_window, str) and len(raw_window) <= 40:
             query_window = raw_window
+    elif call.provider == "akshare" and call.operation == "a_share_index_kline":
+        start, end = arguments.get("start_date"), arguments.get("end_date")
+        if isinstance(start, str) and isinstance(end, str) and len(start) == len(end) == 10:
+            query_window = f"{start}至{end}"
     return SourceCoverage(limit=limit, query_window=query_window)
 
 
@@ -208,6 +239,9 @@ def normalize_source(call: SourceCall, raw: Any, *, fetched_at: str = "") -> Sou
         else:
             content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:MAX_SOURCE_CHARS]
         status = "success" if as_of else "partial"
+        if (call.provider == "akshare" and call.operation == "a_share_market_snapshot"
+                and isinstance(value, Mapping) and value.get("status") in {"partial", "unavailable"}):
+            status = str(value["status"])
         return SourceResult("", call.provider, call.operation, call.category, status,
                             content=content, as_of=as_of, fetched_at=fetched_at,
                             payload=payload, coverage=coverage)

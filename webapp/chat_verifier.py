@@ -9,7 +9,7 @@ from typing import Sequence
 from webapp.chat_models import EvidenceArtifact, Fact, FactConflict, Scope, VerificationIssue, VerificationReport
 
 _NUMBER_RE = re.compile(
-    r"(?<![\d.])(-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*(元/股|亿元|万元|百分点|百分比|指数点|%|％|倍|股|点|家|元)"
+    r"(?<![\d.])(-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*(元/股|亿元|万元|百分点|百分比|指数点|%|％|倍|股|只|点|家|元)"
 )
 _MONEY_SCALES = {"元": 1e-8, "万元": 1e-4, "亿元": 1.0}
 
@@ -36,6 +36,18 @@ _METRIC_ALIASES = {
     "index_close": ("index_close", "指数", "上证指数", "深证成指", "创业板指"),
     "index_close_delta": ("index_close_delta", "指数", "指数点"),
     "limit_up_count": ("limit_up_count", "涨停", "涨停家数"),
+    "market_advancing_count": ("market_advancing_count", "上涨家数"),
+    "market_declining_count": ("market_declining_count", "下跌家数"),
+    "market_unchanged_count": ("market_unchanged_count", "平盘家数"),
+    "market_limit_up_count": ("market_limit_up_count", "涨停家数", "涨停"),
+    "market_limit_down_count": ("market_limit_down_count", "跌停家数", "跌停"),
+    "market_total_turnover": ("market_total_turnover", "全 A 成交额", "成交额"),
+    "market_total_volume": ("market_total_volume", "全 A 成交量", "成交量"),
+    "market_volume_ratio": ("market_volume_ratio", "全 A 加权量比", "量比"),
+    "market_security_sample_count": ("market_security_sample_count", "全 A 快照证券数"),
+    "market_volume_ratio_sample_count": ("market_volume_ratio_sample_count", "量比有效样本数"),
+    "market_volume_ratio_active_count": ("market_volume_ratio_active_count", "有成交股票数"),
+    "market_volume_ratio_coverage": ("market_volume_ratio_coverage", "量比样本覆盖率"),
 }
 
 

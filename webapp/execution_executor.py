@@ -20,6 +20,38 @@ _MARKET_KINDS = frozenset((
 _A_SHARE_INDICES = ("sh000001", "sz399001", "sz399006", "sh000688")
 
 
+def include_previous_market_bar(rows: Any, selected_bars: Any) -> list[dict[str, Any]]:
+    """Add the latest actual earlier daily bar for an explicitly requested one-day comparison."""
+    selected = [dict(row) for row in selected_bars if isinstance(row, dict)] if isinstance(selected_bars, (list, tuple)) else []
+    if not selected:
+        return []
+    latest_date = str(selected[-1].get("date") or "")
+    if len(latest_date) != 10:
+        return selected
+    try:
+        from datetime import date
+        date.fromisoformat(latest_date)
+    except ValueError:
+        return selected
+    previous = []
+    if isinstance(rows, (list, tuple)):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_date = row.get("date")
+            if not isinstance(row_date, str) or len(row_date) != 10 or row_date >= latest_date:
+                continue
+            try:
+                date.fromisoformat(row_date)
+            except ValueError:
+                continue
+            previous.append(row)
+    if not previous:
+        return selected
+    previous_date = max(str(row["date"]) for row in previous)
+    return [dict(next(row for row in previous if row["date"] == previous_date)), *selected]
+
+
 @dataclass(frozen=True)
 class ExecutionStepResult:
     id: str

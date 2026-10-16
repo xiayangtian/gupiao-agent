@@ -58,6 +58,32 @@ def test_web_search_projection_preserves_safe_query_summary():
     assert json.loads(projection.tool_artifacts[0].arguments_summary) == {"query": "长江电力 近五日趋势"}
 
 
+def test_akshare_tool_artifact_exposes_row_coverage_and_specific_limitations():
+    from webapp.chat_execution import project_sources
+    from webapp.chat_models import Scope
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    summary = {
+        "status": "partial", "trade_date": "2026-10-15", "as_of": "2026-10-15T15:05:00+08:00",
+        "universe_rows": 5500, "unique_security_rows": 5500, "classified_rows": 5500,
+        "volume_ratio_sample_count": 5100, "volume_ratio_active_rows": 5200,
+        "limit_up_count": 36, "limit_down_count": None,
+        "limitations": "跌停池缺失或日期校验不通过",
+    }
+    result = SourceResult(
+        "s1", "akshare", "a_share_market_snapshot", "market", "partial",
+        as_of=summary["as_of"], payload=(summary,),
+        coverage=SourceCoverage(returned_rows=1, data_window="2026-10-15"),
+    )
+
+    artifact = project_sources([result], Scope.whole_corpus()).tool_artifacts[0]
+
+    assert "快照证券 5,500/5,500 行" in artifact.result_summary
+    assert "量比样本 5,100/5,200 只" in artifact.result_summary
+    assert "来源涨停池 36 家、跌停池 不可用 家" in artifact.result_summary
+    assert "跌停池缺失" in artifact.result_summary
+
+
 def test_local_retrieval_is_not_fabricated_as_external_tool_artifact():
     from webapp.chat_execution import project_sources
     from webapp.chat_models import Scope
@@ -115,6 +141,42 @@ def test_server_frozen_market_plan_uses_one_authorized_tencent_call_without_mode
     assert result.status == "success"
     assert runtime.budget.snapshot()["market"] == 1
     assert runtime.budget.snapshot()["web"] == 0
+
+
+def test_akshare_market_snapshot_is_blocked_when_external_market_sources_are_disabled():
+    from types import SimpleNamespace
+    from webapp.chat_execution import build_source_runtime
+    from webapp.chat_models import Scope
+    from webapp.source_adapters import SourceAccess
+    from webapp.source_runtime import SourceCall, SourceResult
+
+    access = SourceAccess(
+        mcp_enabled=False, listed_tools=frozenset(), whitelist=frozenset(),
+        mcp_allow=lambda: False, web_enabled=False, tencent_enabled=True, akshare_enabled=True,
+    )
+    runtime = build_source_runtime(
+        scope=Scope.whole_corpus(), policy=SimpleNamespace(max_calls=5),
+        cfg=SimpleNamespace(mcp_max_tool_calls=9), use_mcp=False,
+        source_mode="market_recap", access=access,
+    )
+    invoked = []
+    result = runtime.call(
+        SourceCall("akshare", "a_share_market_snapshot", "market", {"trade_date": "2026-10-15"}),
+        lambda: invoked.append(True) or SourceResult("", "akshare", "a_share_market_snapshot", "market", "success",
+                                                      as_of="2026-10-15T15:00:00+08:00"),
+    )
+
+    assert result.status == "unavailable" and result.error_code == "not_authorized"
+    index_result = runtime.call(
+        SourceCall("akshare", "a_share_index_kline", "market", {
+            "symbol": "sh000001", "start_date": "2026-10-06", "end_date": "2026-10-15",
+        }),
+        lambda: invoked.append(True) or SourceResult("", "akshare", "a_share_index_kline", "market", "success",
+                                                      as_of="2026-10-15"),
+    )
+    assert index_result.status == "unavailable" and index_result.error_code == "not_authorized"
+    assert invoked == []
+    assert runtime.budget.snapshot() == {"total": 0, "market": 0, "web": 0}
 
 
 def test_market_recap_runtime_budget_is_9_total_7_market_2_web_and_config_capped():
@@ -236,7 +298,7 @@ def test_market_overview_is_advertised_only_for_matching_today_or_five_trading_d
         assert not market_overview_window_compatible(resolve_market_window(query, now))
 
 
-def test_market_recap_requires_four_matching_indices_and_all_three_breadth_calls():
+def test_daily_market_recap_requires_four_matching_indices_and_full_market_snapshot():
     from datetime import date
 
     from webapp.chat_execution import market_task_status
@@ -251,22 +313,46 @@ def test_market_recap_requires_four_matching_indices_and_all_three_breadth_calls
         as_of="2026-10-09", payload=({"symbol": symbol, "date": "2026-10-09", "close": 1},),
         coverage=SourceCoverage(returned_rows=1, data_window="2026-10-09"))
         for index, symbol in enumerate(symbols)]
-    breadth = [
-        SourceResult("b1", "mcp", "stock_zt_pool", "market", "success", as_of="2026-10-09",
-                     payload=({"date": "2026-10-09", "symbol": "600001"},),
-                     coverage=SourceCoverage(data_window="2026-10-09")),
-        SourceResult("b2", "mcp", "stock_zt_pool", "market", "success", as_of="2026-10-09",
-                     payload=({"date": "2026-10-09", "symbol": "600002"},),
-                     coverage=SourceCoverage(data_window="2026-10-09")),
-        SourceResult("b3", "mcp", "stock_sector_fund_flow_rank", "market", "success", as_of="2026-10-09",
-                     payload=({"date": "2026-10-09", "name": "行业"},),
-                     coverage=SourceCoverage(query_window="今日", data_window="2026-10-09")),
-    ]
+    snapshot = SourceResult(
+        "b1", "akshare", "a_share_market_snapshot", "market", "success", as_of="2026-10-09T15:00:00+08:00",
+        payload=({"trade_date": "2026-10-09"},),
+        coverage=SourceCoverage(returned_rows=1, data_window="2026-10-09"),
+    )
+    partial_snapshot = SourceResult(
+        "b2", "akshare", "a_share_market_snapshot", "market", "partial", as_of="2026-10-09T15:00:00+08:00",
+        payload=({"trade_date": "2026-10-09"},),
+        coverage=SourceCoverage(returned_rows=1, data_window="2026-10-09"),
+    )
 
     assert market_task_status("market_recap", scope, window, indices, "passed") == "partial"
-    assert market_task_status("market_recap", scope, window, indices + breadth, "passed") == "completed"
-    assert market_task_status("market_recap", scope, window, indices + breadth[:-1], "passed") == "partial"
-    assert market_task_status("market_recap", scope, window, indices + breadth, "partial") == "partial"
+    assert market_task_status("market_recap", scope, window, indices + [snapshot], "passed") == "completed"
+    assert market_task_status("market_recap", scope, window, indices + [partial_snapshot], "passed") == "partial"
+    assert market_task_status("market_recap", scope, window, indices + [snapshot], "partial") == "partial"
+
+
+def test_daily_recap_accepts_akshare_index_facts_with_previous_bar_for_comparison():
+    from datetime import date
+    from webapp.chat_execution import market_task_status
+    from webapp.chat_models import Scope
+    from webapp.chat_time import MarketWindow
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    window = MarketWindow("今日", "explicit", date(2026, 10, 16), date(2026, 10, 16), None)
+    symbols = ("sh000001", "sz399001", "sz399006", "sh000688")
+    indices = [SourceResult(
+        f"ak-{index}", "akshare", "a_share_index_kline", "market", "success",
+        as_of="2026-10-16", payload=(
+            {"symbol": symbol, "date": "2026-10-15", "close": 100},
+            {"symbol": symbol, "date": "2026-10-16", "close": 101},
+        ), coverage=SourceCoverage(returned_rows=2, data_window="2026-10-15至2026-10-16"),
+    ) for index, symbol in enumerate(symbols)]
+    snapshot = SourceResult(
+        "breadth", "akshare", "a_share_market_snapshot", "market", "success",
+        as_of="2026-10-16T15:00:00+08:00", payload=({"trade_date": "2026-10-16"},),
+        coverage=SourceCoverage(returned_rows=1, data_window="2026-10-16"),
+    )
+
+    assert market_task_status("market_recap", Scope.whole_corpus(), window, indices + [snapshot], "passed") == "completed"
 
 
 def test_source_coverage_is_projected_into_bounded_tool_artifact_summary():

@@ -3401,6 +3401,7 @@ function appendChatMsg(sel, role, content, createdAt) {
   if (!box) return;
   var div = document.createElement('div');
   div.className = 'chat-msg ' + role;
+  if (role === 'user' && div.dataset) div.dataset.question = String(content == null ? '' : content);
   var displayed = window.ChatRendering
     ? window.ChatRendering.normalizeAssistantMarkdown(content)
     : content;
@@ -3646,6 +3647,15 @@ function chatRunQuestion(runBlock) {
     if (prev.classList
         && prev.classList.contains('chat-msg')
         && prev.classList.contains('user')) {
+      if (prev.dataset && typeof prev.dataset.question === 'string') return prev.dataset.question;
+      if (typeof prev.cloneNode === 'function') {
+        var copy = prev.cloneNode(true);
+        var timestamps = copy.querySelectorAll ? copy.querySelectorAll('.chat-msg-time') : [];
+        Array.prototype.forEach.call(timestamps, function (time) {
+          if (time && typeof time.remove === 'function') time.remove();
+        });
+        return copy.textContent || '';
+      }
       return prev.textContent || '';
     }
     prev = prev.previousElementSibling;

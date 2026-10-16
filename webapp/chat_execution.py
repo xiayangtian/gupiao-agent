@@ -38,7 +38,7 @@ def build_source_runtime(*, scope: Scope, policy: object, cfg: object, use_mcp: 
         total = min(max(0, configured), max(0, policy_limit))
         market, web = total, total
     def authorize(call):
-        if call.provider == "mcp" and not use_mcp:
+        if call.provider in {"mcp", "akshare"} and not use_mcp:
             return False
         return access.permits(call)
     return SourceRuntime(scope, CallBudget(total, market, web), authorize, control=control)
@@ -155,7 +155,8 @@ def _matching_index_sources(
     expected = {"sh000001", "sz399001", "sz399006", "sh000688"}
     matches: dict[str, SourceResult] = {}
     for source in sources:
-        if source.category != "market" or source.operation != "kline" or source.status not in {"success", "partial"}:
+        if (source.category != "market" or source.operation not in {"kline", "a_share_index_kline"}
+                or source.status not in {"success", "partial"}):
             continue
         for row in _source_rows(source):
             symbol = _row_symbol(row)
@@ -203,23 +204,56 @@ def market_task_status(
         indices = _matching_index_sources(sources, window)
         if indices:
             evidence_status = "partial"
-            overview = [source for source in sources if source.category == "market"
-                        and source.operation in {"stock_zt_pool", "stock_sector_fund_flow_rank"}]
-            pools = [source for source in overview if source.operation == "stock_zt_pool"]
-            flows = [source for source in overview if source.operation == "stock_sector_fund_flow_rank"]
-            overview_complete = (
-                len(indices) == 4 and len(pools) >= 2 and len(flows) >= 1
-                and all(source.status == "success" and _source_window_matches(source, window)
-                        for source in pools + flows)
-                and (window.kind != "rolling_trading_days" or any(
-                    source.coverage.query_window == f"{window.trading_days}日" for source in flows
-                ))
-            )
+            if window.label == "今日":
+                snapshots = [source for source in sources if source.provider == "akshare"
+                             and source.operation == "a_share_market_snapshot"
+                             and source.status in {"success", "partial"}
+                             and _source_window_matches(source, window)]
+                overview_complete = len(indices) == 4 and any(
+                    source.status == "success" for source in snapshots
+                )
+            else:
+                overview = [source for source in sources if source.category == "market"
+                            and source.operation in {"stock_zt_pool", "stock_sector_fund_flow_rank"}]
+                pools = [source for source in overview if source.operation == "stock_zt_pool"]
+                flows = [source for source in overview if source.operation == "stock_sector_fund_flow_rank"]
+                overview_complete = (
+                    len(indices) == 4 and len(pools) >= 2 and len(flows) >= 1
+                    and all(source.status == "success" and _source_window_matches(source, window)
+                            for source in pools + flows)
+                    and (window.kind != "rolling_trading_days" or any(
+                        source.coverage.query_window == f"{window.trading_days}日" for source in flows
+                    ))
+                )
             if overview_complete and all(source.status == "success" for source in indices.values()):
                 evidence_status = "completed"
     if evidence_status == "failed":
         return "failed"
     return evidence_status if verification == "passed" else "partial"
+
+
+def _source_result_summary(result: SourceResult) -> str:
+    if result.provider != "akshare" or result.operation != "a_share_market_snapshot":
+        return ""
+    rows = result.payload if isinstance(result.payload, tuple) else ()
+    if len(rows) != 1 or not isinstance(rows[0], Mapping):
+        return result.error_code[:120]
+    row = rows[0]
+
+    def count(name: str) -> str:
+        value = row.get(name)
+        return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else "不可用"
+
+    parts = [
+        f"快照证券 {count('unique_security_rows')}/{count('universe_rows')} 行",
+        f"涨跌分类 {count('classified_rows')}/{count('unique_security_rows')} 行",
+        f"量比样本 {count('volume_ratio_sample_count')}/{count('volume_ratio_active_rows')} 只",
+        f"来源涨停池 {count('limit_up_count')} 家、跌停池 {count('limit_down_count')} 家",
+    ]
+    limitation = row.get("limitations")
+    if isinstance(limitation, str) and limitation.strip():
+        parts.append("限制：" + limitation.strip())
+    return "；".join(parts)[:400]
 
 
 def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProjection:
@@ -252,9 +286,10 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
                         if result.category == "web" and result.fetched_at else ())
         if result.category == "local":
             continue
-        provider = result.provider if result.provider in {"mcp", "tencent", "web", "local"} else "other"
+        provider = result.provider if result.provider in {"mcp", "tencent", "akshare", "web", "local"} else "other"
         coverage_summary = result.coverage.summary()
-        artifact_summary = result.content[:400] if status in {"success", "partial"} else result.error_code[:120]
+        artifact_summary = (_source_result_summary(result) or
+                            (result.content[:400] if status in {"success", "partial"} else result.error_code[:120]))
         if coverage_summary:
             artifact_summary = ("覆盖：" + coverage_summary + ("；" + artifact_summary if artifact_summary else ""))[:500]
         artifact = ToolArtifact(
@@ -268,9 +303,9 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
             source_id=result.call_id,
         )
         tools.append(artifact)
-        if result.provider == "tencent" and result.operation == "kline":
+        if result.provider in {"tencent", "akshare"}:
             market_facts = facts_from_market_result(result, artifact)
-            if scope.mode != "whole_corpus":
+            if result.provider == "tencent" and scope.mode != "whole_corpus":
                 allowed_codes = {company.code for company in scope.companies}
                 market_facts = tuple(fact for fact in market_facts if fact.company_code in allowed_codes)
             facts.extend(market_facts)

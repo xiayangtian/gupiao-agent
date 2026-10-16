@@ -42,6 +42,87 @@ def test_authorization_requires_source_capability_and_switch():
     assert not access.permits(SourceCall("mcp", "other", "market", {}))
     assert not access.permits(SourceCall("web", "search", "web", {}))
     assert access.permits(SourceCall("tencent", "quote", "market", {}))
+    assert not access.permits(SourceCall("akshare", "a_share_market_snapshot", "market", {"trade_date": "2026-10-15"}))
+
+
+def test_akshare_snapshot_requires_exact_server_operation_and_iso_date():
+    from webapp.source_adapters import SourceAccess
+    from webapp.source_runtime import SourceCall
+
+    access = SourceAccess(
+        mcp_enabled=False, listed_tools=frozenset(), whitelist=frozenset(),
+        mcp_allow=lambda: False, web_enabled=False, tencent_enabled=False,
+        akshare_enabled=True,
+    )
+    assert access.permits(SourceCall("akshare", "a_share_market_snapshot", "market", {"trade_date": "2026-10-15"}))
+    assert not access.permits(SourceCall("akshare", "other", "market", {"trade_date": "2026-10-15"}))
+    assert not access.permits(SourceCall("akshare", "a_share_market_snapshot", "market", {"trade_date": "2026-10-15", "code": "600000"}))
+    assert not access.permits(SourceCall("akshare", "a_share_market_snapshot", "market", {"trade_date": "2026-02-30"}))
+
+
+def test_akshare_index_kline_requires_whitelisted_symbol_and_narrow_server_dates():
+    from webapp.source_adapters import SourceAccess
+    from webapp.source_runtime import SourceCall
+
+    access = SourceAccess(
+        mcp_enabled=False, listed_tools=frozenset(), whitelist=frozenset(),
+        mcp_allow=lambda: False, web_enabled=False, tencent_enabled=False, akshare_enabled=True,
+    )
+    valid = SourceCall("akshare", "a_share_index_kline", "market", {
+        "symbol": "sh000001", "start_date": "2026-10-06", "end_date": "2026-10-16",
+    })
+    assert access.permits(valid)
+    assert not access.permits(SourceCall("akshare", "a_share_index_kline", "market", {
+        "symbol": "600000", "start_date": "2026-10-06", "end_date": "2026-10-16",
+    }))
+    assert not access.permits(SourceCall("akshare", "a_share_index_kline", "market", {
+        "symbol": "sh000001", "start_date": "2026-09-01", "end_date": "2026-10-16",
+    }))
+    assert not access.permits(SourceCall("akshare", "a_share_index_kline", "market", {
+        "symbol": "sh000001", "start_date": "2026-10-17", "end_date": "2026-10-16",
+    }))
+    assert not access.permits(SourceCall("akshare", "a_share_index_kline", "market", {
+        "symbol": "sh000001", "start_date": "2026-10-06", "end_date": "2026-10-16", "period": "minute",
+    }))
+
+
+def test_akshare_summary_status_and_coverage_survive_source_normalization():
+    from webapp.source_adapters import normalize_source
+    from webapp.source_runtime import SourceCall
+
+    result = normalize_source(
+        SourceCall("akshare", "a_share_market_snapshot", "market", {"trade_date": "2026-10-15"}),
+        {"status": "partial", "trade_date": "2026-10-15", "as_of": "2026-10-15T15:00:00+08:00",
+         "advancing_count": None, "universe_rows": 5000, "limitations": "coverage incomplete"},
+        fetched_at="2026-10-15T15:00:00+08:00",
+    )
+    assert result.status == "partial"
+    assert result.as_of == "2026-10-15T15:00:00+08:00"
+    assert result.coverage.data_window == "2026-10-15"
+    assert result.payload[0]["universe_rows"] == 5000
+
+
+def test_akshare_index_bars_normalize_with_requested_date_coverage():
+    from webapp.source_adapters import normalize_source
+    from webapp.source_runtime import SourceCall
+
+    call = SourceCall("akshare", "a_share_index_kline", "market", {
+        "symbol": "sh000001", "start_date": "2026-10-06", "end_date": "2026-10-16",
+    })
+    result = normalize_source(call, {
+        "as_of": "2026-10-16",
+        "bars": [
+            {"date": "2026-10-15", "close": 3707.48, "symbol": "sh000001", "kline_period": "day"},
+            {"date": "2026-10-16", "close": 3692.45, "symbol": "sh000001", "kline_period": "day"},
+        ],
+    }, fetched_at="2026-10-16T14:30:00+08:00")
+
+    assert result.status == "success"
+    assert result.as_of == "2026-10-16"
+    assert result.coverage.returned_rows == 2
+    assert result.coverage.query_window == "2026-10-06至2026-10-16"
+    assert result.coverage.data_window == "2026-10-15至2026-10-16"
+    assert result.payload[-1]["close"] == 3692.45
 
 
 def test_unsupported_text_is_never_promoted_to_data():

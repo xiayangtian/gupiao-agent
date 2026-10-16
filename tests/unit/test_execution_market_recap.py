@@ -116,6 +116,21 @@ def test_market_overview_keeps_successful_artifact_when_other_calls_fail():
     assert all("provider private failure" not in str(item) for item in value["artifacts"])
 
 
+def test_single_day_market_index_can_include_immediately_previous_trading_bar():
+    from webapp.execution_executor import include_previous_market_bar
+
+    rows = [
+        {"date": "2026-10-14", "close": 3880},
+        {"date": "2026-10-15", "close": 3900},
+        {"date": "2026-10-13", "close": 3850},
+    ]
+
+    selected = include_previous_market_bar(rows, [{"date": "2026-10-15", "close": 3900}])
+
+    assert [row["date"] for row in selected] == ["2026-10-14", "2026-10-15"]
+    assert include_previous_market_bar(rows, []) == []
+
+
 def test_long_company_kline_uses_weekly_provider_interval_and_limits_request_size():
     source = FakeTencent()
     now = datetime(2026, 10, 9, 10, tzinfo=ZoneInfo("Asia/Shanghai"))

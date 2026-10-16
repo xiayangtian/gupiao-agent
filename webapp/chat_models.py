@@ -556,7 +556,7 @@ class Fact:
             evidence_ids=(f"tool:{tool.provider}:{tool.tool_name}",),
             verification="reference" if tool.as_of else "unavailable",
             as_of=tool.as_of,
-            source_category=("market" if tool.provider == "tencent" else
+            source_category=("market" if tool.provider in {"tencent", "akshare"} else
                              "mcp" if tool.provider in {"mcp", "stock-data-mcp"} else
                              "web" if tool.provider in {"web", "web_search"} else "unknown"),
         )

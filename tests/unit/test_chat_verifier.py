@@ -240,6 +240,27 @@ def test_market_recap_verifier_binds_named_index_claim_to_its_source_symbol():
     assert any(issue.code == "unsupported_numeric_claim" for issue in report.issues)
 
 
+def test_verifier_accepts_a_share_breadth_and_weighted_ratio_only_with_matching_market_facts():
+    facts = [
+        Fact("market_advancing_count", 3000, "家", "2026-10-15", "daily", "market", "ALL_A",
+             "tool", ("snapshot:breadth",), "reference", "2026-10-15T15:00:00+08:00", source_category="market"),
+        Fact("market_volume_ratio", 1.25, "倍", "2026-10-15", "daily", "market", "ALL_A",
+             "tool", ("snapshot:ratio",), "reference", "2026-10-15T15:00:00+08:00", source_category="market"),
+    ]
+
+    valid = ClaimVerifier().verify(
+        "上涨家数 3,000 家，全 A 加权量比 1.25 倍，外部参考。",
+        Scope.whole_corpus(), facts, (), (), answer_intent="market_recap",
+    )
+    wrong = ClaimVerifier().verify(
+        "上涨家数 3,001 家，全 A 加权量比 1.25 倍，外部参考。",
+        Scope.whole_corpus(), facts, (), (), answer_intent="market_recap",
+    )
+
+    assert valid.status == "passed"
+    assert wrong.status == "blocked"
+
+
 def test_market_long_horizon_verifier_requires_the_selected_kline_grain():
     from datetime import date
     from webapp.chat_time import MarketWindow

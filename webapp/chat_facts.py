@@ -288,11 +288,55 @@ def derive_available_facts(
 
 
 def facts_from_market_result(result: SourceResult, artifact: ToolArtifact) -> tuple[Fact, ...]:
-    """Extract daily Tencent Kline close facts; reject arbitrary tools and unbounded rows."""
-    if (not isinstance(result, SourceResult) or not isinstance(artifact, ToolArtifact)
-            or result.provider != "tencent" or result.operation != "kline"
-            or result.status not in {"success", "partial"} or artifact.provider != "tencent"
-            or artifact.tool_name != "kline" or artifact.status not in {"success", "partial"}
+    """Extract bounded market facts from approved Tencent/AkShare operations only."""
+    if not isinstance(result, SourceResult) or not isinstance(artifact, ToolArtifact):
+        return ()
+    if (result.provider == "akshare" and result.operation == "a_share_market_snapshot"
+            and artifact.provider == "akshare" and artifact.tool_name == "a_share_market_snapshot"):
+        if (result.status not in {"success", "partial"} or artifact.status not in {"success", "partial"}
+                or not result.as_of or artifact.as_of != result.as_of
+                or not result.call_id or artifact.source_id != result.call_id):
+            return ()
+        rows = result.payload if isinstance(result.payload, tuple) else ()
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            return ()
+        row = rows[0]
+        period = row.get("trade_date")
+        if not isinstance(period, str) or not _is_iso_date(period):
+            return ()
+        fields = (
+            ("advancing_count", "market_advancing_count", "家", 1.0),
+            ("declining_count", "market_declining_count", "家", 1.0),
+            ("unchanged_count", "market_unchanged_count", "家", 1.0),
+            ("limit_up_count", "market_limit_up_count", "家", 1.0),
+            ("limit_down_count", "market_limit_down_count", "家", 1.0),
+            ("volume_ratio", "market_volume_ratio", "倍", 1.0),
+            ("total_turnover", "market_total_turnover", "亿元", 1e-8),
+            ("total_volume", "market_total_volume", "手", 1.0),
+            ("unique_security_rows", "market_security_sample_count", "只", 1.0),
+            ("volume_ratio_sample_count", "market_volume_ratio_sample_count", "只", 1.0),
+            ("volume_ratio_active_rows", "market_volume_ratio_active_count", "只", 1.0),
+            ("volume_ratio_coverage", "market_volume_ratio_coverage", "%", 100.0),
+        )
+        facts = []
+        for source_key, metric, unit, scale in fields:
+            value = row.get(source_key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or value < 0:
+                continue
+            facts.append(Fact(
+                metric=metric, value=float(value) * scale, unit=unit, period=period,
+                period_kind="daily", entity_scope="market", company_code="ALL_A",
+                source_type="tool", evidence_ids=(f"{result.call_id}:a_share_market_snapshot",),
+                verification="reference", as_of=result.as_of, source_category="market",
+            ))
+        return tuple(facts)
+
+    tencent_kline = result.provider == "tencent" and result.operation == "kline"
+    akshare_index_kline = result.provider == "akshare" and result.operation == "a_share_index_kline"
+    if (not (tencent_kline or akshare_index_kline)
+            or result.status not in {"success", "partial"}
+            or artifact.provider != result.provider or artifact.tool_name != result.operation
+            or artifact.status not in {"success", "partial"}
             or not result.as_of or not _is_iso_date(result.as_of[:10]) or artifact.as_of != result.as_of
             or not result.call_id or artifact.source_id != result.call_id):
         return ()

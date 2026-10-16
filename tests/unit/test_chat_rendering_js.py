@@ -847,6 +847,29 @@ def test_run_reuse_actions_reuse_existing_run_identity_without_new_privileges():
     assert result['missing'] == ''
 
 
+def test_chat_retry_question_prefers_original_text_and_strips_legacy_timestamp():
+    result = _run_node(
+        f"""
+        const fs = require('fs');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('function chatRunQuestion(runBlock) {{');
+        const end = src.indexOf('// 「编辑重问」', start);
+        const fn = src.slice(start, end);
+        const classes = {{contains: name => name === 'chat-msg' || name === 'user'}};
+        const stored = {{classList:classes, dataset:{{question:'今日 A 股 <行情>'}}, textContent:'今日 A 股 <行情> 10月16日 09:15'}};
+        const storedQuestion = Function('bubble', fn + 'return chatRunQuestion({{previousElementSibling:bubble}});')(stored);
+        const copy = {{textContent:'今日 A 股行情 10月16日 09:15', querySelectorAll() {{
+          return [{{remove() {{ copy.textContent = '今日 A 股行情'; }}}}];
+        }}}};
+        const legacy = {{classList:classes, dataset:{{}}, textContent:'带时间戳', cloneNode() {{return copy;}}}};
+        const legacyQuestion = Function('bubble', fn + 'return chatRunQuestion({{previousElementSibling:bubble}});')(legacy);
+        console.log(JSON.stringify({{storedQuestion, legacyQuestion}}));
+        """
+    )
+    assert result['storedQuestion'] == '今日 A 股 <行情>'
+    assert result['legacyQuestion'] == '今日 A 股行情'
+
+
 def test_inline_market_facts_render_daily_and_period_changes_from_saved_facts():
     result = _run_node(
         f"""
@@ -873,6 +896,61 @@ def test_inline_market_facts_render_daily_and_period_changes_from_saved_facts():
     assert '+0.56%' in result and '+1.26%' in result and '+1.35%' in result
     assert '+3.52%' in result
     assert '长江电力（600900）' in result
+
+
+def test_daily_market_recap_renders_single_day_index_and_verified_market_summary_rows():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        const fact = (metric, value, unit, code, period) => ({{metric, value, unit, period,
+          period_kind:'daily', company_code:code, source_type:'tool', source_category:'market',
+          verification:'reference', as_of:'2026-10-15T15:05:00+08:00'}});
+        const facts = [
+          fact('index_close', 3900, '点', 'sh000001', '2026-10-15'),
+          fact('index_close', 3880, '点', 'sh000001', '2026-10-14'),
+          fact('market_advancing_count', 3000, '家', 'ALL_A', '2026-10-15'),
+          fact('market_declining_count', 1800, '家', 'ALL_A', '2026-10-15'),
+          fact('market_unchanged_count', 200, '家', 'ALL_A', '2026-10-15'),
+          fact('market_limit_up_count', 36, '家', 'ALL_A', '2026-10-15'),
+          fact('market_limit_down_count', 26, '家', 'ALL_A', '2026-10-15'),
+          fact('market_volume_ratio', 1.25, '倍', 'ALL_A', '2026-10-15'),
+          fact('market_total_turnover', 85000, '亿元', 'ALL_A', '2026-10-15'),
+          fact('market_volume_ratio_sample_count', 5000, '只', 'ALL_A', '2026-10-15'),
+          fact('market_volume_ratio_active_count', 5100, '只', 'ALL_A', '2026-10-15'),
+          fact('market_volume_ratio_coverage', 98.04, '%', 'ALL_A', '2026-10-15')
+        ];
+        const html = r.renderInlineMarketFacts({{
+          execution_plan:{{source_mode:'market_recap', market_window:{{label:'今日'}}}}, facts,
+          tool_artifacts:[{{provider:'akshare', tool_name:'a_share_market_snapshot', status:'success', as_of:'2026-10-15T15:05:00+08:00', result_summary:'来源涨停池 36 家、跌停池 26 家'}}]
+        }});
+        console.log(JSON.stringify(html));
+        """
+    )
+    assert '<table' in result and '<th scope="col">指标</th>' in result
+    assert '较上一交易日' in result
+    assert '上证指数' in result and '20' in result and '+0.52%' in result
+    assert '上涨家数' in result and '3,000' in result
+    assert '涨停家数' in result and '跌停家数' in result
+    assert '加权量比' in result and '1.25' in result
+    assert '量比有效样本数' in result and '5,000 只' in result
+    assert '有成交股票数' in result and '5,100 只' in result
+    assert '来源涨停池 36 家、跌停池 26 家' not in result
+
+
+def test_single_day_index_close_fact_renders_a_table_without_inventing_change():
+    result = _run_node(
+        f"""
+        const r = require({json.dumps(str(CHAT_RENDERING_JS))});
+        console.log(JSON.stringify(r.renderInlineMarketFacts({{
+          execution_plan:{{source_mode:'external_market', market_window:{{label:'今日'}}}},
+          facts:[{{metric:'index_close', value:3900, unit:'点', period:'2026-10-15',
+            period_kind:'daily', company_code:'sh000001', source_category:'market'}}]
+        }})));
+        """
+    )
+    assert '<table' in result
+    assert '上证指数' in result
+    assert '—' in result
 
 
 def test_inline_market_facts_do_not_infer_across_conflicts_and_expand_long_windows():

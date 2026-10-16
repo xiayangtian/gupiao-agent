@@ -1,4 +1,4 @@
-from webapp.chat_facts import FactNormalizer, detect_conflicts
+from webapp.chat_facts import FactNormalizer, detect_conflicts, facts_from_market_result
 from webapp.chat_models import EvidenceArtifact, Fact, Scope, ToolArtifact
 
 
@@ -8,6 +8,62 @@ def _scope():
 
 def _pdf():
     return EvidenceArtifact.pdf("601288:2026-06-30:semi_annual", "abc.pdf", 40, "营业收入")
+
+
+def test_extracts_bounded_akshare_market_summary_facts_with_source_identity():
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    summary = {
+        "status": "partial", "trade_date": "2026-10-15", "as_of": "2026-10-15T15:05:00+08:00",
+        "unique_security_rows": 5500, "volume_ratio_sample_count": 5000,
+        "volume_ratio_active_rows": 5100, "volume_ratio_coverage": 5000 / 5100,
+        "advancing_count": 3000, "declining_count": 2000, "unchanged_count": 500,
+        "limit_up_count": 36, "limit_down_count": None,
+        "total_turnover": 1_000_000.0, "total_volume": 2_000_000.0, "volume_ratio": 1.2,
+    }
+    result = SourceResult(
+        "source-1", "akshare", "a_share_market_snapshot", "market", "partial",
+        as_of=summary["as_of"], payload=(summary,),
+        coverage=SourceCoverage(returned_rows=1, data_window="2026-10-15"),
+    )
+    artifact = ToolArtifact(
+        "akshare", "a_share_market_snapshot", as_of=summary["as_of"], status="partial",
+        source_id="source-1",
+    )
+
+    facts = facts_from_market_result(result, artifact)
+
+    assert {fact.metric for fact in facts} >= {
+        "market_advancing_count", "market_declining_count", "market_unchanged_count",
+        "market_limit_up_count", "market_total_turnover", "market_volume_ratio",
+    }
+    assert not any(fact.metric == "market_limit_down_count" for fact in facts)
+    assert all(fact.company_code == "ALL_A" and fact.entity_scope == "market" for fact in facts)
+    assert all(fact.source_category == "market" and fact.evidence_ids == ("source-1:a_share_market_snapshot",) for fact in facts)
+
+
+def test_extracts_akshare_index_daily_bars_as_market_facts():
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    result = SourceResult(
+        "ak-index-1", "akshare", "a_share_index_kline", "market", "success",
+        as_of="2026-10-16", payload=(
+            {"date": "2026-10-15", "close": 3707.48, "symbol": "sh000001", "kline_period": "day"},
+            {"date": "2026-10-16", "close": 3692.45, "symbol": "sh000001", "kline_period": "day"},
+        ), coverage=SourceCoverage(returned_rows=2, data_window="2026-10-15至2026-10-16"),
+    )
+    artifact = ToolArtifact(
+        "akshare", "a_share_index_kline", as_of="2026-10-16", status="success", source_id="ak-index-1",
+    )
+
+    facts = facts_from_market_result(result, artifact)
+
+    assert [(fact.period, fact.value, fact.metric, fact.period_kind) for fact in facts] == [
+        ("2026-10-15", 3707.48, "index_close", "daily"),
+        ("2026-10-16", 3692.45, "index_close", "daily"),
+    ]
+    assert all(fact.company_code == "sh000001" and fact.source_category == "market" for fact in facts)
+    assert all(fact.evidence_ids == (f"ak-index-1:sh000001:{fact.period}",) for fact in facts)
 
 
 def test_normalizes_yuan_to_yi_without_losing_original_unit():

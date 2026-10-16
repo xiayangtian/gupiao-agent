@@ -34,10 +34,13 @@ def is_web_search_tool(name: str) -> bool:
 
 def market_recap_tool_calls(*, weekly: bool) -> list[tuple[str, dict[str, Any]]]:
     """返回 A 股复盘的固定 MCP 调用序列，不接受模型提供的日期或参数。"""
+    if not weekly:
+        # 日度涨跌停统计由全量快照适配器提供，不能把 MCP 50 行采样当作市场总数。
+        return [("stock_sector_fund_flow_rank", {"days": "今日", "cate": "行业资金流"})]
     return [
         ("stock_zt_pool", {"pool_type": "涨停", "limit": 50}),
         ("stock_zt_pool", {"pool_type": "跌停", "limit": 50}),
-        ("stock_sector_fund_flow_rank", {"days": "5日" if weekly else "今日", "cate": "行业资金流"}),
+        ("stock_sector_fund_flow_rank", {"days": "5日", "cate": "行业资金流"}),
     ]
 
 

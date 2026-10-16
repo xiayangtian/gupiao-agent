@@ -368,7 +368,7 @@
   }
 
   function sourceProviderLabel(provider) {
-    return ({ tencent: '腾讯行情', market: '行情数据', 'stock-data-mcp': '股票数据服务', mcp: '数据服务', web: '网页来源', web_search: '网页来源' })[provider]
+    return ({ tencent: '腾讯行情', akshare: 'A 股行情快照', market: '行情数据', 'stock-data-mcp': '股票数据服务', mcp: '数据服务', web: '网页来源', web_search: '网页来源' })[provider]
       || '外部数据来源';
   }
 
@@ -382,6 +382,7 @@
       get_financial_metrics: '财务指标',
       get_stock_basic_info: '公司基本信息', get_stock_a_code_name: '股票代码与名称',
       stock_sector_fund_flow_rank: '行业资金流向', stock_zt_pool: '涨停数据',
+      a_share_market_snapshot: '全市场成交与涨跌统计',
       web_search: '网页资料',
     })[toolName] || (toolName ? '相关数据' : '来源记录');
   }
@@ -424,12 +425,21 @@
     var companies = run && run.scope && Array.isArray(run.scope.companies) ? run.scope.companies : [];
     var company = companies.filter(function (item) { return item && String(item.code || '') === code; })[0];
     if (company) return String(company.name || code) + '（' + code + '）';
+    if (code === 'ALL_A') return '全 A 市场';
     var indices = { sh000001: '上证指数', sz399001: '深证成指', sz399006: '创业板指', sh000688: '科创50指数' };
     return (indices[code] ? indices[code] + '（' + code + '）' : code) || '未记录对象';
   }
 
   function factMetricLabel(metric) {
     return ({ price: '股价', index_close: '指数点位', volume: '成交量', amount: '成交额',
+      market_advancing_count: '上涨家数', market_declining_count: '下跌家数',
+      market_unchanged_count: '平盘家数', market_limit_up_count: '涨停家数',
+      market_limit_down_count: '跌停家数', market_volume_ratio: '全 A 加权量比',
+      market_total_turnover: '全 A 成交额', market_total_volume: '全 A 成交量',
+      market_security_sample_count: '全 A 快照证券数',
+      market_volume_ratio_sample_count: '量比有效样本数',
+      market_volume_ratio_active_count: '有成交股票数',
+      market_volume_ratio_coverage: '量比样本覆盖率',
       revenue: '营业收入', net_profit: '净利润', roe: '净资产收益率', pct_change: '涨跌幅' })[metric] || metric || '未记录指标';
   }
 
@@ -618,6 +628,18 @@
     var intent = run.intent_decision && String(run.intent_decision.intent || '');
     var marketMode = ['external_market', 'market_recap'].indexOf(String(plan.source_mode || '')) !== -1;
     if (!marketMode && intent !== 'realtime_market') return '';
+    var dailyRecap = plan.source_mode === 'market_recap'
+      && plan.market_window && String(plan.market_window.label || '') === '今日';
+    var summaryLabels = {
+      market_advancing_count: '上涨家数', market_declining_count: '下跌家数',
+      market_unchanged_count: '平盘家数', market_limit_up_count: '涨停家数',
+      market_limit_down_count: '跌停家数', market_total_turnover: '全 A 成交额',
+      market_total_volume: '全 A 成交量', market_volume_ratio: '全 A 加权量比',
+      market_security_sample_count: '全 A 快照证券数',
+      market_volume_ratio_sample_count: '量比有效样本数',
+      market_volume_ratio_active_count: '有成交股票数',
+      market_volume_ratio_coverage: '量比样本覆盖率'
+    };
 
     var groupsByKey = {};
     var groups = [];
@@ -647,7 +669,79 @@
         return { period: period, value: group.periods[period] };
       });
       return group;
-    }).filter(function (group) { return !group.conflict && group.rows.length >= 2; });
+    }).filter(function (group) {
+      return !group.conflict && (group.rows.length >= 2 || (marketMode && group.metric === 'index_close'));
+    });
+
+    if (dailyRecap) {
+      var metricFacts = {};
+      var metricConflicts = {};
+      (Array.isArray(run.facts) ? run.facts : []).forEach(function (fact) {
+        if (!fact || fact.source_category !== 'market' || fact.company_code !== 'ALL_A'
+          || !summaryLabels[fact.metric] || typeof fact.value !== 'number' || !Number.isFinite(fact.value)) return;
+        if (Object.prototype.hasOwnProperty.call(metricFacts, fact.metric)
+          && metricFacts[fact.metric].value !== fact.value) metricConflicts[fact.metric] = true;
+        else metricFacts[fact.metric] = fact;
+      });
+      Object.keys(metricConflicts).forEach(function (metric) { delete metricFacts[metric]; });
+      var indexRows = groups.filter(function (group) { return group.metric === 'index_close'; });
+      var marketRows = Object.keys(summaryLabels).filter(function (metric) { return metricFacts[metric]; }).map(function (metric) {
+        var fact = metricFacts[metric];
+        return '<tr><td>' + escapeHtml(summaryLabels[metric]) + '</td><td class="chat-inline-market-value">'
+          + escapeHtml(formatFactValue(fact.value)) + (fact.unit ? ' ' + escapeHtml(fact.unit) : '')
+          + '</td><td>—</td></tr>';
+      });
+      var indexHtmlRows = indexRows.map(function (group) {
+        var current = group.rows[group.rows.length - 1];
+        var previous = group.rows.length > 1 ? group.rows[group.rows.length - 2] : null;
+        var value = escapeHtml(current.period + ' · ' + formatFactValue(current.value) + (group.unit ? ' ' + group.unit : ''));
+        var change = '—';
+        if (previous && previous.value !== 0) {
+          var delta = current.value - previous.value;
+          var pointChange = (delta > 0 ? '+' : '') + formatFactValue(delta) + (group.unit ? ' ' + group.unit : '');
+          change = pointChange + '（' + escapeHtml(percent(current.value, previous.value)) + '）';
+        }
+        return '<tr><td>' + escapeHtml(factObjectLabel({company_code: group.code}, run))
+          + '</td><td class="chat-inline-market-value">' + value + '</td><td>' + change + '</td></tr>';
+      });
+      var tableRows = indexHtmlRows.concat(marketRows);
+      if (!tableRows.length) return '';
+      var asOf = '';
+      (Array.isArray(run.facts) ? run.facts : []).some(function (fact) {
+        if (fact && fact.source_category === 'market' && fact.company_code === 'ALL_A' && fact.as_of) {
+          asOf = String(fact.as_of); return true;
+        }
+        return false;
+      });
+      var note = '指数涨跌按上一交易日收盘计算；未取得或覆盖不足的市场指标不补零。涨跌停按数据源池返回统计，未提供独立总量校验。';
+      if (asOf) note += ' 数据获取时间（上海）：' + asOf.replace('T', ' ').replace(/[+-]\d{2}:\d{2}$/, '').slice(0, 16) + '。';
+      var snapshotArtifact = (Array.isArray(run.tool_artifacts) ? run.tool_artifacts : []).find(function (artifact) {
+        return artifact && artifact.provider === 'akshare' && artifact.tool_name === 'a_share_market_snapshot';
+      });
+      if (snapshotArtifact && snapshotArtifact.status !== 'success') note += ' 全市场来源不完整，表中仅列出已核验数据。';
+      if (snapshotArtifact && snapshotArtifact.result_summary) {
+        var resultSummary = String(snapshotArtifact.result_summary);
+        var coverageMatch = resultSummary.match(/快照证券 ([\d,]+)\/([\d,]+) 行；涨跌分类 ([\d,]+)\/([\d,]+) 行/);
+        if (coverageMatch) note += ' 全 A 快照返回 ' + coverageMatch[1] + '/' + coverageMatch[2]
+          + ' 行，涨跌分类 ' + coverageMatch[3] + '/' + coverageMatch[4] + ' 行。';
+        var limitationIndex = resultSummary.indexOf('限制：');
+        if (limitationIndex >= 0) note += ' 数据限制：' + resultSummary.slice(limitationIndex + 3);
+      }
+      var windowLabel = String(plan.market_window.label || '最近交易日');
+      var indexDataDates = indexRows.map(function (group) { return group.rows[group.rows.length - 1].period; });
+      var summaryDataDates = Object.keys(metricFacts).map(function (metric) { return String(metricFacts[metric].period || ''); }).filter(Boolean);
+      var uniqueDataDates = Array.from(new Set(indexDataDates.concat(summaryDataDates)));
+      if (uniqueDataDates.length === 1) note = '行情数据日期：' + uniqueDataDates[0] + '；' + note;
+      else if (uniqueDataDates.length > 1) note = '指数/全市场统计数据日期：' + uniqueDataDates.join('、') + '；' + note;
+      var heading = windowLabel === '今日' ? 'A 股行情概览' : windowLabel + ' A 股行情概览';
+      return '<section class="chat-inline-market" aria-label="' + escapeHtml(heading) + '">'
+        + '<h3>' + escapeHtml(heading) + '</h3>'
+        + '<p class="chat-inline-market-note">' + escapeHtml(note) + '</p>'
+        + '<div class="chat-inline-market-table-wrap"><table class="chat-inline-market-table" aria-label="'
+        + escapeHtml(windowLabel + ' A 股市场摘要') + '"><thead><tr><th scope="col">指标</th>'
+        + '<th scope="col">当日数据</th><th scope="col">较上一交易日</th></tr></thead><tbody>'
+        + tableRows.join('') + '</tbody></table></div></section>';
+    }
     if (!groups.length) return '';
 
     function percent(value, previous) {
@@ -674,7 +768,7 @@
     var indexChartHtml = renderMarketIndexChart(marketChartData(run));
     var sections = groups.map(function (group) {
       var rows = group.rows;
-      var overall = percent(rows[rows.length - 1].value, rows[0].value);
+      var overall = rows.length > 1 ? percent(rows[rows.length - 1].value, rows[0].value) : '—';
       var head = '<h4>' + escapeHtml(factObjectLabel({company_code: group.code}, run))
         + ' · 区间变化 ' + escapeHtml(overall) + '</h4>';
       var first = rows.slice(0, 20);

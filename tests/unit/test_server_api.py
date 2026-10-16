@@ -8,6 +8,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Dict
+from zoneinfo import ZoneInfo
 from unittest.mock import MagicMock
 
 import pytest
@@ -2099,7 +2100,7 @@ class TestChatSessionsApi:
         assert all("实际数据期 2026-09-24" in item["result_summary"] for item in run["tool_artifacts"])
         assert run["source_summary"]["market_data"] == "已使用"
 
-    def test_recap_asgi_executes_four_tencent_and_three_fixed_mcp_calls_with_one_window(
+    def test_recap_asgi_executes_four_akshare_index_calls_and_authorized_full_market_snapshot(
         self, client, env, monkeypatch, tmp_path,
     ):
         from webapp.chat_store import ChatStore
@@ -2109,14 +2110,34 @@ class TestChatSessionsApi:
 
         monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "recap-sessions.json")))
         tencent_calls = []
+        akshare_index_calls = []
         mcp_calls = []
+        trade_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
         def fake_kline(symbol, *, period, count, adjust):
             tencent_calls.append((symbol, period, count, adjust))
-            return [{"date": "2026-09-24", "close": 10.0}]
+            return []
+        def fake_index_kline(symbol, *, start_date, end_date):
+            akshare_index_calls.append((symbol, start_date, end_date))
+            previous_date = (date.fromisoformat(trade_date) - timedelta(days=1)).isoformat()
+            return {"as_of": trade_date, "bars": [
+                {"date": previous_date, "close": 9.5, "symbol": symbol, "kline_period": "day"},
+                {"date": trade_date, "close": 10.0, "symbol": symbol, "kline_period": "day"},
+            ]}
         def fake_mcp(name, arguments, *, timeout, retry):
             mcp_calls.append((name, dict(arguments), timeout, retry))
-            return {"as_of": "2026-09-24", "data": [{"date": "2026-09-24", "symbol": "600001"}], "total_rows": 1}
+            return {"as_of": trade_date, "data": [{"date": trade_date, "symbol": "600001"}], "total_rows": 1}
+        monkeypatch.setattr(server, "get_market_snapshot", lambda day: {
+            "status": "success", "trade_date": day, "as_of": day + "T15:05:00+08:00",
+            "universe_rows": 5000, "unique_security_rows": 5000, "classified_rows": 5000,
+            "advancing_count": 2500, "declining_count": 2300, "unchanged_count": 200,
+            "total_volume": 900000, "total_turnover": 850000000000,
+            "volume_sample_count": 5000, "turnover_sample_count": 5000,
+            "volume_ratio": 1.1, "volume_ratio_sample_count": 4900,
+            "volume_ratio_active_rows": 5000, "volume_ratio_coverage": 0.98,
+            "limit_up_count": 35, "limit_down_count": 20, "limitations": "",
+        })
         monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+        monkeypatch.setattr(server, "load_a_share_index_kline", fake_index_kline, raising=False)
         monkeypatch.setattr(server.market_data_mcp, "call_tool", fake_mcp)
         monkeypatch.setattr(server, "mcp_breaker", type("Breaker", (), {"allow": lambda self: True})())
         monkeypatch.setattr(server, "_mcp_tool_defs_cache", [
@@ -2140,7 +2161,7 @@ class TestChatSessionsApi:
             def __init__(self, _planner):
                 pass
             def plan(self, *_args, **_kwargs):
-                plan = ExecutionPlan.from_dict({"objective": "2026-09-24 A股复盘", "source_mode": "market_recap",
+                plan = ExecutionPlan.from_dict({"objective": "今日 A股复盘", "source_mode": "market_recap",
                     "steps": [{"id": "indices", "kind": "market_indices"},
                               {"id": "overview", "kind": "market_overview"},
                               {"id": "answer", "kind": "answer", "depends_on": ["indices", "overview"]}],
@@ -2158,20 +2179,24 @@ class TestChatSessionsApi:
         monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
 
         response = client.post("/api/chat/stream", json={
-            "question": "2026-09-24 A股复盘", "use_mcp": True, "scope_mode": "whole_corpus",
+            "question": "今日 A股复盘", "use_mcp": True, "scope_mode": "whole_corpus",
         })
         events = _read_sse(response)
         run = _event(events, "done")["run"]
 
-        assert len(tencent_calls) == 4 and all(item[1] == "day" for item in tencent_calls)
-        assert [call[0] for call in mcp_calls] == [
-            "stock_zt_pool", "stock_zt_pool", "stock_sector_fund_flow_rank",
-        ]
+        assert len(akshare_index_calls) == 4
+        assert {call[0] for call in akshare_index_calls} == {"sh000001", "sz399001", "sz399006", "sh000688"}
+        assert all(call[2] == trade_date for call in akshare_index_calls)
+        assert tencent_calls == []
+        assert [call[0] for call in mcp_calls] == ["stock_sector_fund_flow_rank"]
         assert run["status"] == "completed"
-        assert len(run["tool_artifacts"]) == 7
-        assert all(item["as_of"] == "2026-09-24" for item in run["tool_artifacts"])
-        assert all("实际数据期 2026-09-24" in item["result_summary"] for item in run["tool_artifacts"])
-        assert runtimes[0].budget.snapshot() == {"total": 7, "market": 7, "web": 0}
+        assert len(run["tool_artifacts"]) == 6
+        akshare_artifact = next(item for item in run["tool_artifacts"]
+                                if item["provider"] == "akshare" and item["tool_name"] == "a_share_market_snapshot")
+        assert akshare_artifact["as_of"] == trade_date + "T15:05:00+08:00"
+        fact_metrics = {fact["metric"] for fact in run["facts"]}
+        assert {"market_advancing_count", "market_limit_up_count", "market_volume_ratio"} <= fact_metrics
+        assert runtimes[0].budget.snapshot() == {"total": 6, "market": 6, "web": 0}
 
     def test_chat_stream_sse_and_session_persist(self, client, env, monkeypatch, tmp_path, caplog):
         """流式端点：SSE 事件含 session/delta/done；会话消息持久化"""
@@ -4220,7 +4245,7 @@ def test_slow_chat_planning_does_not_block_health_or_sse_run_identity(client, en
 
     def request_stream():
         try:
-            with client.stream("POST", "/api/chat/stream", json={"question": "一个慢规划的普通问题"}) as response:
+            with client.stream("POST", "/api/chat/stream", json={"question": "一个慢规划的普通问题", "use_mcp": False}) as response:
                 current_event = ""
                 for line in response.iter_lines():
                     text = line.decode() if isinstance(line, bytes) else line
@@ -4284,7 +4309,7 @@ def test_chat_run_deadline_persists_failed_run_after_planning_timeout(client, en
             return PlanningResult("fallback", issues=(PlanIssue("fixture", "fixture"),))
 
     monkeypatch.setattr(server, "ExecutionPlanner", SlowPlanner)
-    response = client.post("/api/chat/stream", json={"question": "一个慢规划的普通问题"})
+    response = client.post("/api/chat/stream", json={"question": "一个慢规划的普通问题", "use_mcp": False})
     events = _read_sse(response)
     terminal = _event(events, "done")
     assert terminal["run"]["status"] == "failed"
