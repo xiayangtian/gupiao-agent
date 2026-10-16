@@ -49,7 +49,7 @@
   每条回答的状态栏显示可一键复制的「诊断 ID」，服务日志以同一 ID 记录问答开始与终态
   （`grep <诊断 ID> logs/uvicorn.log`），便于定位单次异常问答；复杂研究任务会先展示受限计划和实时步骤状态，可停止、重开并只恢复未完成步骤；研究工作台可按公司、行业、报告期、意图、状态和收藏筛选历史研究，支持收藏、编辑重问、分支追问与导出研究纪要；可选运行 `python3 scripts/run_chat_evaluation.py --fixture tests/fixtures/chat_eval_cases.json --output data/research_quality_summary.json` 生成本地离线质量观测摘要（仅回放固定 fixture，不阻断发布）；每轮会显示本次查证方式、事实冲突和核验降级说明；外部参考事实默认折叠并按来源归组，展开后以表格显示对象、指标、期间、数值与单位，每组先显示 20 条并可继续展开；外部来源按运行级授权、预算与去重规则执行，失败来源和未知数据时间不会伪装成成功，生成阶段只消费已取得的受控上下文；财报问题仅使用冻结范围内的本地证据，实时/新闻问题的外部工具同样受公司范围、调用次数和超时约束；单公司问题缺少必要原文时，最多展示 5 份候选财报，必须由用户明确选择并授权后才下载、索引并恢复原问题
 - **智能问答可靠性第二阶段**：公司身份不依赖本地是否已有财报；缺少明确公司或时间范围时先澄清，不静默改用全库。财报经营趋势与股价走势分流，A 股日/周复盘按实际日期披露来源覆盖；涨跌停池最多返回 50 条，不视为市场总量，行业资金流不视为全市场资金流。公司财务与行情数字须核对主体、期间、单位及来源，派生数值保留底层证据。稳定概念问题可明确标记“依据模型常识，未检索外部来源”后回答；时效性或公司具体事实仍须来源。
-- **智能问答可靠性第三阶段**：规划及执行在有界后台 worker 中运行，SSE 立即提供运行身份和步骤进度；支持协作式停止、整轮超时和来源调用门控。普通问答与显式研究任务分流，研究停止后可恢复且不重跑已完成步骤。默认并发上限为 4，事件缓冲为 64；普通/研究整轮超时默认为 120/300 秒，可用 `CHAT_RUN_MAX_WORKERS`、`CHAT_RUN_EVENT_BUFFER`、`CHAT_RUN_TIMEOUT_SECONDS`、`CHAT_RESEARCH_TIMEOUT_SECONDS` 配置。取消不会强杀在途同步调用；它结束后不再启动后续来源。取消接口：`POST /api/chat/runs/{run_id}/cancel`。
+- **智能问答可靠性第三阶段**：规划及执行在有界后台 worker 中运行，SSE 立即提供运行身份和步骤进度；支持协作式停止、整轮超时和来源调用门控。普通问答与显式研究任务分流，研究停止后可恢复且不重跑已完成步骤。默认并发上限为 4，事件缓冲为 64；普通/大盘复盘/研究整轮超时默认为 120/180/300 秒，可用 `CHAT_RUN_MAX_WORKERS`、`CHAT_RUN_EVENT_BUFFER`、`CHAT_RUN_TIMEOUT_SECONDS`、`CHAT_MARKET_RECAP_TIMEOUT_SECONDS`、`CHAT_RESEARCH_TIMEOUT_SECONDS` 配置。取消不会强杀在途同步调用；它结束后不再启动后续来源。取消接口：`POST /api/chat/runs/{run_id}/cancel`。
 - **智能问答可靠性第四阶段**：新增真实 SSE 编排的离线运行评测、脱敏可比报告和检索失败阶段诊断；查询相关证据窗口与有界历史投影保留冻结 Scope 和必需证据，超预算时停止生成。运行评测入口 `scripts/run_chat_runtime_evaluation.py` 与固定产物回放 `scripts/run_chat_evaluation.py` 分离；`scripts/probe_chat_live.py` 只校验配置并 dry-run，不发起真实提供方请求。
 - **股票行情 API**：`/api/quote`（实时）、`/api/quote/kline`（K线）、`/api/quote/index`（指数）
 - **财务/基本面 API**：`/api/stock/info`、`/api/stock/financials`、
@@ -196,7 +196,7 @@ python3 -m financial_report_fetcher rag ingest --pdf "reports/长江电力_60090
 
 Web 端：`POST /api/chat/stream` 流式通用对话（SSE，携带 `session_id` 自动保存历史）、
 `GET/POST /api/chat/sessions` 会话列表 / 新建、`POST /api/chat` 非流式通用对话（兼容）；
-问答默认启用 MCP 工具（`rag.mcp_tools: true`，超时/轮数/白名单见 `config.example.yaml`）；智能问答先由模型生成受服务端校验的来源计划：A 股日/周行情复盘优先使用腾讯指数行情与网页事件解释，默认不检索财报；非股票问题仅使用模型能力与受控网页搜索；只有明确要求财报、基本面或公司披露时才允许本地 RAG。即使未启用或未初始化本地 RAG 索引，流式智能问答仍可使用受控 MCP 与网页搜索，但会明确标注本地财报未核验；
+问答默认启用 MCP 工具（`rag.mcp_tools: true`，超时/轮数/白名单见 `config.example.yaml`）；智能问答先由模型生成受服务端校验的来源计划：A 股当日复盘使用受控 AkShare 指数日线与全市场快照，其他时间范围沿用腾讯指数行情；数据覆盖不足会标记为部分完成，不补造市场总数；默认不检索财报。非股票问题仅使用模型能力与受控网页搜索；只有明确要求财报、基本面或公司披露时才允许本地 RAG。即使未启用或未初始化本地 RAG 索引，流式智能问答仍可使用受控 MCP 与网页搜索，但会明确标注本地财报未核验；
 MCP 带熔断保护（连续失败自动暂停使用、冷却后自动探测恢复）与状态检测
 （`GET /api/mcp/status`、`POST /api/mcp/diagnose`，RAG 页可视化）、
 `GET /api/rag/status` 状态、

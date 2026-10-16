@@ -4282,6 +4282,25 @@ def test_slow_chat_planning_does_not_block_health_or_sse_run_identity(client, en
     assert json.loads(events[1][1])["run_id"]
 
 
+def test_broad_market_recap_gets_bounded_source_timeout_without_extending_other_chat_runs():
+    from webapp.chat_intent import ChatIntentAnalysis
+
+    broad_recap = ChatIntentAnalysis(
+        "market_analysis", "broad_market", "A股", "", "recap", "今日", False, "",
+    )
+    ordinary = ChatIntentAnalysis(
+        "financial_knowledge", "none", "", "", "explain", "", False, "",
+    )
+    research = ChatIntentAnalysis(
+        "market_analysis", "broad_market", "A股", "", "research", "今日", False, "",
+    )
+
+    assert server._chat_timeout_for_intent(broad_recap) == server.CHAT_MARKET_RECAP_TIMEOUT_SECONDS
+    assert server.CHAT_MARKET_RECAP_TIMEOUT_SECONDS > server.CHAT_RUN_TIMEOUT_SECONDS
+    assert server._chat_timeout_for_intent(ordinary) == server.CHAT_RUN_TIMEOUT_SECONDS
+    assert server._chat_timeout_for_intent(research) == server.CHAT_RESEARCH_TIMEOUT_SECONDS
+
+
 def test_chat_run_deadline_persists_failed_run_after_planning_timeout(client, env, monkeypatch, tmp_path):
     import time
 
@@ -4292,6 +4311,7 @@ def test_chat_run_deadline_persists_failed_run_after_planning_timeout(client, en
     store = ChatStore(str(tmp_path / "deadline-sessions.json"))
     monkeypatch.setattr(server, "chat_store", store)
     monkeypatch.setattr(server, "CHAT_RUN_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(server, "CHAT_MARKET_RECAP_TIMEOUT_SECONDS", 1)
     monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: object())
 

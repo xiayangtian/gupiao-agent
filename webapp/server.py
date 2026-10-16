@@ -146,8 +146,19 @@ def _positive_int_env(name: str, default: int) -> int:
 CHAT_RUN_MAX_WORKERS = _positive_int_env("CHAT_RUN_MAX_WORKERS", 4)
 CHAT_RUN_EVENT_BUFFER = _positive_int_env("CHAT_RUN_EVENT_BUFFER", 64)
 CHAT_RUN_TIMEOUT_SECONDS = _positive_int_env("CHAT_RUN_TIMEOUT_SECONDS", 120)
+CHAT_MARKET_RECAP_TIMEOUT_SECONDS = _positive_int_env("CHAT_MARKET_RECAP_TIMEOUT_SECONDS", 180)
 CHAT_RESEARCH_TIMEOUT_SECONDS = _positive_int_env("CHAT_RESEARCH_TIMEOUT_SECONDS", 300)
 chat_run_registry = ChatRunRegistry(max_workers=CHAT_RUN_MAX_WORKERS)
+
+
+def _chat_timeout_for_intent(intent_analysis: ChatIntentAnalysis) -> int:
+    if intent_analysis.task_kind == "research":
+        return CHAT_RESEARCH_TIMEOUT_SECONDS
+    if (intent_analysis.category == "market_analysis"
+            and intent_analysis.subject_kind == "broad_market"
+            and intent_analysis.task_kind == "recap"):
+        return CHAT_MARKET_RECAP_TIMEOUT_SECONDS
+    return CHAT_RUN_TIMEOUT_SECONDS
 
 # 服务进程启动时间（用于判断服务是否加载了最新代码）
 SERVER_STARTED_AT = dt.datetime.now()
@@ -2582,7 +2593,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     sid = session["id"]
     run_id = uuid.uuid4().hex
     # Start with the configured maximum; the model-classified request may only tighten it.
-    timeout_seconds = max(CHAT_RUN_TIMEOUT_SECONDS, CHAT_RESEARCH_TIMEOUT_SECONDS)
+    timeout_seconds = max(CHAT_RUN_TIMEOUT_SECONDS, CHAT_MARKET_RECAP_TIMEOUT_SECONDS,
+                          CHAT_RESEARCH_TIMEOUT_SECONDS)
     control = ChatRunControl(sid, run_id, timeout_seconds)
     channel = ChatEventChannel(maxsize=CHAT_RUN_EVENT_BUFFER)
     started_at = time.perf_counter()
@@ -2730,12 +2742,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             sid, original_question, "暂时无法安全识别本次需求，请稍后重试或换一种方式描述。", started_at,
         )
     if run_control is not None:
-        timeout_seconds = (
-            CHAT_RESEARCH_TIMEOUT_SECONDS
-            if intent_analysis.task_kind == "research"
-            else CHAT_RUN_TIMEOUT_SECONDS
-        )
-        run_control.tighten_deadline(timeout_seconds)
+        run_control.tighten_deadline(_chat_timeout_for_intent(intent_analysis))
         run_control.check_active()
     if intent_analysis.category == "non_financial":
         if isinstance(pending, Mapping):
