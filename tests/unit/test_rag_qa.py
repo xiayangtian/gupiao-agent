@@ -250,6 +250,10 @@ def test_knowledge_mode_answers_without_retrieval_or_tools():
     assert events[-1]["citations"] == []
     assert "未检索" in ai.last_system
     assert "已查" not in ai.last_system
+    assert "一般金融概念问题，优先用3–5句解释" in ai.last_system
+    assert all(instruction in ai.last_system for instruction in (
+        "先给定义", "公式或关系", "简单例子", "适用边界", "明确要求简答时从简",
+    ))
     assert ai.last_messages[-1]["content"] == "什么是市盈率？"
 
 
