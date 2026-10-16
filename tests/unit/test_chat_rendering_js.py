@@ -908,6 +908,8 @@ def test_daily_market_recap_renders_single_day_index_and_verified_market_summary
         const facts = [
           fact('index_close', 3900, '点', 'sh000001', '2026-10-15'),
           fact('index_close', 3880, '点', 'sh000001', '2026-10-14'),
+          fact('index_close', 3716.28, '点', 'sz399001', '2026-10-15'),
+          fact('index_close', 3707.48, '点', 'sz399001', '2026-10-14'),
           fact('market_advancing_count', 3000, '家', 'ALL_A', '2026-10-15'),
           fact('market_declining_count', 1800, '家', 'ALL_A', '2026-10-15'),
           fact('market_unchanged_count', 200, '家', 'ALL_A', '2026-10-15'),
@@ -915,9 +917,12 @@ def test_daily_market_recap_renders_single_day_index_and_verified_market_summary
           fact('market_limit_down_count', 26, '家', 'ALL_A', '2026-10-15'),
           fact('market_volume_ratio', 1.25, '倍', 'ALL_A', '2026-10-15'),
           fact('market_total_turnover', 85000, '亿元', 'ALL_A', '2026-10-15'),
+          fact('market_classified_security_count', 5568, '只', 'ALL_A', '2026-10-15'),
+          fact('market_volume_sample_count', 5567, '只', 'ALL_A', '2026-10-15'),
+          fact('market_turnover_sample_count', 5567, '只', 'ALL_A', '2026-10-15'),
           fact('market_volume_ratio_sample_count', 5000, '只', 'ALL_A', '2026-10-15'),
           fact('market_volume_ratio_active_count', 5100, '只', 'ALL_A', '2026-10-15'),
-          fact('market_volume_ratio_coverage', 98.04, '%', 'ALL_A', '2026-10-15')
+          fact('market_volume_ratio_coverage', 98.04, '百分比', 'ALL_A', '2026-10-15')
         ];
         const html = r.renderInlineMarketFacts({{
           execution_plan:{{source_mode:'market_recap', market_window:{{label:'今日'}}}}, facts,
@@ -929,10 +934,15 @@ def test_daily_market_recap_renders_single_day_index_and_verified_market_summary
     assert '<table' in result and '<th scope="col">指标</th>' in result
     assert '较上一交易日' in result
     assert '上证指数' in result and '20' in result and '+0.52%' in result
+    assert '8.8 点' in result and '8.80000000000018' not in result
     assert '上涨家数' in result and '3,000' in result
     assert '涨停家数' in result and '跌停家数' in result
     assert '加权量比' in result and '1.25' in result
     assert '量比有效样本数' in result and '5,000 只' in result
+    assert '已分类证券数' in result and '5,568 只' in result
+    assert '成交量样本数' in result and '5,567 只' in result
+    assert '成交额样本数' in result and '5,567 只' in result
+    assert '98.04 %' in result and '98.04 百分比' not in result
     assert '有成交股票数' in result and '5,100 只' in result
     assert '来源涨停池 36 家、跌停池 26 家' not in result
 

@@ -35,6 +35,7 @@ _METRIC_ALIASES = {
     "roe": ("roe", "净资产收益率", "ROE"),
     "index_close": ("index_close", "指数", "上证指数", "深证成指", "创业板指"),
     "index_close_delta": ("index_close_delta", "指数", "指数点"),
+    "index_close_pct_change": ("index_close_pct_change", "指数涨跌幅", "涨跌幅"),
     "limit_up_count": ("limit_up_count", "涨停", "涨停家数"),
     "market_advancing_count": ("market_advancing_count", "上涨家数"),
     "market_declining_count": ("market_declining_count", "下跌家数"),
@@ -44,10 +45,13 @@ _METRIC_ALIASES = {
     "market_total_turnover": ("market_total_turnover", "全 A 成交额", "成交额"),
     "market_total_volume": ("market_total_volume", "全 A 成交量", "成交量"),
     "market_volume_ratio": ("market_volume_ratio", "全 A 加权量比", "量比"),
-    "market_security_sample_count": ("market_security_sample_count", "全 A 快照证券数"),
-    "market_volume_ratio_sample_count": ("market_volume_ratio_sample_count", "量比有效样本数"),
-    "market_volume_ratio_active_count": ("market_volume_ratio_active_count", "有成交股票数"),
-    "market_volume_ratio_coverage": ("market_volume_ratio_coverage", "量比样本覆盖率"),
+    "market_security_sample_count": ("market_security_sample_count", "全 A 快照证券数", "快照证券数", "证券样本"),
+    "market_classified_security_count": ("market_classified_security_count", "已分类证券数", "可分类证券数", "已分类"),
+    "market_volume_sample_count": ("market_volume_sample_count", "成交量样本数", "成交量样本"),
+    "market_turnover_sample_count": ("market_turnover_sample_count", "成交额样本数", "成交额样本"),
+    "market_volume_ratio_sample_count": ("market_volume_ratio_sample_count", "量比有效样本数", "量比样本数"),
+    "market_volume_ratio_active_count": ("market_volume_ratio_active_count", "有成交股票数", "有效成交股票"),
+    "market_volume_ratio_coverage": ("market_volume_ratio_coverage", "量比样本覆盖率", "量比样本覆盖"),
 }
 
 
@@ -99,7 +103,9 @@ def _claim_spans(text: str) -> tuple[tuple[int, int], ...]:
 
 def _scoped_facts(facts: Sequence[Fact], scope: Scope) -> tuple[Fact, ...]:
     """只允许本范围内且派生链完整的事实支持论断。"""
-    from webapp.chat_facts import derive_growth, derive_index_delta, derive_percentage_point_delta
+    from webapp.chat_facts import (
+        derive_growth, derive_index_change_pct, derive_index_delta, derive_percentage_point_delta,
+    )
 
     by_id = {fact.id: fact for fact in facts if fact.id}
     valid = []
@@ -111,12 +117,12 @@ def _scoped_facts(facts: Sequence[Fact], scope: Scope) -> tuple[Fact, ...]:
             resolved = [parent for parent in parents if parent is not None]
             evidence = {identifier for parent in resolved for identifier in parent.evidence_ids}
             parent_metrics = {parent.metric for parent in resolved}
-            metric_is_delta = (
-                fact.metric == "index_close_delta" and parent_metrics == {"index_close"}
-                and "[index-point delta]" in fact.formula
-            )
+            metric_is_index_derived = (
+                fact.metric == "index_close_delta" and "[index-point delta]" in fact.formula
+                or fact.metric == "index_close_pct_change" and "[index-percent-change]" in fact.formula
+            ) and parent_metrics == {"index_close"}
             if (fact.source_category == "unknown" or len(parent_metrics) != 1
-                    or (fact.metric not in parent_metrics and not metric_is_delta)
+                    or (fact.metric not in parent_metrics and not metric_is_index_derived)
                     or any(parent.source_category != fact.source_category
                            or parent.company_code != fact.company_code for parent in resolved)
                     or evidence != set(fact.evidence_ids)):
@@ -126,6 +132,8 @@ def _scoped_facts(facts: Sequence[Fact], scope: Scope) -> tuple[Fact, ...]:
                 expected = derive_percentage_point_delta(current, baseline)
             elif fact.metric == "index_close_delta":
                 expected = derive_index_delta(current, baseline)
+            elif fact.metric == "index_close_pct_change":
+                expected = derive_index_change_pct(current, baseline)
             elif fact.unit == "百分比":
                 relation = "yoy" if fact.formula.endswith("[yoy]") else "qoq" if fact.formula.endswith("[qoq]") else ""
                 expected = derive_growth(current, baseline, relation=relation)
@@ -217,7 +225,24 @@ def _claim_matches(
         start = getattr(window, "start_date", None)
         end = getattr(window, "end_date", None)
         if start is not None and end is not None:
-            matches = [fact for fact in matches if _date_in_window(fact.period, start, end)]
+            in_window = [fact for fact in matches if _date_in_window(fact.period, start, end)]
+            if (answer_intent == "market_recap" and start == end):
+                fact_by_id = {fact.id: fact for fact in facts if fact.id}
+                lineage_baseline_ids = {
+                    parent.id
+                    for derived in facts
+                    if (derived.metric in {"index_close_delta", "index_close_pct_change"}
+                        and derived.period == end.isoformat() and derived.period_kind == "daily")
+                    for parent_id in derived.derived_from_ids
+                    if (parent := fact_by_id.get(parent_id)) is not None
+                    and parent.metric == "index_close" and parent.period < end.isoformat()
+                    and parent.company_code == derived.company_code
+                }
+                in_window.extend(
+                    fact for fact in matches
+                    if fact.metric == "index_close" and fact.id in lineage_baseline_ids
+                )
+            matches = list({fact.id: fact for fact in in_window}.values())
         elif (start is None and end is not None
               and getattr(window, "kind", None) == "rolling_trading_days"):
             count = getattr(window, "trading_days", None) or 0

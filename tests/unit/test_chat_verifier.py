@@ -240,6 +240,45 @@ def test_market_recap_verifier_binds_named_index_claim_to_its_source_symbol():
     assert any(issue.code == "unsupported_numeric_claim" for issue in report.issues)
 
 
+def test_market_recap_allows_only_lineage_backed_previous_trading_day_fact_in_single_day_window():
+    from datetime import date
+    from webapp.chat_facts import derive_index_delta
+    from webapp.chat_time import MarketWindow
+
+    baseline = Fact("index_close", 3707.48, "点", "2026-10-15", "daily", "index", "sh000001",
+                    "tool", ("index:previous",), "reference", "2026-10-16", source_category="market")
+    current = Fact("index_close", 3716.28, "点", "2026-10-16", "daily", "index", "sh000001",
+                   "tool", ("index:today",), "reference", "2026-10-16", source_category="market")
+    delta = derive_index_delta(current, baseline)
+    window = MarketWindow("今日", "explicit", date(2026, 10, 16), date(2026, 10, 16), None)
+    verifier = ClaimVerifier()
+
+    assert delta is not None and delta.value == 8.8
+    assert verifier.verify("外部参考：上证指数 2026-10-15 收盘 3707.48点", Scope.whole_corpus(),
+                           [baseline, current, delta], (), (), window=window,
+                           answer_intent="market_recap").status == "passed"
+    assert verifier.verify("外部参考：上证指数 2026-10-15 收盘 3707.48点", Scope.whole_corpus(),
+                           [baseline, current], (), (), window=window,
+                           answer_intent="market_recap").status == "blocked"
+
+
+def test_market_recap_verifies_rounded_index_change_percentage_with_complete_lineage():
+    from webapp.chat_facts import derive_index_change_pct
+
+    baseline = Fact("index_close", 3707.48, "点", "2026-10-15", "daily", "index", "sh000001",
+                    "tool", ("index:previous",), "reference", "2026-10-16", source_category="market")
+    current = Fact("index_close", 3716.28, "点", "2026-10-16", "daily", "index", "sh000001",
+                   "tool", ("index:today",), "reference", "2026-10-16", source_category="market")
+    percent = derive_index_change_pct(current, baseline)
+    verifier = ClaimVerifier()
+
+    assert percent is not None and percent.value == 0.24
+    assert verifier.verify("外部参考：上证指数涨跌幅为 +0.24%", Scope.whole_corpus(),
+                           [baseline, current, percent], (), (), answer_intent="market_recap").status == "passed"
+    assert verifier.verify("外部参考：上证指数涨跌幅为 +0.25%", Scope.whole_corpus(),
+                           [baseline, current, percent], (), (), answer_intent="market_recap").status == "blocked"
+
+
 def test_verifier_accepts_a_share_breadth_and_weighted_ratio_only_with_matching_market_facts():
     facts = [
         Fact("market_advancing_count", 3000, "家", "2026-10-15", "daily", "market", "ALL_A",
@@ -259,6 +298,29 @@ def test_verifier_accepts_a_share_breadth_and_weighted_ratio_only_with_matching_
 
     assert valid.status == "passed"
     assert wrong.status == "blocked"
+
+
+def test_verifier_accepts_rounded_market_coverage_facts_and_sample_counts():
+    facts = [
+        Fact("market_security_sample_count", 5923, "只", "2026-10-16", "daily", "market", "ALL_A",
+             "tool", ("snapshot:security",), "reference", "2026-10-16T15:00:00+08:00", source_category="market"),
+        Fact("market_classified_security_count", 5568, "只", "2026-10-16", "daily", "market", "ALL_A",
+             "tool", ("snapshot:classified",), "reference", "2026-10-16T15:00:00+08:00", source_category="market"),
+        Fact("market_volume_sample_count", 5567, "只", "2026-10-16", "daily", "market", "ALL_A",
+             "tool", ("snapshot:volume",), "reference", "2026-10-16T15:00:00+08:00", source_category="market"),
+        Fact("market_turnover_sample_count", 5567, "只", "2026-10-16", "daily", "market", "ALL_A",
+             "tool", ("snapshot:turnover",), "reference", "2026-10-16T15:00:00+08:00", source_category="market"),
+        Fact("market_volume_ratio", 0.9812, "倍", "2026-10-16", "daily", "market", "ALL_A",
+             "tool", ("snapshot:ratio",), "reference", "2026-10-16T15:00:00+08:00", source_category="market"),
+        Fact("market_volume_ratio_coverage", 99.98, "百分比", "2026-10-16", "daily", "market", "ALL_A",
+             "tool", ("snapshot:ratio-coverage",), "reference", "2026-10-16T15:00:00+08:00", source_category="market"),
+    ]
+    answer = ("证券样本 5923 只，已分类 5568 只，成交量样本 5567 只、成交额样本 5567 只；"
+              "全 A 量比 0.9812 倍，量比样本覆盖 99.98%。外部参考。")
+
+    report = ClaimVerifier().verify(answer, Scope.whole_corpus(), facts, (), (), answer_intent="market_recap")
+
+    assert report.status == "passed"
 
 
 def test_market_long_horizon_verifier_requires_the_selected_kline_grain():

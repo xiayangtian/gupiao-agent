@@ -259,9 +259,6 @@ def load_a_share_index_kline(symbol: str, *, start_date: str, end_date: str,
         if not _valid_date(day) or not start <= date.fromisoformat(day) <= end or close is None:
             continue
         bar = {"date": day, "close": close, "symbol": symbol, "kline_period": "day"}
-        volume = _number(row, "成交量", "volume", non_negative=True)
-        if volume is not None:
-            bar["volume"] = volume
         bars.append(bar)
     if not bars:
         raise ValueError("empty_provider_data")

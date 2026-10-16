@@ -120,9 +120,9 @@ def test_load_a_share_index_kline_normalizes_only_fixed_daily_symbol_and_window(
 
     assert result["as_of"] == "2026-10-16"
     assert result["bars"] == [
-        {"date": "2026-10-15", "close": 3707.48, "volume": 390000000,
+        {"date": "2026-10-15", "close": 3707.48,
          "symbol": "sh000001", "kline_period": "day"},
-        {"date": "2026-10-16", "close": 3692.45, "volume": 394000000,
+        {"date": "2026-10-16", "close": 3692.45,
          "symbol": "sh000001", "kline_period": "day"},
     ]
     assert akshare.calls == [{

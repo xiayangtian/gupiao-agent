@@ -3330,6 +3330,39 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                                           "error": step.error} for step in result.steps]
                 for source in result.context.sources:
                     yield {"type": "source_result", "result": source}
+                if (route.intent == "market_recap" and market_window is not None
+                        and market_window.start_date is not None
+                        and market_window.start_date == market_window.end_date):
+                    relations = tuple(relation for phrase, relation in (("同比", "yoy"), ("环比", "qoq"))
+                                      if phrase in body.question)
+                    market_derived = derive_available_facts(
+                        state.facts, relations=relations,
+                        percentage_points="百分点" in body.question, index_delta=True,
+                    )
+                    known_ids = {fact.id for fact in state.facts}
+                    for fact in market_derived:
+                        if fact.id not in known_ids:
+                            state.facts.append(fact)
+                            known_ids.add(fact.id)
+                            yield {"type": "fact", "fact": fact.to_dict()}
+                    index_facts_by_source = {
+                        source.call_id: tuple(
+                            fact for fact in state.facts
+                            if fact.metric in {"index_close", "index_close_delta", "index_close_pct_change"}
+                            and any(evidence_id.startswith(source.call_id + ":") for evidence_id in fact.evidence_ids)
+                        )
+                        for source in result.context.sources
+                    }
+                    answer_context = replace(
+                        result.context,
+                        sources=tuple(
+                            replace(source, facts=index_facts_by_source.get(source.call_id, ()))
+                            if index_facts_by_source.get(source.call_id) else source
+                            for source in result.context.sources
+                        ),
+                    )
+                else:
+                    answer_context = result.context
                 if run_control is not None:
                     run_control.check_active()
                 is_market_request = route.intent in {"market_quote", "market_trend", "market_recap"}
@@ -3370,7 +3403,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 _supplement_context.current = {"session_id": sid, "payload": None}
                 try:
                     yield from chat_qa.answer_from_context(
-                        answer_question, context=result.context, history=history, scope=scope,
+                        answer_question, context=answer_context, history=history, scope=scope,
                         run_id=run_id, allow_supplement=(
                             result.context.required_missing
                             and any(step.kind == "retrieve" and step.required for step in planning.plan.steps)

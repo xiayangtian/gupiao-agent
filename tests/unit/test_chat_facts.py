@@ -15,11 +15,13 @@ def test_extracts_bounded_akshare_market_summary_facts_with_source_identity():
 
     summary = {
         "status": "partial", "trade_date": "2026-10-15", "as_of": "2026-10-15T15:05:00+08:00",
-        "unique_security_rows": 5500, "volume_ratio_sample_count": 5000,
+        "unique_security_rows": 5500, "classified_rows": 5400,
+        "volume_sample_count": 5300, "turnover_sample_count": 5200,
+        "volume_ratio_sample_count": 5000,
         "volume_ratio_active_rows": 5100, "volume_ratio_coverage": 5000 / 5100,
         "advancing_count": 3000, "declining_count": 2000, "unchanged_count": 500,
         "limit_up_count": 36, "limit_down_count": None,
-        "total_turnover": 1_000_000.0, "total_volume": 2_000_000.0, "volume_ratio": 1.2,
+        "total_turnover": 1_000_000.0, "total_volume": 2_000_000.0, "volume_ratio": 1.234567,
     }
     result = SourceResult(
         "source-1", "akshare", "a_share_market_snapshot", "market", "partial",
@@ -36,8 +38,12 @@ def test_extracts_bounded_akshare_market_summary_facts_with_source_identity():
     assert {fact.metric for fact in facts} >= {
         "market_advancing_count", "market_declining_count", "market_unchanged_count",
         "market_limit_up_count", "market_total_turnover", "market_volume_ratio",
+        "market_classified_security_count", "market_volume_sample_count",
+        "market_turnover_sample_count",
     }
     assert not any(fact.metric == "market_limit_down_count" for fact in facts)
+    assert {fact.metric: fact.value for fact in facts}["market_volume_ratio"] == 1.2346
+    assert {fact.metric: fact.value for fact in facts}["market_volume_ratio_coverage"] == 98.04
     assert all(fact.company_code == "ALL_A" and fact.entity_scope == "market" for fact in facts)
     assert all(fact.source_category == "market" and fact.evidence_ids == ("source-1:a_share_market_snapshot",) for fact in facts)
 
@@ -244,7 +250,9 @@ def test_derive_available_facts_only_emits_requested_financial_or_index_comparis
     yoy = derive_available_facts([baseline, current], relations=("yoy",))
     index = derive_available_facts([old_index, new_index], index_delta=True)
     assert len(yoy) == 1 and yoy[0].value == 25 and yoy[0].derived_from_ids
-    assert len(index) == 1 and index[0].metric == "index_close_delta" and index[0].value == 30
+    assert {(fact.metric, fact.unit, fact.value) for fact in index} == {
+        ("index_close_delta", "点", 30), ("index_close_pct_change", "百分比", 1.0),
+    }
 
 
 def test_tencent_kline_rows_become_market_facts_only_with_bounded_dated_payload():

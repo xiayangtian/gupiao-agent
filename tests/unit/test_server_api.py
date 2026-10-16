@@ -2169,14 +2169,22 @@ class TestChatSessionsApi:
                 return PlanningResult("validated", plan)
 
         class AnswerAI:
-            def chat_stream(self, **_kwargs):
-                yield {"type": "done", "answer": "仅依据请求窗口内的实际返回数据。", "model": "fixture", "usage": {}}
+            def __init__(self):
+                self.messages = []
+            def chat_stream(self, **kwargs):
+                self.messages = kwargs.get("messages", [])
+                yield {"type": "done", "answer": (
+                    "上证指数收于10.00点；上证指数较上一交易日上涨0.50点；上证指数涨跌幅+5.26%。"
+                    "市场快照证券样本5000只，已分类5000只；全A量比1.1倍，量比样本覆盖率98%。"
+                    "涨停35家，跌停20家。外部参考。"
+                ), "model": "fixture", "usage": {}}
 
         class NoStore:
             def query(self, *_args, **_kwargs):
                 raise AssertionError("recap plan must not retrieve")
+        answer_ai = AnswerAI()
         monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
-        monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), AnswerAI()))
+        monkeypatch.setattr(server, "rag_qa", RagQA(NoStore(), answer_ai))
 
         response = client.post("/api/chat/stream", json={
             "question": "今日 A股复盘", "use_mcp": True, "scope_mode": "whole_corpus",
@@ -2189,7 +2197,10 @@ class TestChatSessionsApi:
         assert all(call[2] == trade_date for call in akshare_index_calls)
         assert tencent_calls == []
         assert [call[0] for call in mcp_calls] == ["stock_sector_fund_flow_rank"]
-        assert run["status"] == "completed"
+        assert run["status"] == "completed", run.get("verification_report")
+        assert run["verification_report"]["status"] == "passed"
+        assert any("上证指数 2026-10-16 较上一交易日涨跌幅=5.26%" in str(message)
+                   for message in answer_ai.messages)
         assert len(run["tool_artifacts"]) == 6
         akshare_artifact = next(item for item in run["tool_artifacts"]
                                 if item["provider"] == "akshare" and item["tool_name"] == "a_share_market_snapshot")
@@ -5191,7 +5202,7 @@ def test_market_recap_missing_overview_uses_verified_index_only_fallback(client,
     assert run["verification_report"]["status"] == "passed"
     assert "深证成指" in done["answer"]
     assert "14407.86点" in done["answer"]
-    assert "不含同期全市场广度" in done["answer"]
+    assert "指数点位比较不代表整体市场广度" in done["answer"]
 
 
 def test_market_recap_blocked_answer_uses_verified_index_only_fallback(client, env, monkeypatch, tmp_path):
@@ -5257,7 +5268,7 @@ def test_market_recap_blocked_answer_uses_verified_index_only_fallback(client, e
     assert all(period == "week" and count <= 800 for _, period, count, _ in calls)
     assert "999999" not in done["answer"]
     assert "上证指数" in done["answer"]
-    assert "不含同期全市场广度" in done["answer"]
+    assert "指数点位比较不代表整体市场广度" in done["answer"]
     assert run["status"] == "partial"
     assert run["verification_report"]["status"] == "passed"
     assert run["execution_plan"]["market_evidence_status"] == "partial"

@@ -250,9 +250,26 @@ def derive_index_delta(current: Fact, baseline: Fact) -> Fact | None:
             or current.period == baseline.period or current.id == baseline.id
             or dates is None or dates[0] <= dates[1]):
         return None
-    return _derived_fact(current, baseline, current.value - baseline.value, "点",
+    return _derived_fact(current, baseline, round(current.value - baseline.value, 2), "点",
                          f"{current.value} - {baseline.value} [index-point delta]",
                          metric="index_close_delta")
+
+
+def derive_index_change_pct(current: Fact, baseline: Fact) -> Fact | None:
+    dates = _dated_periods(current, baseline)
+    if (not _compatible_inputs(current, baseline) or current.source_category != "market"
+            or current.unit != "点" or current.period_kind != baseline.period_kind
+            or current.period == baseline.period or current.id == baseline.id
+            or baseline.value <= 0 or dates is None or dates[0] <= dates[1]):
+        return None
+    value = round((current.value - baseline.value) / baseline.value * 100, 2)
+    if not isfinite(value):
+        return None
+    return _derived_fact(
+        current, baseline, value, "百分比",
+        f"({current.value} - {baseline.value}) / {baseline.value} * 100 [index-percent-change]",
+        metric="index_close_pct_change",
+    )
 
 
 def derive_available_facts(
@@ -281,9 +298,10 @@ def derive_available_facts(
                     if fact is not None:
                         derived[fact.id] = fact
         elif (index_delta and unit == "点" and _metric.startswith("index_close") and len(ordered) >= 2):
-            fact = derive_index_delta(ordered[-1], ordered[0])
-            if fact is not None:
-                derived[fact.id] = fact
+            current, baseline = ordered[-1], ordered[0]
+            for fact in (derive_index_delta(current, baseline), derive_index_change_pct(current, baseline)):
+                if fact is not None:
+                    derived[fact.id] = fact
     return tuple(derived.values())
 
 
@@ -314,17 +332,25 @@ def facts_from_market_result(result: SourceResult, artifact: ToolArtifact) -> tu
             ("total_turnover", "market_total_turnover", "亿元", 1e-8),
             ("total_volume", "market_total_volume", "手", 1.0),
             ("unique_security_rows", "market_security_sample_count", "只", 1.0),
+            ("classified_rows", "market_classified_security_count", "只", 1.0),
+            ("volume_sample_count", "market_volume_sample_count", "只", 1.0),
+            ("turnover_sample_count", "market_turnover_sample_count", "只", 1.0),
             ("volume_ratio_sample_count", "market_volume_ratio_sample_count", "只", 1.0),
             ("volume_ratio_active_rows", "market_volume_ratio_active_count", "只", 1.0),
-            ("volume_ratio_coverage", "market_volume_ratio_coverage", "%", 100.0),
+            ("volume_ratio_coverage", "market_volume_ratio_coverage", "百分比", 100.0),
         )
         facts = []
         for source_key, metric, unit, scale in fields:
             value = row.get(source_key)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or value < 0:
                 continue
+            scaled_value = float(value) * scale
+            if metric == "market_volume_ratio":
+                scaled_value = round(scaled_value, 4)
+            elif metric == "market_volume_ratio_coverage":
+                scaled_value = round(scaled_value, 2)
             facts.append(Fact(
-                metric=metric, value=float(value) * scale, unit=unit, period=period,
+                metric=metric, value=scaled_value, unit=unit, period=period,
                 period_kind="daily", entity_scope="market", company_code="ALL_A",
                 source_type="tool", evidence_ids=(f"{result.call_id}:a_share_market_snapshot",),
                 verification="reference", as_of=result.as_of, source_category="market",

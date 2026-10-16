@@ -107,7 +107,7 @@ def _market_indices_fallback(context: AnswerContext) -> Optional[str]:
     cadence_label = "/".join(sorted(cadences))
     return (
         "外部参考：" + "；".join(statements) + f"。采样粒度为{cadence_label}线。"
-        "这里只反映实际取得的主要指数，不含同期全市场广度。"
+        "指数点位比较不代表整体市场广度；未取得或覆盖不完整的市场指标不作推断。"
     )
 
 
@@ -474,6 +474,31 @@ class RagQA:
             if coverage:
                 details.append(f"覆盖={coverage}")
             text = "[来源状态；" + "；".join(details) + "]\n" + content
+            index_names = {
+                "sh000001": "上证指数", "sz399001": "深证成指",
+                "sz399006": "创业板指", "sh000688": "科创50指数",
+            }
+            metric_names = {
+                "index_close": "收盘点位", "index_close_delta": "较上一交易日涨跌点数",
+                "index_close_pct_change": "较上一交易日涨跌幅",
+            }
+            fact_lines = []
+            for fact in getattr(source, "facts", ()):
+                metric = getattr(fact, "metric", "")
+                code = getattr(fact, "company_code", "")
+                if metric not in metric_names or code not in index_names:
+                    continue
+                try:
+                    value = format(float(fact.value), ".15g")
+                except (TypeError, ValueError):
+                    continue
+                unit = "%" if getattr(fact, "unit", "") == "百分比" else str(getattr(fact, "unit", ""))
+                period = str(getattr(fact, "period", ""))
+                fact_lines.append(
+                    f"{index_names[code]} {period} {metric_names[metric]}={value}{unit}"
+                )
+            if fact_lines:
+                text += "\n服务端标准化指数事实（不可改写）：" + "；".join(fact_lines)
             evidence.append({"id": f"source:{index}:{getattr(source, 'operation', 'unknown')}",
                              "required": bool(content) and status in {"success", "partial"},
                              "text": text})
@@ -656,6 +681,8 @@ class RagQA:
         if market_analysis and not knowledge_mode:
             system += (
                 "本轮由入口需求分析器判定为行情分析。只分析用户明确请求的行情窗口和对象；不要无请求地附加原因归因或中长期警示。"
+                "回答行情数字时必须使用本轮事实中存在的指标，并为数值附对应单位；每个数值都要在同一分句明确对应的指数/指标名称和比较口径；指数涨跌幅只使用事实提供的派生值，不能自行添加未取证字段。"
+                "实时行情/外部行情事实必须在回答中标注‘外部参考’，并说明实际数据覆盖；缺失指标保持不可用，不填零。"
                 "只有用户明确询问涨跌原因时才进行因果分析；价格序列不能单独证明原因，"
                 "只有本轮实际取得的新闻/公告证据才可用于归因；"
                 "未取得原因证据时明确说明无法核验，不猜测。"

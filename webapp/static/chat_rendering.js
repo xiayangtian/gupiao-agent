@@ -431,12 +431,16 @@
   }
 
   function factMetricLabel(metric) {
-    return ({ price: '股价', index_close: '指数点位', volume: '成交量', amount: '成交额',
+    return ({ price: '股价', index_close: '指数点位', index_close_delta: '指数涨跌点数',
+      index_close_pct_change: '指数涨跌幅', volume: '成交量', amount: '成交额',
       market_advancing_count: '上涨家数', market_declining_count: '下跌家数',
       market_unchanged_count: '平盘家数', market_limit_up_count: '涨停家数',
       market_limit_down_count: '跌停家数', market_volume_ratio: '全 A 加权量比',
       market_total_turnover: '全 A 成交额', market_total_volume: '全 A 成交量',
       market_security_sample_count: '全 A 快照证券数',
+      market_classified_security_count: '已分类证券数',
+      market_volume_sample_count: '成交量样本数',
+      market_turnover_sample_count: '成交额样本数',
       market_volume_ratio_sample_count: '量比有效样本数',
       market_volume_ratio_active_count: '有成交股票数',
       market_volume_ratio_coverage: '量比样本覆盖率',
@@ -456,12 +460,17 @@
     return String(value == null ? '' : value);
   }
 
+  function displayFactUnit(unit) {
+    var value = String(unit || '');
+    return value === '百分比' ? '%' : value;
+  }
+
   function renderFactTable(facts, run) {
     if (!facts.length) return '<p class="chat-source-empty">当前来源没有可展示的数据项。</p>';
     function rows(items) {
       return items.map(function (fact) {
         var value = formatFactValue(fact.value);
-        var unit = String(fact.unit || '');
+        var unit = displayFactUnit(fact.unit);
         return '<tr class="chat-source-fact-row">'
           + '<td><span class="chat-source-cell-label">对象</span>' + escapeHtml(factObjectLabel(fact, run)) + '</td>'
           + '<td><span class="chat-source-cell-label">指标</span>' + escapeHtml(factMetricLabel(String(fact.metric || ''))) + '</td>'
@@ -636,6 +645,9 @@
       market_limit_down_count: '跌停家数', market_total_turnover: '全 A 成交额',
       market_total_volume: '全 A 成交量', market_volume_ratio: '全 A 加权量比',
       market_security_sample_count: '全 A 快照证券数',
+      market_classified_security_count: '已分类证券数',
+      market_volume_sample_count: '成交量样本数',
+      market_turnover_sample_count: '成交额样本数',
       market_volume_ratio_sample_count: '量比有效样本数',
       market_volume_ratio_active_count: '有成交股票数',
       market_volume_ratio_coverage: '量比样本覆盖率'
@@ -688,7 +700,7 @@
       var marketRows = Object.keys(summaryLabels).filter(function (metric) { return metricFacts[metric]; }).map(function (metric) {
         var fact = metricFacts[metric];
         return '<tr><td>' + escapeHtml(summaryLabels[metric]) + '</td><td class="chat-inline-market-value">'
-          + escapeHtml(formatFactValue(fact.value)) + (fact.unit ? ' ' + escapeHtml(fact.unit) : '')
+          + escapeHtml(formatFactValue(fact.value)) + (fact.unit ? ' ' + escapeHtml(displayFactUnit(fact.unit)) : '')
           + '</td><td>—</td></tr>';
       });
       var indexHtmlRows = indexRows.map(function (group) {
@@ -697,7 +709,7 @@
         var value = escapeHtml(current.period + ' · ' + formatFactValue(current.value) + (group.unit ? ' ' + group.unit : ''));
         var change = '—';
         if (previous && previous.value !== 0) {
-          var delta = current.value - previous.value;
+          var delta = Math.round((current.value - previous.value) * 100) / 100;
           var pointChange = (delta > 0 ? '+' : '') + formatFactValue(delta) + (group.unit ? ' ' + group.unit : '');
           change = pointChange + '（' + escapeHtml(percent(current.value, previous.value)) + '）';
         }
@@ -886,7 +898,7 @@
       var label = fact.source_type === 'pdf' || fact.source_category === 'local_pdf' ? 'PDF 原文' : '事实';
       var asOf = fact.as_of ? ' · 数据截至 ' + escapeHtml(fact.as_of) : '';
       parts.push('<div class="chat-fact chat-fact-' + escapeHtml(fact.verification || '') + '">'
-        + escapeHtml(label + ' · ' + factMetricLabel(String(fact.metric || '')) + '：' + String(fact.value == null ? '' : fact.value) + ' ' + String(fact.unit || '')) + asOf + '</div>');
+        + escapeHtml(label + ' · ' + factMetricLabel(String(fact.metric || '')) + '：' + String(fact.value == null ? '' : fact.value) + ' ' + displayFactUnit(fact.unit)) + asOf + '</div>');
     });
     (Array.isArray(run.conflicts) ? run.conflicts : []).forEach(function (conflict) {
       if (!conflict || typeof conflict !== 'object') return;
