@@ -179,7 +179,7 @@
 | --- | --- |
 | 核心代码 | `webapp/investment_news_sources.py`（Eastmoney/AKShare 字段规范化）、`webapp/investment_news_store.py`（SQLite、分页、保留、指纹与最近成功运行查询）、`webapp/investment_news.py`（运行/采集/摘要协调）、`webapp/investment_news_scheduler.py`（Asia/Shanghai 调度）、`webapp/server.py`（API/生命周期/静态资源版本）、`webapp/static/investment_news_polling.js`（Asia/Shanghai 自动任务监听窗口） |
 | 前端与 API | `webapp/static/investment_news.js`；`GET /api/investment-news`（单日 `day` 或包含端点的 `start_day`/`end_day`）、`/watchlist`、`/digest?day=...`、`/runs`、`/status`；`POST /collect`、`/digest`、`/watchlist`；`DELETE /watchlist/{code}` |
-| 关键不变量 | 仅限用户选定的本机个人非商用范围；Eastmoney/AKShare 可用不证明授权、SLA 或覆盖。手动采集不调 AI、手动摘要不采集；自动采集每日 09:00–16:00 整点，自动摘要仅 09:00/16:00 且等待当时采集完成。最多 20 只共享自选股；市场只提供今天/昨天，个人自选股只提供今天及含当天计算的 7/30 日历天区间。摘要日期选择与资讯日期筛选相互独立；综述按日期保存，每日仅保留最新一份。自选股重点只允许引用当前自选股关联的 `kind=watchlist` 条目，服务端在分批生成和最终合并阶段都执行范围校验。个股筛选只对自选股资讯生效，范围限定为当前共享自选股；市场快讯没有个股关联，不能按股票筛选，界面以禁用样式和说明明确告知。前端只在每小时自动任务前后各 5 分钟检查状态，间隔 30 秒；发现活跃任务/完成后持续跟踪，页面隐藏时不请求，返回前台立即检查。筛选范围/日期控件与股票筛选/排序采用明确分组行，避免响应式 flex 自动重排。页面每页最多 20 条不限制收集和摘要输入。资讯片段与内容型日综述最多保留 90 天，运行状态元数据与摘要内容分开保存。页面持续展示最近一次成功采集与综述时间；终态操作提示短暂展示后清空，运行中进度保持可见。来源失败不清空旧数据；摘要要点须引用有效条目；来源时间未知不得伪装为新鲜；同题转载不表示独立佐证；不提供投资建议。 |
+| 关键不变量 | 仅限用户选定的本机个人非商用范围；Eastmoney/AKShare 可用不证明授权、SLA 或覆盖。手动采集不调 AI、手动摘要不采集；自动采集每日 09:00–16:00 整点，自动摘要仅 09:00/16:00 且等待当时采集完成。最多 20 只共享自选股；市场只提供今天/昨天，个人自选股只提供今天及含当天计算的 7/30 日历天区间。摘要日期选择与资讯日期筛选相互独立；综述按日期保存，每日仅保留最新一份。自动综述成功后，页面日期选择与展示内容同步切换至最新成功综述日期；用户手动回看历史日期不受影响。自选股重点只允许引用当前自选股关联的 `kind=watchlist` 条目，服务端在分批生成和最终合并阶段都执行范围校验。个股筛选只对自选股资讯生效，范围限定为当前共享自选股；市场快讯没有个股关联，不能按股票筛选，界面以禁用样式和说明明确告知。前端只在每小时自动任务前后各 5 分钟检查状态，间隔 30 秒；发现活跃任务/完成后持续跟踪，页面隐藏时不请求，返回前台立即检查。筛选范围/日期控件与股票筛选/排序采用明确分组行，避免响应式 flex 自动重排。页面每页最多 20 条不限制收集和摘要输入。资讯片段与内容型日综述最多保留 90 天，运行状态元数据与摘要内容分开保存。页面持续展示最近一次成功采集与综述时间；终态操作提示短暂展示后清空，运行中进度保持可见。来源失败不清空旧数据；摘要要点须引用有效条目；来源时间未知不得伪装为新鲜；同题转载不表示独立佐证；不提供投资建议。 |
 | 验证 | `tests/unit/test_investment_news_store.py`、`test_investment_news_sources.py`、`test_investment_news.py`、`test_investment_news_digest.py`、`test_investment_news_scheduler.py`、`test_investment_news_api.py`、`test_investment_news_ui.py`、`test_investment_news_polling_js.py`、`tests/unit/test_server_api.py`、`tests/browser/test_investment_news_status_ui.py`；浏览器仅使用 `tests/browser/investment_news_test_app.py` 假来源/假 AI |
 | 设计与记录 | [投资资讯页设计](superpowers/specs/2026-10-14-investment-news-page-design.md)、[实施计划](superpowers/plans/2026-10-14-investment-news-page.md) |
 
@@ -191,6 +191,7 @@
 - `956728a`：综述日期选择器置于页面上方且独立于资讯日期；市场资讯快捷切换今天/昨天，自选股快捷切换今日/近 7/30 天；服务端拒绝将市场或非当前自选股资讯用于“自选股重点”。
 - `c1899a4`：前端仅在 Asia/Shanghai 每小时任务前后 5 分钟、每 30 秒检查自动运行状态；发现活跃任务持续跟踪，任务完成后更新列表/综述/状态，页面隐藏时暂停并在回到前台时检查。资讯范围与日期、股票筛选与排序改为明确分组行布局。
 - `541c137`：市场资讯的股票筛选显式禁用并说明原因；切换到自选股资讯后启用并限定于已添加自选股，补充无障碍描述与浏览器回归测试。
+- `6c2a532`：自动综述成功后，日期选择器与综述内容自动切换到最新完成的综述日期；保留用户主动回看历史日期的行为。补充真实浏览器回归覆盖自动任务完成后的刷新。
 
 ## 维护规则
 
