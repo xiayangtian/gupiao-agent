@@ -12,6 +12,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from webapp.chat_models import AnswerRun, ChatMessage
@@ -42,6 +43,10 @@ class ChatSessionRun:
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _message_now_iso() -> str:
+    return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
 
 
 class ChatStore:
@@ -371,9 +376,10 @@ class ChatStore:
     ) -> Optional[Dict[str, Any]]:
         """Persist the user turn, visible clarification, and trusted slot in one write."""
         record = self._normalize_pending(pending)
+        created_at = _message_now_iso()
         messages = [
-            self._normalize_message({"role": "user", "content": question}),
-            self._normalize_message({"role": "assistant", "content": reply}),
+            self._normalize_message({"role": "user", "content": question, "created_at": created_at}),
+            self._normalize_message({"role": "assistant", "content": reply, "created_at": created_at}),
         ]
         with self._lock:
             for session in self._data["sessions"]:
@@ -509,9 +515,10 @@ class ChatStore:
         """Atomically persist a user question and its complete or incomplete answer run."""
         if not isinstance(run, AnswerRun):
             raise ValueError("run must be an AnswerRun")
+        created_at = _message_now_iso()
         messages = [
-            ChatMessage(role="user", content=question).to_dict(),
-            ChatMessage(role="assistant", content=run.content, run=run).to_dict(),
+            ChatMessage(role="user", content=question, created_at=created_at).to_dict(),
+            ChatMessage(role="assistant", content=run.content, run=run, created_at=created_at).to_dict(),
         ]
         with self._lock:
             return self._append_normalized_messages(sid, messages)
@@ -522,6 +529,17 @@ class ChatStore:
         messages: List[Dict[str, Any] | ChatMessage],
     ) -> Optional[Dict[str, Any]]:
         """Compatibility entry point that writes every message in schema-v2 form."""
-        normalized = [self._normalize_message(message) for message in messages]
+        created_at = _message_now_iso()
+        normalized = []
+        for message in messages:
+            if isinstance(message, ChatMessage):
+                item = message
+                if not item.created_at:
+                    item = ChatMessage(item.role, item.content, item.run, created_at)
+                normalized.append(self._normalize_message(item))
+            else:
+                payload = dict(message)
+                payload.setdefault("created_at", created_at)
+                normalized.append(self._normalize_message(payload))
         with self._lock:
             return self._append_normalized_messages(sid, normalized)

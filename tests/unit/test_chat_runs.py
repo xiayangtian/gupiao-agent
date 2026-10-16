@@ -24,6 +24,18 @@ def test_run_control_cancel_is_idempotent_and_keeps_first_reason():
         control.check_active()
 
 
+def test_run_control_can_only_tighten_its_original_deadline():
+    control = ChatRunControl("session-a", "run-a", timeout_seconds=5)
+    original_deadline = control.deadline
+
+    control.tighten_deadline(2)
+    tightened_deadline = control.deadline
+    control.tighten_deadline(10)
+
+    assert tightened_deadline < original_deadline
+    assert control.deadline == tightened_deadline
+
+
 def test_run_control_deadline_uses_monotonic_time_and_raises():
     control = ChatRunControl("session-a", "run-a", timeout_seconds=0.01)
     time.sleep(0.02)

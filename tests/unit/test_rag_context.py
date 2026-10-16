@@ -33,13 +33,17 @@ def test_context_answer_does_not_retrieve_or_execute_tools():
     assert "provider_payload_marker" in ai.calls[0]["messages"][-2]["content"]
 
 
-def test_required_missing_returns_limitation_without_model_call():
+def test_required_missing_uses_financial_fallback_without_company_facts():
     ai = AI()
     qa = RagQA(NoStore(), ai)
-    events = list(qa.answer_from_context("行情", context=AnswerContext(required_missing=True)))
+    events = list(qa.answer_from_context(
+        "分析农业银行年报", context=AnswerContext(required_missing=True),
+    ))
     assert events[-1]["type"] == "done"
-    assert events[-1]["answer"]
-    assert ai.calls == []
+    assert len(ai.calls) == 1
+    assert "本地必需报告证据缺失" in ai.calls[0]["system"]
+    assert "不得回答具体公司事实" in ai.calls[0]["system"]
+    assert "一般知识的分析框架" in ai.calls[0]["system"]
 
 
 def test_compatibility_tool_loop_uses_injected_run_runtime():

@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Mapping
 
 from webapp.chat_followups import PreviousTurnContext, is_context_only_followup
-from webapp.chat_policy import QuestionRoute, QuestionRouter
+from webapp.chat_intent import ChatIntentAnalysis
+from webapp.chat_policy import QuestionRoute
 from webapp.chat_scope import ScopeRequest
 from webapp.chat_time import (
     MarketWindow, has_market_period_expression, is_fuzzy_market_horizon,
@@ -104,7 +105,10 @@ def _pending_reply_matches(question: str, route: QuestionRoute, pending: Mapping
             return False
         return resolve_market_window(question, now) is not None or resolve_financial_period(question) is not None
     if missing == "subject":
-        return route.intent in {"general_knowledge", "clarification"} and bool(question.strip())
+        return route.intent in {
+            "general_knowledge", "clarification", "market_quote", "market_trend",
+            "report_fact", "financial_trend",
+        } and bool(question.strip())
     if missing == "kind":
         return route.intent not in {"general_knowledge", "clarification"}
     return False
@@ -136,12 +140,43 @@ def _clarification_for(
     return None
 
 
+def _route_from_analysis(analysis: ChatIntentAnalysis) -> QuestionRoute:
+    if analysis.category == "market_analysis":
+        if analysis.subject_kind == "broad_market":
+            return QuestionRoute("market_recap", False, True)
+        if analysis.subject_kind == "equity":
+            if analysis.task_kind == "attribution":
+                return QuestionRoute("general_web", True, False)
+            if analysis.task_kind == "trend":
+                return QuestionRoute("market_trend", True, True)
+            if analysis.task_kind == "recap":
+                return QuestionRoute("market_recap", False, True)
+            return QuestionRoute("market_quote", True, False)
+        if analysis.subject_kind == "none" and analysis.task_kind in {"trend", "quote"}:
+            return QuestionRoute("market_trend", True, True)
+        # Industry, commodity and overseas assets may use authorized web evidence,
+        # but never inherit the single-company quote/K-line tools.
+        return QuestionRoute("general_web", False, False)
+    if analysis.category == "financial_report":
+        if analysis.task_kind == "report_trend":
+            return QuestionRoute("financial_trend", True, True)
+        return QuestionRoute("report_fact", True, False)
+    if analysis.category == "financial_knowledge":
+        return QuestionRoute("general_knowledge", False, False)
+    if analysis.category == "unclear":
+        return QuestionRoute("clarification", False, False)
+    if analysis.category == "non_financial":
+        return QuestionRoute("clarification", False, False)
+    raise ValueError("unsupported chat intent category")
+
+
 def resolve_chat_request(
     question: str,
     scope_request: ScopeRequest,
     pending: Mapping[str, Any] | None,
     now: datetime,
     *,
+    analysis: ChatIntentAnalysis,
     previous_context: PreviousTurnContext | None = None,
 ) -> ResolvedRequest | Clarification:
     """Freeze intent/window/source families using only this turn and a trusted slot.
@@ -156,18 +191,19 @@ def resolve_chat_request(
     if not isinstance(now, datetime):
         raise ValueError("now must be a datetime")
 
+    if not isinstance(analysis, ChatIntentAnalysis):
+        raise ValueError("analysis must be a validated ChatIntentAnalysis")
     text = question.strip()
-    router = QuestionRouter()
-    route = router.classify(text)
+    route = _route_from_analysis(analysis)
     context_only_followup = (
         not (isinstance(pending, Mapping) and _pending_is_fresh(pending, now))
         and is_context_only_followup(text, previous_context)
     )
     if context_only_followup:
         route = QuestionRoute("general_knowledge", False, False)
-    window = resolve_market_window(text, now)
-    financial_period = (None if route.intent in {"market_quote", "market_trend", "market_recap"}
-                        else resolve_financial_period(text))
+    time_text = f"{text} {analysis.time_expression}".strip()
+    window = resolve_market_window(time_text, now) if analysis.category == "market_analysis" else None
+    financial_period = resolve_financial_period(time_text) if analysis.category == "financial_report" else None
     effective_question = text
     window_origin: Literal["explicit", "fuzzy_default", "clarification", "none"] = (
         "fuzzy_default" if window and is_fuzzy_market_horizon(text)
@@ -192,6 +228,22 @@ def resolve_chat_request(
             frozen_period = pending.get("financial_period")
             if isinstance(frozen_period, str) and frozen_period:
                 financial_period = frozen_period
+
+    if analysis.category == "non_financial":
+        return Clarification("当前仅支持金融类问题。", "kind", "non_financial", text)
+    if analysis.category == "unclear":
+        return Clarification(analysis.clarification_question, "kind", "clarification", text)
+    if analysis.needs_clarification and consumed_version is None:
+        if analysis.subject_kind == "none" or (route.requires_company and not analysis.subject_name and not analysis.stock_code):
+            missing_field: Literal["subject", "window", "kind"] = "subject"
+        elif route.requires_time_window and window is None:
+            missing_field = "window"
+        else:
+            missing_field = "kind"
+        return Clarification(
+            analysis.clarification_question, missing_field, route.intent, text,
+            market_window=window, financial_period=financial_period,
+        )
 
     code = str(pending.get("company_code") or "") if consumed_version and isinstance(pending, Mapping) else ""
     if code and (len(code) != 6 or not code.isdigit()):

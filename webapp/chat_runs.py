@@ -54,6 +54,15 @@ class ChatRunControl:
             self.cancel_event.set()
             return True
 
+    def tighten_deadline(self, timeout_seconds: float) -> float:
+        """Shorten the run deadline relative to its start; never extend or reset it."""
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        candidate = self.started_at + timeout_seconds
+        with self._lock:
+            self.deadline = min(self.deadline, candidate)
+            return self.deadline
+
     def remaining_seconds(self) -> float:
         return max(0.0, self.deadline - time.monotonic())
 

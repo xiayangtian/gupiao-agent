@@ -249,7 +249,9 @@ def test_market_answer_style_limits_horizon_and_avoids_unrequested_disclaimers()
 
     for question in ("分析长江电力近5个交易日走势", "分析A股近5个交易日整体表现"):
         ai = FakeAIStream(answer="短期行情摘要")
-        list(RagQA(object(), ai).answer_from_context(question, context=AnswerContext()))
+        list(RagQA(object(), ai).answer_from_context(
+            question, context=AnswerContext(), market_analysis=True,
+        ))
         assert "只分析用户明确请求的行情窗口" in ai.last_system
         assert "不要无请求地附加原因归因或中长期警示" in ai.last_system
         assert "只有用户明确询问涨跌原因时" in ai.last_system
@@ -259,17 +261,31 @@ def test_market_answer_style_limits_horizon_and_avoids_unrequested_disclaimers()
     assert "只分析用户明确请求的行情窗口" not in report_ai.last_system
 
 
-def test_knowledge_mode_rejects_company_and_current_market_questions():
+def test_financial_knowledge_mode_answers_without_sources_and_discloses_missing_market_data():
     from webapp.source_runtime import AnswerContext
-    ai = FakeAIStream()
+    ai = FakeAIStream(answer="无法核实今日行情，可以从成交量和基本面分析。")
     qa = RagQA(object(), ai)
 
-    company = list(qa.answer_from_context("什么是市盈率？", context=AnswerContext(),
-        knowledge_mode=True, scope=Scope.company_only("601288", "农业银行")))
-    market = list(qa.answer_from_context("今天股价是多少？", context=AnswerContext(), knowledge_mode=True))
+    events = list(qa.answer_from_context(
+        "今天黄金行情怎么样？", context=AnswerContext(), knowledge_mode=True,
+        knowledge_notice="本轮未取得可核验的黄金行情数据。",
+    ))
 
-    assert company[0]["type"] == market[0]["type"] == "error"
-    assert ai.last_messages is None
+    assert events[-1]["type"] == "done"
+    assert "未取得可核验的黄金行情数据" in ai.last_system
+    assert "不得声称已检索或核实" in ai.last_system
+    assert ai.last_messages
+
+
+def test_market_answer_style_comes_from_model_analysis_not_question_keywords():
+    from webapp.source_runtime import AnswerContext
+    ai = FakeAIStream(answer="通用金融说明。")
+
+    list(RagQA(object(), ai).answer_from_context(
+        "解释近期财务趋势", context=AnswerContext(), market_analysis=False,
+    ))
+
+    assert "只分析用户明确请求的行情窗口" not in ai.last_system
 
 
 def test_answer_stream_yields_deltas_and_done_with_citations(tmp_path, fake_embedder):

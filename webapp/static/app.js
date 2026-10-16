@@ -2566,7 +2566,7 @@ async function openChatSession(sid) {
         var m = data.messages[messageIndex];
         if (!m || !m.role) continue;
         if (m.role === 'user') {
-          if (m.content) appendChatMsg('#chat-history', 'user', m.content);
+          if (m.content) appendChatMsg('#chat-history', 'user', m.content, m.created_at);
         } else if (m.role === 'assistant') {
           var researchRun = null;
           var researchId = m.run && m.run.research_run_id;
@@ -2577,7 +2577,8 @@ async function openChatSession(sid) {
               if (researchResponse.ok) researchRun = (await researchResponse.json()).run;
             } catch (_) { /* answer remains readable if a historic research record is unavailable */ }
           }
-          appendAssistantRun('#chat-history', { content: m.content, run: m.run, research_run: researchRun });
+          appendAssistantRun('#chat-history', { content: m.content, run: m.run, research_run: researchRun,
+            created_at: m.created_at });
         }
       }
     }
@@ -2943,7 +2944,8 @@ async function resolveSupplementConsent(supplementId, action, candidateIds, card
     },
     done: function (data) {
       card.card.remove();
-      appendAssistantRun('#chat-history', { content: data.answer || answerText, run: data.run });
+      appendAssistantRun('#chat-history', { content: data.answer || answerText, run: data.run,
+        created_at: new Date().toISOString() });
       appendChatElapsed('#chat-history', data.elapsed_seconds);
       appendAnalysisCitations('#chat-history', data.citations || []);
       scrollChatToBottom();
@@ -2956,7 +2958,7 @@ async function resolveSupplementConsent(supplementId, action, candidateIds, card
 }
 
 async function submitQuestion(q, key) {
-  appendChatMsg('#chat-history', 'user', q);
+  appendChatMsg('#chat-history', 'user', q, new Date().toISOString());
   renderDraftBar();   // 流开始：草稿按钮切换为「打断并提交」
   var sendBtn = $('#chat-send-btn');
   if (sendBtn) {
@@ -2981,6 +2983,15 @@ async function submitQuestion(q, key) {
   function clearResearchProgress() {
     if (researchStreamEl && researchStreamEl.parentNode) researchStreamEl.parentNode.removeChild(researchStreamEl);
     researchStreamEl = null;
+  }
+
+  function clearTransientStage() {
+    if (stageEl && stageEl.parentNode) stageEl.parentNode.removeChild(stageEl);
+    stageEl = null;
+    if (toolStepsEl && !toolStepsEl.children.length) {
+      if (toolStepsEl.parentNode) toolStepsEl.parentNode.removeChild(toolStepsEl);
+      toolStepsEl = null;
+    }
   }
 
   function renderResearchProgress() {
@@ -3206,6 +3217,7 @@ async function submitQuestion(q, key) {
               appendAssistantRun('#chat-history', {
                 content: '这次没有完成报告补充，已根据现有资料回答。',
                 run: { status: 'partial' },
+                created_at: new Date().toISOString(),
               });
               scrollChatToBottom();
             },
@@ -3246,7 +3258,8 @@ async function submitQuestion(q, key) {
           thinkingEl = null;
           scopeEl = null;
           clearResearchProgress();
-          appendAssistantRun('#chat-history', { content: st.answerText, run: parsed.data.run, research_run: st.researchRun || parsed.data.research_run });
+          appendAssistantRun('#chat-history', { content: st.answerText, run: parsed.data.run,
+            research_run: st.researchRun || parsed.data.research_run, created_at: new Date().toISOString() });
           appendChatElapsed('#chat-history', parsed.data.elapsed_seconds);
           // analysis 来源引用未进入 run.artifacts，只保留在旧 citations 字段一个版本；
           // PDF/网页/实时工具已由 renderRunArtifacts 统一渲染。
@@ -3297,6 +3310,7 @@ async function submitQuestion(q, key) {
           content: st.answerText || (st.stopped ? '回答已停止。' : '连接中断，回答未能完整生成。'),
           run: { status: st.stopped ? 'stopped' : 'failed', id: st.runId || '', research_run_id: (st.researchRun && st.researchRun.id) || '' },
           research_run: st.researchRun || null,
+          created_at: new Date().toISOString(),
         });
         scrollChatToBottom();
       }
@@ -3317,6 +3331,7 @@ async function submitQuestion(q, key) {
           content: st.answerText,
           run: { status: 'stopped', id: st.runId || '', research_run_id: (st.researchRun && st.researchRun.id) || '' },
           research_run: st.researchRun || null,
+          created_at: new Date().toISOString(),
         });
         scrollChatToBottom();
       }
@@ -3333,11 +3348,13 @@ async function submitQuestion(q, key) {
           content: '⚠️ ' + (st.safeErrorMessage || '暂时无法连接问答服务，请稍后重试。'),
           run: st.failedRun || { status: 'failed', id: st.runId || '' },
           research_run: st.researchRun || null,
+          created_at: new Date().toISOString(),
         });
         scrollChatToBottom();
       }
     }
   } finally {
+    clearTransientStage();
     delete chatStreams[key];
     updateChatSendBtn();
     renderDraftBar();
@@ -3359,7 +3376,27 @@ async function autoSubmitDrafts() {
   await submitQuestion(texts.join('\n\n'), chatStreamKey());
 }
 
-function appendChatMsg(sel, role, content) {
+function formatChatTimestamp(value) {
+  if (!value) return '';
+  var date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date);
+}
+
+function appendMessageTimestamp(parent, value) {
+  var text = formatChatTimestamp(value);
+  if (!text) return;
+  var time = document.createElement('time');
+  time.className = 'chat-msg-time';
+  time.dateTime = value;
+  time.textContent = text;
+  parent.appendChild(time);
+}
+
+function appendChatMsg(sel, role, content, createdAt) {
   var box = $(sel);
   if (!box) return;
   var div = document.createElement('div');
@@ -3368,6 +3405,7 @@ function appendChatMsg(sel, role, content) {
     ? window.ChatRendering.normalizeAssistantMarkdown(content)
     : content;
   div.innerHTML = role === 'user' ? escapeHtml(content) : renderMarkdown(displayed);
+  appendMessageTimestamp(div, createdAt);
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
 }
@@ -3443,7 +3481,11 @@ function appendAssistantRun(sel, message) {
   var displayed = rendering ? rendering.normalizeAssistantMarkdown(content) : content;
   var inlineMarketHtml = rendering && rendering.renderInlineMarketFacts
     ? rendering.renderInlineMarketFacts(run) : '';
-  parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + inlineMarketHtml + '</div>');
+  var timestampText = formatChatTimestamp(message && message.created_at);
+  var timestampHtml = timestampText
+    ? '<time class="chat-msg-time" datetime="' + escapeHtml(message.created_at) + '">' + escapeHtml(timestampText) + '</time>'
+    : '';
+  parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + inlineMarketHtml + timestampHtml + '</div>');
   if (rendering) {
     var researchPlanHtml = rendering.renderResearchPlan(message && message.research_run && message.research_run.plan);
     if (researchPlanHtml) parts.push(researchPlanHtml);
@@ -3580,7 +3622,9 @@ async function resumeResearch(runId, button) {
       research_step_completed: function (data) { button.textContent = '已完成：' + (data.label || '研究步骤'); },
       research_step_failed: function (data) { button.textContent = '这一步暂未完成：' + (data.label || '研究资料'); },
       research_blocked: function (data) { button.textContent = data.reason || '暂时无法继续研究'; },
-      done: function (data) { finished = true; appendAssistantRun('#chat-history', { content: data.answer, run: data.run }); }
+      done: function (data) { finished = true; appendAssistantRun('#chat-history', {
+        content: data.answer, run: data.run, created_at: new Date().toISOString(),
+      }); }
     });
     if (finished) {
       // 本次恢复的结果已由新追加的回答（及其自身的恢复入口）表达；旧按钮可能已经

@@ -1,14 +1,58 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from webapp.chat_intent import ChatIntentAnalysis
 from webapp.chat_request_resolution import Clarification, ResolvedRequest, resolve_chat_request
 from webapp.chat_scope import ScopeRequest
 
 NOW = datetime(2026, 10, 9, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
+def _analysis(category, subject_kind="none", subject_name="", task_kind="none", time_expression="",
+              *, stock_code="", needs_clarification=False, clarification_question=""):
+    return ChatIntentAnalysis(
+        category=category, subject_kind=subject_kind, subject_name=subject_name,
+        stock_code=stock_code, task_kind=task_kind, time_expression=time_expression,
+        needs_clarification=needs_clarification, clarification_question=clarification_question,
+    )
+
+
+def test_model_analysis_overrides_case_sensitive_keyword_route_for_a_share():
+    result = resolve_chat_request(
+        "分析今日a股行情", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("market_analysis", "broad_market", "A股", "recap", "今日"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_recap"
+    assert result.route.requires_company is False
+
+
+def test_market_assets_without_stock_identity_are_not_blocked_by_company_scope():
+    for kind, name in (("commodity", "黄金"), ("overseas_market", "美股"), ("industry", "半导体")):
+        result = resolve_chat_request(
+            f"分析{name}走势", ScopeRequest.auto(), None, NOW,
+            analysis=_analysis("market_analysis", kind, name, "trend", "近期"),
+        )
+        assert isinstance(result, ResolvedRequest)
+        assert result.route.requires_company is False
+        assert result.route.intent == "general_web"
+
+
+def test_model_can_classify_a_phrase_differently_without_resolver_reclassification():
+    result = resolve_chat_request(
+        "分析今日A股行情", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("financial_knowledge", task_kind="explain"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "general_knowledge"
+    assert result.allowed_source_kinds == frozenset()
+
+
 def test_broad_market_request_does_not_require_a_company():
-    result = resolve_chat_request("分析今日股票行情", ScopeRequest.auto(), None, NOW)
+    result = resolve_chat_request("分析今日股票行情", ScopeRequest.auto(), None, NOW,
+                                  analysis=_analysis("market_analysis", "broad_market", "A股", "recap", "今日"))
 
     assert isinstance(result, ResolvedRequest)
     assert result.route.intent == "market_recap"
@@ -16,7 +60,8 @@ def test_broad_market_request_does_not_require_a_company():
     assert result.market_window.label == "今日"
     assert result.allowed_source_kinds == frozenset({"market_indices", "market_overview", "web_search"})
 
-    recent = resolve_chat_request("分析A股近5个交易日整体表现", ScopeRequest.auto(), None, NOW)
+    recent = resolve_chat_request("分析A股近5个交易日整体表现", ScopeRequest.auto(), None, NOW,
+                                  analysis=_analysis("market_analysis", "broad_market", "A股", "recap", "近5个交易日"))
     assert isinstance(recent, ResolvedRequest)
     assert recent.route.intent == "market_recap"
     assert recent.route.requires_company is False
@@ -24,7 +69,8 @@ def test_broad_market_request_does_not_require_a_company():
 
 
 def test_company_recent_market_request_defaults_to_five_trading_days():
-    result = resolve_chat_request("分析福耀玻璃近期行情", ScopeRequest.auto(), None, NOW)
+    result = resolve_chat_request("分析福耀玻璃近期行情", ScopeRequest.auto(), None, NOW,
+                                  analysis=_analysis("market_analysis", "equity", "福耀玻璃", "trend", "近期"))
 
     assert isinstance(result, ResolvedRequest)
     assert result.route.intent == "market_trend"
@@ -35,7 +81,10 @@ def test_company_recent_market_request_defaults_to_five_trading_days():
 
 
 def test_orphan_window_clarifies_subject_without_creating_report_intent():
-    result = resolve_chat_request("近五交易日", ScopeRequest.auto(), None, NOW)
+    result = resolve_chat_request("近五交易日", ScopeRequest.auto(), None, NOW,
+                                  analysis=_analysis("market_analysis", "none", "", "trend", "近五交易日",
+                                                     needs_clarification=True,
+                                                     clarification_question="请说明分析对象。"))
 
     assert isinstance(result, Clarification)
     assert result.missing_field == "subject"
@@ -50,7 +99,8 @@ def test_window_reply_consumes_only_a_matching_pending_market_slot():
         "market_window": None, "financial_period": None,
         "question": "福耀玻璃股价走势",
     }
-    result = resolve_chat_request("近五交易日", ScopeRequest.auto(), pending, NOW)
+    result = resolve_chat_request("近五交易日", ScopeRequest.auto(), pending, NOW,
+                                  analysis=_analysis("market_analysis", "none", "", "trend", "近五交易日"))
 
     assert isinstance(result, ResolvedRequest)
     assert result.route.intent == "market_trend"
@@ -69,7 +119,8 @@ def test_subject_reply_keeps_the_frozen_market_window():
                           "timezone": "Asia/Shanghai"},
         "financial_period": None, "question": "分析近五交易日股价走势",
     }
-    result = resolve_chat_request("福耀玻璃", ScopeRequest.auto(), pending, NOW)
+    result = resolve_chat_request("福耀玻璃", ScopeRequest.auto(), pending, NOW,
+                                  analysis=_analysis("market_analysis", "equity", "福耀玻璃", "trend"))
 
     assert isinstance(result, ResolvedRequest)
     assert result.market_window.trading_days == 5
@@ -84,7 +135,8 @@ def test_new_broad_market_topic_does_not_inherit_pending_company():
         "market_window": None, "financial_period": None,
         "question": "福耀玻璃股价走势",
     }
-    result = resolve_chat_request("分析今日大盘", ScopeRequest.auto(), pending, NOW)
+    result = resolve_chat_request("分析今日大盘", ScopeRequest.auto(), pending, NOW,
+                                  analysis=_analysis("market_analysis", "broad_market", "大盘", "recap", "今日"))
 
     assert isinstance(result, ResolvedRequest)
     assert result.route.intent == "market_recap"
@@ -93,7 +145,8 @@ def test_new_broad_market_topic_does_not_inherit_pending_company():
 
 
 def test_financial_trend_keeps_fiscal_period_contract():
-    result = resolve_chat_request("农业银行近三年营收趋势", ScopeRequest.auto(), None, NOW)
+    result = resolve_chat_request("农业银行近三年营收趋势", ScopeRequest.auto(), None, NOW,
+                                  analysis=_analysis("financial_report", "equity", "农业银行", "report_trend", "近三年"))
 
     assert isinstance(result, ResolvedRequest)
     assert result.route.intent == "financial_trend"
@@ -111,6 +164,7 @@ def test_contextual_display_followup_is_answer_only_but_market_causation_is_not(
         companies=({"code": "600900", "name": "长江电力"},), facts=(), tools=(),
     )
     display = resolve_chat_request("这个为什么没画图？", ScopeRequest.auto(), None, NOW,
+                                  analysis=_analysis("financial_knowledge", task_kind="explain"),
                                   previous_context=previous)
     assert isinstance(display, ResolvedRequest)
     assert display.context_only_followup is True
@@ -118,13 +172,15 @@ def test_contextual_display_followup_is_answer_only_but_market_causation_is_not(
     assert display.allowed_source_kinds == frozenset()
 
     cause = resolve_chat_request("长江电力股价为什么涨了？", ScopeRequest.auto(), None, NOW,
+                                 analysis=_analysis("market_analysis", "equity", "长江电力", "attribution"),
                                  previous_context=previous)
     assert isinstance(cause, ResolvedRequest)
     assert cause.context_only_followup is False
 
 
 def test_market_request_conflicting_with_whole_corpus_scope_clarifies():
-    result = resolve_chat_request("分析福耀玻璃近期行情", ScopeRequest.whole_corpus(), None, NOW)
+    result = resolve_chat_request("分析福耀玻璃近期行情", ScopeRequest.whole_corpus(), None, NOW,
+                                  analysis=_analysis("market_analysis", "equity", "福耀玻璃", "trend", "近期"))
 
     assert isinstance(result, Clarification)
     assert result.missing_field == "kind"

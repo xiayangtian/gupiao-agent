@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from webapp.chat_intent import ChatIntentAnalysis
 from webapp.chat_request_resolution import Clarification, ResolvedRequest, resolve_chat_request
 from webapp.chat_scope import ScopeRequest
 
@@ -13,9 +14,27 @@ _MATRIX = json.loads(_FIXTURE.read_text(encoding="utf-8"))
 _NOW = datetime.fromisoformat(_MATRIX["now"]).astimezone(ZoneInfo("Asia/Shanghai"))
 
 
+def _analysis_for_case(case):
+    intent = case["expected_intent"]
+    if intent == "market_recap":
+        category, subject_kind, task_kind = "market_analysis", "broad_market", "recap"
+    elif intent == "market_trend":
+        category, subject_kind, task_kind = "market_analysis", "equity", "trend"
+    elif intent == "financial_trend":
+        category, subject_kind, task_kind = "financial_report", "equity", "report_trend"
+    else:
+        category, subject_kind, task_kind = "financial_report", "equity", "report_fact"
+    return ChatIntentAnalysis(
+        category=category, subject_kind=subject_kind, subject_name=case["query"], stock_code="",
+        task_kind=task_kind, time_expression=case["query"], needs_clarification=False,
+        clarification_question="",
+    )
+
+
 @pytest.mark.parametrize("case", _MATRIX["cases"], ids=lambda case: case["id"])
 def test_saved_market_horizon_queries_resolve_to_expected_scope_and_window(case):
-    resolved = resolve_chat_request(case["query"], ScopeRequest.auto(), None, _NOW)
+    resolved = resolve_chat_request(case["query"], ScopeRequest.auto(), None, _NOW,
+                                    analysis=_analysis_for_case(case))
 
     assert resolved.intent == case["expected_intent"] if isinstance(resolved, Clarification) else resolved.route.intent == case["expected_intent"]
     if case["expected_status"] == "clarification":
@@ -43,7 +62,11 @@ def test_saved_market_horizon_queries_resolve_to_expected_scope_and_window(case)
 
 
 def test_explicit_one_year_financial_trend_does_not_become_market_trend():
-    result = resolve_chat_request("农业银行近一年营收趋势", ScopeRequest.auto(), None, _NOW)
+    result = resolve_chat_request(
+        "农业银行近一年营收趋势", ScopeRequest.auto(), None, _NOW,
+        analysis=ChatIntentAnalysis("financial_report", "equity", "农业银行", "", "report_trend",
+                                    "近一年", False, ""),
+    )
 
     assert isinstance(result, ResolvedRequest)
     assert result.route.intent == "financial_trend"
@@ -52,6 +75,10 @@ def test_explicit_one_year_financial_trend_does_not_become_market_trend():
 
 def test_orphan_medium_or_long_horizon_clarifies_subject():
     for query in ("中期行情", "长期走势"):
-        result = resolve_chat_request(query, ScopeRequest.auto(), None, _NOW)
+        result = resolve_chat_request(
+            query, ScopeRequest.auto(), None, _NOW,
+            analysis=ChatIntentAnalysis("market_analysis", "none", "", "", "trend", query,
+                                        True, "请说明分析对象。"),
+        )
         assert isinstance(result, Clarification), query
         assert result.missing_field == "subject", query

@@ -696,6 +696,17 @@ def test_research_workspace_has_no_memory_or_decision_controls():
     assert 'data-research-memory-kind' not in source
 
 
+def test_chat_messages_render_saved_shanghai_timestamps_and_clear_transient_stage():
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "timeZone: 'Asia/Shanghai'" in source
+    assert "function appendMessageTimestamp(parent, value)" in source
+    assert "created_at: m.created_at" in source
+    assert "function clearTransientStage()" in source
+    assert "clearTransientStage();\n    delete chatStreams[key];" in source
+    assert "if (stageEl && stageEl.parentNode) stageEl.parentNode.removeChild(stageEl);" in source
+
+
 def test_research_workspace_document_has_no_memory_surface():
     page = (ROOT / "webapp/static/index.html").read_text(encoding="utf-8")
     script = APP_JS.read_text(encoding="utf-8")
@@ -914,6 +925,7 @@ def test_append_assistant_run_places_market_table_inside_answer_bubble():
             renderRunStatus:empty, renderResearchRecovery:empty, renderRunReuseActions:empty
           }}}},
           $:() => box, renderMarkdown:value => '<p>' + value + '</p>',
+          formatChatTimestamp:() => '', escapeHtml:value => String(value),
           document:{{createElement:() => wrapper}}, appendSupplementSummary:empty,
           researchRunOwners:{{}}, chatSessionId:'fixture-session'
         }};

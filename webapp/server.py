@@ -81,13 +81,15 @@ from .chat_execution import (
     build_source_runtime, execute_source, market_overview_window_compatible,
     market_task_status, project_sources, resolve_answer_status,
 )
+from .chat_intent import ChatIntentAnalysis
+from .chat_intent_analyzer import ChatIntentAnalysisError, ChatIntentAnalyzer
 from .chat_request_resolution import Clarification, ResolvedRequest, resolve_chat_request, serialize_market_window
 from .chat_runs import ChatEventChannel, ChatRunCancelled, ChatRunControl, ChatRunDeadlineExceeded, ChatRunRegistry
 from .source_adapters import SourceAccess
 from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceResult
 from .chat_facts import FactNormalizer, derive_available_facts, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
-from .chat_policy import IntentRouter, QuestionRouter, ToolAvailability, ToolPolicyResolver
+from .chat_policy import ToolAvailability, ToolPolicyResolver
 from .execution_plan import ExecutionPlan
 from .execution_planner import ExecutionPlanner, PlanningCapabilities, PlanningResult, safe_market_plan
 from .execution_executor import ExecutionExecutor, market_kline_grain, market_kline_request_count
@@ -781,6 +783,27 @@ def _pdf_file_exists(meta: ReportMeta) -> bool:
 def _require_ai() -> None:
     if not ai_client.api_key:
         raise HTTPException(400, "未配置 AI API 密钥，请设置 AI_API_KEY 环境变量或在 config.yaml 中配置 ai_api_key")
+
+
+def _analyze_chat_intent(question: str, context: str = "") -> ChatIntentAnalysis:
+    """Classify one turn before selecting Scope, tools or an execution route."""
+    _require_ai()
+
+    def json_call(system_prompt: str, user_prompt: str) -> str:
+        response = ai_client.chat(
+            messages=[{"role": "user", "content": user_prompt}],
+            temperature=0,
+            max_tokens=400,
+            response_format={"type": "json_object"},
+            thinking={"type": "disabled"},
+            system=system_prompt,
+        )
+        content = response.get("content") if isinstance(response, Mapping) else None
+        if not isinstance(content, str):
+            raise ValueError("intent analysis response is not text")
+        return content
+
+    return ChatIntentAnalyzer(json_call).analyze(question, context)
 
 
 def _ensure_pdf(meta: ReportMeta) -> str:
@@ -2554,10 +2577,8 @@ async def chat_stream(body: StreamChatRequest, request: Request) -> StreamingRes
     session = chat_store.get_or_create(body.session_id)
     sid = session["id"]
     run_id = uuid.uuid4().hex
-    question_router = IntentRouter()
-    timeout_seconds = (CHAT_RESEARCH_TIMEOUT_SECONDS
-                       if question_router.classify(body.question, Scope.whole_corpus()).intent == "research_task"
-                       else CHAT_RUN_TIMEOUT_SECONDS)
+    # Start with the configured maximum; the model-classified request may only tighten it.
+    timeout_seconds = max(CHAT_RUN_TIMEOUT_SECONDS, CHAT_RESEARCH_TIMEOUT_SECONDS)
     control = ChatRunControl(sid, run_id, timeout_seconds)
     channel = ChatEventChannel(maxsize=CHAT_RUN_EVENT_BUFFER)
     started_at = time.perf_counter()
@@ -2685,19 +2706,52 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
     request_now = dt.datetime.now(dt.timezone.utc)
     scope_request = ScopeRequest(body.scope_mode, body.focus_report)
     pending = session.get("pending_clarification")
-    if previous_context is None:
-        resolved_request = resolve_chat_request(original_question, scope_request, pending, request_now)
-    else:
-        resolved_request = resolve_chat_request(
-            original_question, scope_request, pending, request_now, previous_context=previous_context,
+    intent_context_parts = []
+    if previous_context is not None:
+        intent_context_parts.append(previous_context.to_prompt_text())
+    if isinstance(pending, Mapping):
+        intent_context_parts.append(json.dumps({
+            "pending_question": pending.get("question", ""),
+            "missing_field": pending.get("missing_field", ""),
+            "prior_intent": pending.get("intent", ""),
+            "company_code": pending.get("company_code", ""),
+            "market_window": pending.get("market_window"),
+            "financial_period": pending.get("financial_period", ""),
+        }, ensure_ascii=False))
+    try:
+        intent_analysis = _analyze_chat_intent(original_question, "\n".join(intent_context_parts))
+    except ChatIntentAnalysisError:
+        logger.warning("chat_intent_analysis_failed run_id=%s", run_id)
+        return _chat_preflight_response(
+            sid, original_question, "暂时无法安全识别本次需求，请稍后重试或换一种方式描述。", started_at,
         )
+    if run_control is not None:
+        timeout_seconds = (
+            CHAT_RESEARCH_TIMEOUT_SECONDS
+            if intent_analysis.task_kind == "research"
+            else CHAT_RUN_TIMEOUT_SECONDS
+        )
+        run_control.tighten_deadline(timeout_seconds)
+        run_control.check_active()
+    if intent_analysis.category == "non_financial":
+        if isinstance(pending, Mapping):
+            chat_store.clear_pending(sid)
+        return _chat_preflight_response(sid, original_question, "当前只回答金融相关问题。", started_at)
+
+    resolved_request = resolve_chat_request(
+        original_question, scope_request, pending, request_now,
+        analysis=intent_analysis, previous_context=previous_context,
+    )
     if isinstance(pending, Mapping):
         if isinstance(resolved_request, ResolvedRequest) and resolved_request.consumed_pending_version:
             consumed = chat_store.consume_pending(
                 sid, now=request_now, expected_version=resolved_request.consumed_pending_version,
             )
             if consumed is None:
-                resolved_request = resolve_chat_request(original_question, scope_request, None, request_now)
+                resolved_request = resolve_chat_request(
+                    original_question, scope_request, None, request_now,
+                    analysis=intent_analysis, previous_context=previous_context,
+                )
         else:
             chat_store.clear_pending(sid)
 
@@ -2744,7 +2798,11 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
     question = resolved_request.effective_question
     body = body.model_copy(update={"question": question})
     route = resolved_request.route
-    knowledge_mode = route.intent == "general_knowledge" and QuestionRouter.is_knowledge_question(question)
+    knowledge_mode = (
+        intent_analysis.category == "financial_knowledge"
+        and intent_analysis.task_kind != "research"
+        and not resolved_request.context_only_followup
+    )
     resolution = await asyncio.to_thread(
         _resolve_scope, body, run_id, requires_company=route.requires_company, question=question,
     )
@@ -2756,11 +2814,6 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         )
         return persist_clarification(clarification)
     scope = resolution.scope
-    if knowledge_mode and scope.companies:
-        return _chat_preflight_response(
-            sid, original_question, "该问题含公司范围；请明确需要解释通用概念，还是查询有来源支持的公司事实。", started_at,
-        )
-
     financial_period = resolved_request.financial_period
     financial_period_bounds = resolve_financial_period_range(financial_period) if financial_period else None
     verification_period = (
@@ -2772,17 +2825,34 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
     _require_ai()
     chat_qa = _chat_qa_or_degraded()
 
-    # Scope 冻结后先用模型生成受限执行计划；计划失败才回退旧规则。
+    # Scope 冻结后由计划器在服务端白名单能力内生成受限执行计划。
     chat_cfg = RagConfig.load()
     tools = _build_chat_tool_defs(chat_cfg) if body.use_mcp and not knowledge_mode else None
     if resolved_request.context_only_followup:
         tools = None
     tool_names = [str(item.get("function", {}).get("name") or "") for item in (tools or [])]
-    if route.intent == "general_web" and "web_search" not in tool_names:
-        return _chat_preflight_response(
-            sid, body.question, "当前网页来源未获授权或不可用，无法核实最新事实。", started_at,
-        )
     availability = ToolAvailability.available(*tool_names)
+    market_data_fallback = (
+        intent_analysis.category == "market_analysis"
+        and route.intent == "general_web"
+        and "web_search" not in tool_names
+    )
+    research_data_fallback = (
+        intent_analysis.category == "financial_knowledge"
+        and intent_analysis.task_kind == "research"
+        and bool(intent_analysis.time_expression)
+        and intent_analysis.subject_kind not in {"equity", "industry", "broad_market"}
+        and "web_search" not in tool_names
+    )
+    knowledge_notice = ""
+    if market_data_fallback or research_data_fallback:
+        knowledge_mode = True
+        tools = None
+        knowledge_notice = (
+            "本轮没有接入可核验的该市场行情来源。" if market_data_fallback
+            else "本轮未接入可核验的外部研究来源。"
+        )
+
     available_kinds = set()
     if rag_qa is not None:
         available_kinds.add("retrieve")
@@ -2814,7 +2884,9 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         available_kinds.add("market_overview")
     # 腾讯 K 线是冻结公司 Scope 的本地受控能力。
     available_kinds.add("market_kline")
-    authoritative_intent = route.intent if route.intent != "general_knowledge" or knowledge_mode else None
+    authoritative_intent = "general_knowledge" if knowledge_mode else (
+        route.intent if route.intent != "general_knowledge" else None
+    )
     authoritative_window: Dict[str, Any] | None = None
     if financial_period:
         authoritative_window = {"kind": "financial_period", "expression": financial_period}
@@ -2867,14 +2939,17 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         recap_budget = min(9, max(0, configured_recap_budget))
     else:
         recap_budget = 2
-    if knowledge_mode:
-        # Server-owned answer-only plan; no second model call can choose a source.
-        knowledge_plan = ExecutionPlan.from_dict({
-            "objective": "解释通用概念", "source_mode": "general_knowledge",
-            "steps": [{"id": "answer", "kind": "answer"}],
-            "acceptance": ["依据模型常识，未检索外部来源"],
+    def server_knowledge_plan() -> ExecutionPlan:
+        return ExecutionPlan.from_dict({
+            "objective": "提供有边界的金融知识回答", "source_mode": "general_knowledge",
+            "steps": [{"id": "answer", "kind": "answer", "required": True}],
+            "acceptance": ["明确说明未使用外部来源，不编造未核实的市场或公司事实"],
         })
-        planning = PlanningResult("validated", knowledge_plan)
+
+    if knowledge_mode:
+        # Server-owned answer-only plan; no model plan can choose a source.
+        planning = PlanningResult("financial_fallback" if market_data_fallback else "validated",
+                                  server_knowledge_plan())
         tools = None
     elif resolved_request.context_only_followup:
         context_plan = ExecutionPlan.from_dict({
@@ -2896,55 +2971,44 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             fallback_plan = safe_market_plan(route.intent, available_kinds, recap_budget)
             if fallback_plan is not None:
                 planning = PlanningResult("safe_fallback", fallback_plan, planning.issues)
-            else:
-                return _chat_preflight_response(
-                    sid, original_question,
-                    "当前没有同时满足授权与调用预算的行情来源，无法核实该行情；本轮未检索财报。",
-                    started_at,
-                )
-    if authoritative_intent is not None and planning.plan is None and route.intent not in {
-        "report_fact", "financial_trend", "market_quote",
-    }:
-        return _chat_preflight_response(
-            sid, body.question, "未能安全确定本次问答的数据来源计划，请调整问题后重试。", started_at,
-        )
-    if authoritative_intent is not None:
-        kinds = {step.kind for step in planning.plan.steps} if planning.plan else set()
-        if route.intent in {"report_fact", "financial_trend"}:
-            legacy_intent = IntentRouter().classify(body.question, scope)
-            if route.intent == "report_fact" and legacy_intent.intent == "industry_benchmark":
-                decision = legacy_intent
-            else:
-                decision = IntentDecision(
-                    "company_trend" if route.intent == "financial_trend" else "report_fact",
-                    "high", True,
-                )
-        elif route.intent in {"market_quote", "market_trend", "market_recap"}:
-            decision = IntentDecision("realtime_market", "high", False, True, "web_search" in kinds)
-        elif knowledge_mode:
-            decision = IntentDecision("report_fact", "low", False)
+    if (planning.plan is None and intent_analysis.category in {"market_analysis", "financial_knowledge"}
+            and not (intent_analysis.category == "financial_knowledge"
+                     and intent_analysis.task_kind == "research" and not research_data_fallback)):
+        # A bad/unavailable plan is a data limitation, not a reason to reject finance.
+        knowledge_mode = True
+        knowledge_notice = "本轮没有获得可安全执行的数据来源计划；无法核实具体行情或公司数据。"
+        authoritative_intent = "general_knowledge"
+        planning = PlanningResult("financial_fallback", server_knowledge_plan())
+        tools = None
+        availability = ToolAvailability.available()
+    kinds = {step.kind for step in planning.plan.steps} if planning.plan else set()
+    if route.intent in {"report_fact", "financial_trend"}:
+        if intent_analysis.subject_kind == "industry":
+            decision = IntentDecision("industry_benchmark", "high", True)
         else:
-            decision = IntentDecision("event_attribution", "high", False, False, "web_search" in kinds)
-    elif planning.plan is not None:
-        kinds = {step.kind for step in planning.plan.steps}
-        if planning.plan.source_mode == "general_web":
-            decision = IntentDecision("event_attribution", "high", False, False, "web_search" in kinds)
+            decision = IntentDecision(
+                "company_trend" if route.intent == "financial_trend" else "report_fact",
+                "high", True,
+            )
+    elif route.intent in {"market_quote", "market_trend", "market_recap"}:
+        decision = IntentDecision("realtime_market", "high", False, True, "web_search" in kinds)
+    elif knowledge_mode:
+        decision = IntentDecision("report_fact", "low", False)
+    elif route.intent == "general_web":
+        decision = IntentDecision("event_attribution", "high", False, False, "web_search" in kinds)
+        if planning.plan and planning.plan.source_mode == "general_web":
             tools = [item for item in (tools or []) if item.get("function", {}).get("name") == "web_search"] or None
             availability = ToolAvailability.available("web_search") if tools else ToolAvailability.available()
-        elif "market_quote" in kinds or "market_indices" in kinds or "market_overview" in kinds:
-            decision = IntentDecision("realtime_market", "high", "retrieve" in kinds, True, "web_search" in kinds)
-        elif "web_search" in kinds:
-            decision = IntentDecision("event_attribution", "high", "retrieve" in kinds, False, True)
-        else:
-            decision = IntentDecision("report_fact", "high", "retrieve" in kinds)
+    elif "market_quote" in kinds or "market_indices" in kinds or "market_overview" in kinds:
+        decision = IntentDecision("realtime_market", "high", "retrieve" in kinds, True, "web_search" in kinds)
+    elif "web_search" in kinds:
+        decision = IntentDecision("event_attribution", "high", "retrieve" in kinds, False, True)
     else:
-        decision = IntentRouter().classify(body.question, scope)
-    # Explicit research intent is a server-owned route, not a planner fallback.
-    # A successful ordinary execution plan must not turn a research request back
-    # into ordinary chat or grant it tools beyond the resolved policy.
-    explicit_research = IntentRouter().classify(body.question, scope).intent == "research_task"
+        decision = IntentDecision("report_fact", "low", False)
+    # Research is selected by the model analysis, then passed through the existing server-owned policy.
+    explicit_research = intent_analysis.task_kind == "research" and not knowledge_mode
     if explicit_research:
-        decision = IntentDecision("research_task", "high", True)
+        decision = IntentDecision("research_task", "high", True, False, True)
     policy = ToolPolicyResolver().resolve(decision, scope, availability)
     if (planning.plan is not None and route.intent in {"market_quote", "market_trend"}
             and policy.max_calls == 0 and not policy.allowed_tools):
@@ -2969,7 +3033,13 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         state = _RagRunState(scope=scope, intent_decision=decision, tool_policy=policy)
         state.plan_status = planning.status
         if knowledge_mode:
-            state.source_summary = {"local_pdf": "未使用", "market_data": "未使用", "web": "未使用"}
+            state.source_summary = {
+                "local_pdf": "未使用", "market_data": "未取得" if intent_analysis.category == "market_analysis" else "未使用",
+                "web": "未使用",
+            }
+            if intent_analysis.category == "market_analysis":
+                state.market_evidence_status = "failed"
+                state.had_external_failure = True
         if planning.plan is not None:
             state.execution_plan = {"objective": planning.plan.objective, "source_mode": planning.plan.source_mode,
                                     "steps": [{"id": step.id, "kind": step.kind, "required": step.required} for step in planning.plan.steps],
@@ -3028,11 +3098,31 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             return fallback
 
         def _produce() -> Any:
+            nonlocal knowledge_mode, knowledge_notice
+
+            def _answer_without_sources() -> Any:
+                answer_from_context = getattr(chat_qa, "answer_from_context", None)
+                if callable(answer_from_context):
+                    yield from answer_from_context(
+                        body.question, context=AnswerContext(), history=history,
+                        scope=scope, run_id=run_id, knowledge_mode=True,
+                        knowledge_notice=knowledge_notice,
+                        market_analysis=intent_analysis.category == "market_analysis",
+                    )
+                else:
+                    # Compatibility for lightweight answerer implementations; production RagQA
+                    # always uses answer_from_context to keep this path evidence-free.
+                    kwargs = {"question": body.question, "history": history, "tools": None,
+                              "scope": scope, "run_id": run_id}
+                    parameters = inspect.signature(chat_qa.answer_stream).parameters.values()
+                    if any(parameter.name == "tool_policy" for parameter in parameters) or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+                    ):
+                        kwargs["tool_policy"] = policy
+                    yield from chat_qa.answer_stream(**kwargs)
+
             if knowledge_mode:
-                yield from chat_qa.answer_from_context(
-                    body.question, context=AnswerContext(), history=history,
-                    scope=scope, run_id=run_id, knowledge_mode=True,
-                )
+                yield from _answer_without_sources()
                 return
             cfg = RagConfig.load()
             runtime = _source_runtime_for_run(
@@ -3182,9 +3272,32 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     state.market_evidence_status = market_task_status(
                         route.intent, scope, market_window, result.context.sources, "passed",
                     )
-                if is_market_request and state.market_evidence_status == "failed":
-                    yield {"type": "done", "answer": "未取得与本次请求的主体和时间范围匹配的行情数据，因此无法完成行情分析。",
-                           "citations": [], "web_sources": [], "model": ""}
+                market_sources_available = any(
+                    source.status in {"success", "partial"} and source.payload is not None
+                    for source in result.context.sources
+                )
+                market_fallback_required = intent_analysis.category == "market_analysis" and (
+                    (is_market_request and state.market_evidence_status == "failed")
+                    or (not is_market_request and not market_sources_available)
+                )
+                if (route.intent == "market_recap" and state.required_sources_missing
+                        and state.market_evidence_status == "partial"):
+                    verified_fallback = _verified_market_fallback()
+                    if verified_fallback is not None:
+                        yield {"type": "done", "answer": verified_fallback, "citations": [],
+                               "web_sources": [], "model": ""}
+                        return
+                if market_fallback_required:
+                    knowledge_mode = True
+                    if state.execution_plan is not None:
+                        state.execution_plan["knowledge_fallback"] = True
+                    knowledge_notice = "本轮未取得与请求对象和时间范围匹配的可核验行情数据。"
+                    state.market_evidence_status = "failed"
+                    state.had_external_failure = True
+                    state.source_summary = {
+                        "local_pdf": "未使用", "market_data": "未取得", "web": "未取得",
+                    }
+                    yield from _answer_without_sources()
                     return
                 answer_question = body.question
                 if is_market_request and state.market_evidence_status == "partial":
@@ -3199,6 +3312,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                             and all(source.category == "local" or source.status == "success"
                                     for source in result.context.sources)
                         ),
+                        market_analysis=intent_analysis.category == "market_analysis",
                     )
                 finally:
                     _supplement_context.current = None
@@ -3460,32 +3574,31 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     state.conflicts = list(detect_conflicts(state.facts))
                     for conflict in state.conflicts:
                         yield _sse("conflict", {"conflict": conflict.to_dict()})
-                    if not knowledge_mode:
-                        verifier = ClaimVerifier()
-                        state.verification_report = verifier.verify(
-                            answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
-                            requested_period=verification_period, window=market_window,
-                            answer_intent=route.intent,
-                        )
-                        if state.verification_report.status == "blocked":
-                            issue_codes = sorted({issue.code for issue in state.verification_report.issues})
-                            logger.warning("chat_run_verification_blocked run_id=%s issue_codes=%s",
-                                           run_id, ",".join(issue_codes[:8]) or "unknown")
-                        if state.verification_report.status == "blocked":
-                            fallback = _verified_market_fallback()
-                            if fallback is not None:
-                                answer = fallback
-                        if state.verification_report.status == "blocked":
-                            if route.intent in {"market_quote", "market_trend", "market_recap"}:
-                                answer = "已取得行情来源数据，但回答未通过数字证据核验，无法可靠生成行情结论。"
-                            else:
-                                answer = verifier.degrade_blocked(
-                                    answer, scope, state.facts, requested_period=verification_period,
-                                    window=market_window, answer_intent=route.intent,
-                                )
-                        elif state.verification_report.status == "partial":
-                            answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
-                        yield _sse("verification", {"verification": state.verification_report.to_dict()})
+                    verifier = ClaimVerifier()
+                    state.verification_report = verifier.verify(
+                        answer, scope, state.facts, state.evidence_artifacts, state.conflicts,
+                        requested_period=verification_period, window=market_window,
+                        answer_intent=route.intent,
+                    )
+                    if state.verification_report.status == "blocked":
+                        issue_codes = sorted({issue.code for issue in state.verification_report.issues})
+                        logger.warning("chat_run_verification_blocked run_id=%s issue_codes=%s",
+                                       run_id, ",".join(issue_codes[:8]) or "unknown")
+                    if state.verification_report.status == "blocked":
+                        fallback = _verified_market_fallback()
+                        if fallback is not None:
+                            answer = fallback
+                    if state.verification_report.status == "blocked":
+                        if route.intent in {"market_quote", "market_trend", "market_recap"}:
+                            answer = "已取得行情来源数据，但回答未通过数字证据核验，无法可靠生成行情结论。"
+                        else:
+                            answer = verifier.degrade_blocked(
+                                answer, scope, state.facts, requested_period=verification_period,
+                                window=market_window, answer_intent=route.intent,
+                            )
+                    elif state.verification_report.status == "partial":
+                        answer = answer.rstrip() + "\n\n存在口径/时间差异或外部参考，请结合来源核对。"
+                    yield _sse("verification", {"verification": state.verification_report.to_dict()})
                     verification_status = (state.verification_report.status if state.verification_report
                                            else "passed" if knowledge_mode else None)
                     status = resolve_answer_status(
@@ -3503,9 +3616,14 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                             route.intent, scope, market_window, state.source_results, verification_status,
                         )
                         if state.market_evidence_status == "failed":
-                            status = "failed"
+                            status = "partial" if knowledge_mode else "failed"
                             if not answer.strip():
-                                answer = "未取得与本次请求的主体和时间范围匹配的行情数据，因此无法完成行情分析。"
+                                answer = (
+                                    "未取得与本次请求的主体和时间范围匹配的可核验行情数据；"
+                                    "以下仅提供一般金融分析框架，不代表当前行情结论。"
+                                    if knowledge_mode else
+                                    "未取得与本次请求的主体和时间范围匹配的行情数据，因此无法完成行情分析。"
+                                )
                         elif state.market_evidence_status == "partial":
                             if status == "completed":
                                 status = "partial"

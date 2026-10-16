@@ -160,7 +160,9 @@ def test_persists_across_reload(tmp_path):
     # 重新加载（模拟重启）
     store2 = ChatStore(str(path))
     assert store2.get_session(s["id"])["title"] == "问题A"
-    assert store2.get_session(s["id"])["messages"] == [{"role": "user", "content": "问题A"}]
+    message = store2.get_session(s["id"])["messages"][0]
+    assert message["role"] == "user" and message["content"] == "问题A"
+    assert datetime.fromisoformat(message["created_at"]).utcoffset() == timedelta(hours=8)
 
 
 def test_unknown_session_returns_none(tmp_path):
@@ -190,6 +192,26 @@ def test_append_turn_persists_stopped_run_and_artifacts_across_reload(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 2
     assert reloaded["messages"][1]["run"]["status"] == "stopped"
     assert reloaded["messages"][1]["run"]["artifacts"][0]["page"] == 40
+
+
+def test_new_messages_persist_shanghai_timestamps_while_legacy_messages_stay_untimed(tmp_path):
+    path = tmp_path / "timestamps.json"
+    store = ChatStore(str(path))
+    sid = store.create_session()["id"]
+    store.append_turn(sid, question="分析行情", run=AnswerRun(content="回答", status="completed"))
+
+    messages = ChatStore(str(path)).get_session(sid)["messages"]
+    assert len(messages) == 2
+    for message in messages:
+        stamp = datetime.fromisoformat(message["created_at"])
+        assert stamp.utcoffset() == timedelta(hours=8)
+
+    added = store.append_messages(sid, [{"role": "user", "content": "新增消息"}])["messages"][-1]
+    assert datetime.fromisoformat(added["created_at"]).utcoffset() == timedelta(hours=8)
+
+    from webapp.chat_models import ChatMessage
+    legacy = ChatMessage.from_dict({"role": "user", "content": "旧消息"})
+    assert legacy.to_dict() == {"role": "user", "content": "旧消息"}
 
 
 def test_summary_and_model_messages_use_run_without_exposing_run_metadata(tmp_path):

@@ -1028,6 +1028,7 @@ class ChatMessage:
     role: str
     content: str
     run: AnswerRun | None = None
+    created_at: str = ""
 
     def __post_init__(self) -> None:
         if self.role not in {"user", "assistant"}:
@@ -1039,11 +1040,20 @@ class ChatMessage:
             raise ValueError("user messages must not include an answer run")
         if self.run is not None and self.content != self.run.content:
             raise ValueError("assistant message content must match answer run content")
+        if self.created_at:
+            try:
+                parsed = datetime.fromisoformat(self.created_at)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("message created_at must be an ISO timestamp") from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError("message created_at must include a timezone")
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"role": self.role, "content": self.content}
         if self.run is not None:
             data["run"] = self.run.to_dict()
+        if self.created_at:
+            data["created_at"] = self.created_at
         return data
 
     @classmethod
@@ -1051,9 +1061,11 @@ class ChatMessage:
         data = _mapping(data, "chat message")
         role = _string(data.get("role"), "role")
         content = _string(data.get("content", ""), "content", required=False)
+        created_at = _string(data.get("created_at", ""), "created_at", required=False)
         run_data = data.get("run")
         if run_data is not None:
-            return cls(role=role, content=content, run=AnswerRun.from_dict(_mapping(run_data, "run")))
+            return cls(role=role, content=content, run=AnswerRun.from_dict(_mapping(run_data, "run")),
+                       created_at=created_at)
         if role == "assistant":
             return cls(
                 role=role,
@@ -1063,5 +1075,6 @@ class ChatMessage:
                     status="completed",
                     legacy_evidence_unavailable=True,
                 ),
+                created_at=created_at,
             )
-        return cls(role=role, content=content)
+        return cls(role=role, content=content, created_at=created_at)
