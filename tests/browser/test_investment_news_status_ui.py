@@ -136,6 +136,37 @@ def test_summary_date_and_news_day_shortcuts_are_separate(app_url):
         _browser(session, "close", allow_failure=True)
 
 
+def test_scheduled_digest_switches_the_open_page_to_the_new_summary_date(app_url):
+    session = "news-scheduled-digest-" + uuid.uuid4().hex[:12]
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        dates = _browser(session, "eval", "(()=>{const input=document.querySelector('#news-digest-day');"
+               "const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date()).split('-').map(Number);"
+               "const today=parts.map((n,i)=>String(n).padStart(i===0?4:2,'0')).join('-');"
+               "const date=new Date(today+'T00:00:00Z');date.setUTCDate(date.getUTCDate()-1);"
+               "input.value=date.toISOString().slice(0,10);input.dispatchEvent(new Event('change',{bubbles:true}));"
+               "return JSON.stringify({today,selected:input.value});})()")
+        selected = json.loads(dates["data"]["result"])
+        assert selected["today"] != selected["selected"]
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 250))")
+
+        scheduled = _browser(session, "eval", "fetch('/__test__/scheduled-digest',{method:'POST'}).then(r=>r.json())")
+        assert scheduled["data"]["result"]["status"] == "succeeded"
+        assert scheduled["data"]["result"]["result"]["day"] == selected["today"]
+        _browser(session, "eval", "document.dispatchEvent(new Event('visibilitychange'))")
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 500))")
+        refreshed = _browser(session, "eval", "JSON.stringify({day:document.querySelector('#news-digest-day')?.value,"
+                   "title:document.querySelector('#news-digest-title')?.textContent,"
+                   "summary:document.querySelector('#news-digest')?.textContent})")
+        result = json.loads(refreshed["data"]["result"])
+        assert result["day"] == selected["today"]
+        assert result["title"] == "今日 AI 综述"
+        assert "仅由本地 fixture 生成的综述" in result["summary"]
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
 def test_scheduled_collection_refreshes_the_open_page_on_visibility_check(app_url):
     session = "news-scheduled-refresh-" + uuid.uuid4().hex[:12]
     _browser(session, "open", app_url + "/#/investment-news")

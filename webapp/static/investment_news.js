@@ -184,17 +184,30 @@
       var failedCollection = collectionRuns.find(function (run) { return run.status === 'failed'; });
       setStatus('news-collection-status', '定时采集失败：' + (failedCollection.error || '请查看运行记录。'), 'error', true);
     }
-    for (var index = 0; index < digestRuns.length; index += 1) {
-      var run = digestRuns[index];
-      if (run.status === 'succeeded' && run.result && run.result.day === state.digestDay) {
-        if (!digestRefreshed) await loadDigest();
-        digestRefreshed = true;
-        setStatus('news-digest-run-status', '定时综述已更新。', 'success', true);
-      } else if (run.status === 'succeeded' && run.result && run.result.day) {
-        setStatus('news-digest-run-status', '定时综述已生成（' + run.result.day + '），可选择该日期回看。', 'success', true);
-      } else if (run.status === 'failed') {
-        setStatus('news-digest-run-status', '定时综述失败：' + (run.error || '请查看运行记录。'), 'error', true);
-      }
+    var successfulDigests = digestRuns.filter(function (run) {
+      return run.status === 'succeeded' && run.result && run.result.day;
+    });
+    successfulDigests.sort(function (a, b) {
+      return Date.parse(a.finished_at || '') - Date.parse(b.finished_at || '');
+    });
+    if (successfulDigests.length) {
+      var latestDigestRun = successfulDigests[successfulDigests.length - 1];
+      var latestDigestDay = latestDigestRun.result.day;
+      var dayChanged = latestDigestDay !== state.digestDay;
+      state.digestDay = latestDigestDay;
+      var digestDate = byId('news-digest-day');
+      if (digestDate) digestDate.value = latestDigestDay;
+      if (!digestRefreshed || dayChanged) await loadDigest();
+      digestRefreshed = true;
+      setStatus('news-digest-run-status', '定时综述已更新并切换至 ' + latestDigestDay + '。', 'success', true);
+    }
+    var failedDigestRuns = digestRuns.filter(function (run) { return run.status === 'failed'; });
+    failedDigestRuns.sort(function (a, b) {
+      return Date.parse(a.finished_at || '') - Date.parse(b.finished_at || '');
+    });
+    if (failedDigestRuns.length) {
+      var failedDigestRun = failedDigestRuns[failedDigestRuns.length - 1];
+      setStatus('news-digest-run-status', '定时综述失败：' + (failedDigestRun.error || '请查看运行记录。'), 'error', true);
     }
   }
 

@@ -182,6 +182,14 @@ def _run_scheduled_collection_fixture():
     }
 
 
+@server.app.post("/__test__/scheduled-digest")
+def _run_scheduled_digest_fixture():
+    service = server._investment_news_or_503()
+    queued = service.submit_digest("scheduled", force=True)
+    completed = service.wait_for_run(queued["run_id"], timeout=30)
+    return completed or {"run_id": queued["run_id"], "status": "running"}
+
+
 if __name__ == "__main__":
     import uvicorn
 
