@@ -3406,8 +3406,8 @@ function appendChatMsg(sel, role, content, createdAt) {
     ? window.ChatRendering.normalizeAssistantMarkdown(content)
     : content;
   div.innerHTML = role === 'user' ? escapeHtml(content) : renderMarkdown(displayed);
-  appendMessageTimestamp(div, createdAt);
   box.appendChild(div);
+  appendMessageTimestamp(box, createdAt);
   box.scrollTop = box.scrollHeight;
 }
 
@@ -3486,7 +3486,8 @@ function appendAssistantRun(sel, message) {
   var timestampHtml = timestampText
     ? '<time class="chat-msg-time" datetime="' + escapeHtml(message.created_at) + '">' + escapeHtml(timestampText) + '</time>'
     : '';
-  parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + inlineMarketHtml + timestampHtml + '</div>');
+  parts.push('<div class="chat-msg assistant">' + renderMarkdown(displayed) + inlineMarketHtml + '</div>');
+  if (timestampHtml) parts.push(timestampHtml);
   if (rendering) {
     var researchPlanHtml = rendering.renderResearchPlan(message && message.research_run && message.research_run.plan);
     if (researchPlanHtml) parts.push(researchPlanHtml);

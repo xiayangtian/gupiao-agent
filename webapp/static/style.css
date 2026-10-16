@@ -2298,11 +2298,20 @@ input, select, button { font-family: inherit; font-size: inherit; }
 
 .chat-msg-time {
   display: block;
-  margin-top: 4px;
+  align-self: flex-start;
+  margin-top: 0;
+  padding: 0 4px;
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.3;
+  text-align: left;
+}
+
+.chat-history > .chat-msg-time {
+  align-self: flex-end;
+  margin-top: -4px;
+  margin-bottom: -4px;
   text-align: right;
-  opacity: 0.8;
 }
 
 .chat-inline-market {

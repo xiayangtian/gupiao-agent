@@ -707,6 +707,80 @@ def test_chat_messages_render_saved_shanghai_timestamps_and_clear_transient_stag
     assert "if (stageEl && stageEl.parentNode) stageEl.parentNode.removeChild(stageEl);" in source
 
 
+def test_user_message_timestamp_is_rendered_as_a_sibling_outside_the_bubble():
+    result = _run_node(
+        f"""
+        const fs = require('fs'), vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('function formatChatTimestamp(value) {{');
+        const end = src.indexOf('function appendChatElapsed(sel, elapsedSeconds) {{', start);
+        function element(tag) {{
+          return {{tagName:tag.toUpperCase(), className:'', dataset:{{}}, children:[],
+            appendChild(child) {{ this.children.push(child); child.parentNode = this; }},
+            set innerHTML(value) {{ this._innerHTML = value; }},
+            get innerHTML() {{ return this._innerHTML || ''; }},
+            set textContent(value) {{ this._textContent = value; }},
+            get textContent() {{ return this._textContent || ''; }}
+          }};
+        }}
+        const box = element('div');
+        const sandbox = {{document:{{createElement:element}}, $:() => box,
+          window:{{}}, escapeHtml:value => String(value)}};
+        vm.createContext(sandbox);
+        vm.runInContext(src.slice(start, end) +
+          '; appendChatMsg("#chat-history", "user", "问题", "2026-10-16T08:20:00Z");', sandbox);
+        const bubble = box.children[0];
+        const time = box.children[1];
+        console.log(JSON.stringify({{
+          topLevelTags:box.children.map(node => node.tagName),
+          bubbleClass:bubble.className,
+          bubbleChildTags:bubble.children.map(node => node.tagName),
+          timeClass:time && time.className,
+          timeText:time && time.textContent,
+          timeDateTime:time && time.dateTime
+        }}));
+        """
+    )
+
+    assert result["topLevelTags"] == ["DIV", "TIME"]
+    assert result["bubbleClass"] == "chat-msg user"
+    assert result["bubbleChildTags"] == []
+    assert result["timeClass"] == "chat-msg-time"
+    assert result["timeText"] == "10/16 16:20"
+    assert result["timeDateTime"] == "2026-10-16T08:20:00Z"
+
+
+def test_assistant_timestamp_is_rendered_after_the_answer_bubble():
+    result = _run_node(
+        f"""
+        const fs = require('fs'), vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('function appendAssistantRun(sel, message) {{');
+        const end = src.indexOf('// analysis 来源引用', start);
+        const wrapper = {{className:'', innerHTML:'', insertAdjacentHTML() {{}}}};
+        const box = {{appendChild(node) {{ this.child = node; }}, scrollHeight:0}};
+        const empty = () => '';
+        const sandbox = {{
+          window:{{ChatRendering:{{normalizeAssistantMarkdown:value => value,
+            renderScope:empty, renderExecutionSummary:empty, renderInlineMarketFacts:empty,
+            renderResearchPlan:empty, renderResearchSteps:empty, renderPolicy:empty,
+            renderFactsAndConflicts:empty, renderRunArtifacts:empty, renderVerification:empty,
+            renderRunStatus:empty, renderResearchRecovery:empty, renderRunReuseActions:empty}}}},
+          $:() => box, renderMarkdown:value => '<p>' + value + '</p>',
+          formatChatTimestamp:() => '10/16 16:20', escapeHtml:value => String(value),
+          document:{{createElement:() => wrapper}}, appendSupplementSummary:empty,
+          researchRunOwners:{{}}, chatSessionId:'fixture-session'
+        }};
+        vm.createContext(sandbox);
+        vm.runInContext(src.slice(start, end) +
+          '; appendAssistantRun("#chat-history", {{content:"回答", created_at:"2026-10-16T08:20:00Z", run:{{}}}});', sandbox);
+        console.log(JSON.stringify({{html:wrapper.innerHTML}}));
+        """
+    )
+
+    assert '</div><time class="chat-msg-time" datetime="2026-10-16T08:20:00Z">10/16 16:20</time>' in result["html"]
+
+
 def test_research_workspace_document_has_no_memory_surface():
     page = (ROOT / "webapp/static/index.html").read_text(encoding="utf-8")
     script = APP_JS.read_text(encoding="utf-8")
@@ -863,11 +937,14 @@ def test_chat_retry_question_prefers_original_text_and_strips_legacy_timestamp()
         }}}};
         const legacy = {{classList:classes, dataset:{{}}, textContent:'带时间戳', cloneNode() {{return copy;}}}};
         const legacyQuestion = Function('bubble', fn + 'return chatRunQuestion({{previousElementSibling:bubble}});')(legacy);
-        console.log(JSON.stringify({{storedQuestion, legacyQuestion}}));
+        const time = {{classList:{{contains:name => name === 'chat-msg-time'}}, previousElementSibling:stored}};
+        const siblingTimestampQuestion = Function('runBlock', fn + 'return chatRunQuestion(runBlock);')({{previousElementSibling:time}});
+        console.log(JSON.stringify({{storedQuestion, legacyQuestion, siblingTimestampQuestion}}));
         """
     )
     assert result['storedQuestion'] == '今日 A 股 <行情>'
     assert result['legacyQuestion'] == '今日 A 股行情'
+    assert result['siblingTimestampQuestion'] == '今日 A 股 <行情>'
 
 
 def test_inline_market_facts_render_daily_and_period_changes_from_saved_facts():
