@@ -49,6 +49,18 @@ def app_url():
             process.communicate(timeout=5)
 
 
+def test_monday_digest_help_explains_collection_precondition(app_url):
+    session = "investment-news-collection-help-" + uuid.uuid4().hex
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        help_text = _browser(session, "eval", "document.querySelector('#news-digest-input-help')?.textContent || ''")
+        assert "不会自动采集" in help_text["data"]["result"]
+        assert "先点击“采集资讯”" in help_text["data"]["result"]
+        assert "采集完成后再点击页面上方的综述生成按钮" in help_text["data"]["result"]
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
 def test_digest_selector_only_lists_available_dates_and_renders_weekend_module(app_url):
     session = "investment-news-digest-days-" + uuid.uuid4().hex
     _browser(session, "open", app_url + "/#/investment-news")
