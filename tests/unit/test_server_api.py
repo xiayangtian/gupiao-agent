@@ -2305,8 +2305,8 @@ class TestChatSessionsApi:
             assert not any(fact["metric"] == "index_close" and fact["company_code"] == "sh000001"
                            and fact["value"] == 0.0 for fact in run["facts"])
         elif akshare_available:
-            assert any(f"上证指数 {trade_date} 较上一交易日涨跌幅=5.26%" in str(message)
-                       for message in answer_ai.messages)
+            assert any('"metric":"index_close_pct_change","value":5.26,"unit":"百分比"' in str(message)
+                       and trade_date in str(message) for message in answer_ai.messages)
         elif baostock_available:
             assert any(item["provider"] == "baostock" and item["tool_name"] == "a_share_index_kline"
                        and item["status"] == "success" for item in run["tool_artifacts"])
@@ -4176,6 +4176,86 @@ def test_financial_definition_uses_model_knowledge_without_report_or_market_tool
     assert tool_builds == []
 
 
+def _install_market_quote_draft(monkeypatch, market_date, *, answer=None, claim_transform=None):
+    calls = []
+    quote = {"symbol": "sh601398", "name": "农业银行", "price": 3.81,
+             "time": f"{market_date} 14:55:00"}
+    monkeypatch.setattr(server.tencent_quote, "realtime", lambda _symbols: [quote])
+
+    class DraftRag:
+        def answer_from_context(self, question, **kwargs):
+            calls.append(kwargs)
+            source = kwargs["context"].sources[0]
+            draft_answer = answer or "农业银行股价为 3.81 元/股，外部参考。"
+            claim = {
+                "metric": "price", "value": 3.81, "unit": "元/股",
+                "period": market_date, "period_kind": "point_in_time",
+                "entity_scope": "company", "company_code": "601398",
+                "source_id": source.call_id, "value_pointer": "/0/price",
+                "identity_pointer": "/0/symbol", "time_pointer": "/0/time",
+            }
+            if claim_transform is not None:
+                claim = claim_transform(claim)
+            claims = [claim] if claim is not None else []
+            yield {"type": "delta", "text": draft_answer, "reasoning": ""}
+            yield {"type": "done", "answer": draft_answer, "market_claims": claims,
+                   "market_draft_error": "", "model": "fixture", "citations": [],
+                   "tools_used": [], "web_sources": [], "retrieval_report_ids": [],
+                   "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "rag_qa", DraftRag())
+    return calls
+
+
+def _run_market_quote_draft(client, market_date):
+    return _read_sse(client.post("/api/chat/stream", json={
+        "question": f"农业银行{market_date}行情如何？",
+        "focus_report": {"code": "601398", "name": "农业银行", "period": "2026-06-30"},
+        "use_mcp": False,
+    }))
+
+
+def test_market_answer_delta_waits_until_evidence_verification(client, env, monkeypatch):
+    market_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    calls = _install_market_quote_draft(monkeypatch, market_date)
+    events = _run_market_quote_draft(client, market_date)
+
+    names = [name for name, _ in events]
+    done = _event(events, "done")
+    verification_index = names.index("verification")
+    answer_delta_indices = [index for index, (name, data) in enumerate(events)
+                            if name == "delta" and data.get("text") == done["answer"]]
+    assert answer_delta_indices == [verification_index + 1]
+    assert answer_delta_indices[0] < names.index("done")
+    assert done["answer"] == "农业银行股价为 3.81 元/股，外部参考。"
+    assert done["run"]["status"] == "completed"
+    assert calls[0]["market_intent"] == "market_quote"
+    assert calls[0]["market_window"].start_date.isoformat() == market_date
+
+
+@pytest.mark.parametrize(("mutator", "draft_answer", "expected_issue"), [
+    (lambda claim: {**claim, "value": 99.99}, "农业银行股价为 99.99 元/股，外部参考。", "source_value_mismatch"),
+    (lambda claim: {**claim, "company_code": "600519"}, "农业银行股价为 99.99 元/股，外部参考。", "market_identity_mismatch"),
+    (lambda claim: {**claim, "value_pointer": "/0/not-a-price"}, "农业银行股价为 99.99 元/股，外部参考。", "unresolved_source_reference"),
+    (lambda claim: {**claim, "untrusted": "field"}, "农业银行股价为 99.99 元/股，外部参考。", "invalid_market_draft"),
+    (lambda _claim: None, "农业银行股价为 99.99 元/股，外部参考。", "unsupported_numeric_claim"),
+])
+def test_unverified_market_draft_numbers_never_reach_sse_or_storage(
+    client, env, monkeypatch, mutator, draft_answer, expected_issue,
+):
+    market_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    _install_market_quote_draft(monkeypatch, market_date, answer=draft_answer, claim_transform=mutator)
+    events = _run_market_quote_draft(client, market_date)
+    event_text = json.dumps(events, ensure_ascii=False)
+    done = _event(events, "done")
+
+    assert "99.99" not in event_text
+    assert "99.99" not in done["run"]["content"]
+    assert done["run"]["status"] in {"partial", "failed"}
+    issue_codes = {issue["code"] for issue in done["run"]["verification_report"]["issues"]}
+    assert expected_issue in issue_codes
+
+
 def test_market_request_uses_server_frozen_source_not_model_raw_tool_payload(client, env, monkeypatch):
     class RawToolRag:
         def answer_stream(self, question, **kwargs):
@@ -5577,4 +5657,7 @@ def test_market_horizon_fixture_matrix_replays_end_to_end_sse(client, env, monke
         assert run["facts"], case["id"]
         period_kind = {"day": "daily", "week": "weekly", "month": "monthly"}[case["grain"]]
         assert all(fact["period_kind"] == period_kind for fact in run["facts"]), case["id"]
-        assert case.get("coverage_note", "不含同期全市场广度") in done["answer"] if case["subject_kind"] == "broad_market" else True
+        if case["subject_kind"] == "broad_market":
+            fallback_limitations = "指数点位比较不代表整体市场广度；未取得或覆盖不完整的市场指标不作推断。"
+            assert (case.get("coverage_note", "不含同期全市场广度") in done["answer"]
+                    or fallback_limitations in done["answer"]), (case["id"], done["answer"])

@@ -4,11 +4,38 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass, field, replace
+from datetime import date
 from threading import Lock
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from webapp.chat_models import EvidenceArtifact, Fact, Scope, ToolArtifact
+
+
+_REQUEST_CONTEXT_FIELDS = frozenset({
+    "symbol", "code", "trade_date", "start_date", "end_date", "period",
+})
+_REQUEST_CONTEXT_VALUE = re.compile(r"^[A-Za-z0-9._,-]{1,80}$")
+
+
+def market_request_context(call: "SourceCall") -> dict[str, str]:
+    """Expose only bounded server-request identity fields for market evidence checks."""
+    if not isinstance(call, SourceCall) or call.category != "market":
+        return {}
+    context: dict[str, str] = {}
+    for key in _REQUEST_CONTEXT_FIELDS:
+        value = call.arguments.get(key)
+        if not isinstance(value, str) or not _REQUEST_CONTEXT_VALUE.fullmatch(value):
+            continue
+        if key in {"trade_date", "start_date", "end_date"}:
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                continue
+        context[key] = value
+    return context
 
 
 @dataclass(frozen=True)
@@ -86,6 +113,7 @@ class SourceResult:
     tool_artifacts: tuple[ToolArtifact, ...] = ()
     coverage: SourceCoverage = SourceCoverage()
     arguments_summary: str = ""
+    request_context: Mapping[str, str] = field(default_factory=dict, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if self.status not in {"success", "partial", "failed", "unavailable"}:
@@ -98,6 +126,13 @@ class SourceResult:
             self.content, self.as_of, self.fetched_at, self.error_code, self.arguments_summary,
         )):
             raise ValueError("source text fields must be strings")
+        if not isinstance(self.request_context, Mapping) or any(
+            not isinstance(key, str) or key not in _REQUEST_CONTEXT_FIELDS
+            or not isinstance(value, str) or not _REQUEST_CONTEXT_VALUE.fullmatch(value)
+            for key, value in self.request_context.items()
+        ):
+            raise ValueError("request_context must contain only bounded market identity strings")
+        object.__setattr__(self, "request_context", MappingProxyType(dict(self.request_context)))
         object.__setattr__(self, "payload", copy.deepcopy(self.payload))
         object.__setattr__(self, "retrieval_hits", tuple(copy.deepcopy(self.retrieval_hits)))
         object.__setattr__(self, "facts", tuple(self.facts))
@@ -180,7 +215,8 @@ class SourceRuntime:
 
     def unavailable(self, call: SourceCall, code: str) -> SourceResult:
         return SourceResult(self._next_id(), call.provider, call.operation, call.category,
-                            "unavailable", error_code=code)
+                            "unavailable", error_code=code,
+                            request_context=market_request_context(call))
 
     def call(self, call: SourceCall, invoke: Callable[[], SourceResult]) -> SourceResult:
         if self.control is not None:
@@ -211,10 +247,12 @@ class SourceRuntime:
                 # Identity and the redacted argument summary always come from the server-created SourceCall.
                 result = replace(result, call_id=self._next_id(), provider=call.provider,
                                  operation=call.operation, category=call.category,
-                                 arguments_summary=arguments_summary)
+                                 arguments_summary=arguments_summary,
+                                 request_context=market_request_context(call))
             except Exception:
                 result = SourceResult(self._next_id(), call.provider, call.operation,
                                       call.category, "failed", error_code="source_failed",
-                                      arguments_summary=arguments_summary)
+                                      arguments_summary=arguments_summary,
+                                      request_context=market_request_context(call))
             self._cache[key] = result
             return result
