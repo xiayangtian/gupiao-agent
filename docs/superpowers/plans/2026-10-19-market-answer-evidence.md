@@ -103,13 +103,13 @@
 - 扩展 `RagQA.answer_from_context(..., market_analysis=False, market_intent="", market_window=None)`；market intent 只能是 `market_quote|market_trend|market_recap`。非行情调用继续原路径。
 - 行情模式输出单一 `done` payload：`{"answer": <已解析文本>, "market_claims": <严格校验前 claims>, "market_draft_error": ""}`；它不得输出任何行情正文 `delta`。结构化 claim 仍是未信任模型输入，待 Task 3 服务端解析/校验。
 
-- [ ] **Step 1: 写缓冲输出测试**：在 `tests/unit/test_rag_qa.py` 构造 fake AI client，输入分块 JSON delta + done，调用 `answer_from_context(..., market_analysis=True, market_intent="market_quote")`；断言事件不含 `delta`，且唯一 done answer 是 JSON 的 `answer` 文本、`market_claims` 保持结构化数组。
-- [ ] **Step 2: 运行单测确认失败**：`pytest tests/unit/test_rag_qa.py -k market -q`；预期现有方法仍把 JSON delta 当正文转发。
-- [ ] **Step 3: 实现行情专用生成分支**：在 `answer_from_context` 的证据构造中为行情来源增加 `call_id` 和有界 `payload`（不超过现有 `MAX_SOURCE_CHARS`/行数策略），并附服务端 request context；使用 AI client JSON object response format；累积行情模型 delta 到本地 buffer，不 yield 正文，解析后只把 answer/claims 放到 done。非法 JSON/shape 返回安全 `market_draft_error`，不转回普通自由文本或 continuation。
-- [ ] **Step 4: 测试来源 prompt injection 和 malformed output**：原始行情字段值中包含“忽略此前指令”时，prompt 明确作为不可信数据；非 JSON、claims 非数组、答案超长、连续结束/截断、不支持 JSON mode 的 fake 响应均不产生 `delta`，不调用任何工具。
-- [ ] **Step 5: 测试非行情兼容**：现有财报回答、web 来源回答、知识模式、续写及授权补充用例继续得到原有 delta/done 事件。若 fake client 测试不含 market flags，不改变结果。
-- [ ] **Step 6: 运行聚焦测试**：`pytest tests/unit/test_rag_qa.py -q`；预期全部通过。
-- [ ] **Step 7: 提交**：只 stage `qa.py` 与其单测；commit `feat: buffer structured market answer drafts`。
+- [x] **Step 1: 写缓冲输出测试**：fake AI client 输入分块 JSON delta + done；断言事件不含 `delta`，唯一 done 含解析出的 answer 与结构化 claims，并传递 server intent/window。
+- [x] **Step 2: 运行单测确认失败**：新增缓冲与 malformed 测试先因正文 delta 外泄而失败。
+- [x] **Step 3: 实现行情专用生成分支**：来源证据携带稳定 `call_id`、服务端请求绑定、模型可见来源内容及最多 80 条结构化 Fact（含派生 lineage）；使用 JSON object response format，buffer 所有正文 delta，只有解析成功后将 answer/claims 放入 done。失败不回落普通文本/continuation。
+- [x] **Step 4: 测试来源 prompt injection 和 malformed output**：覆盖不可信行情字段、非 JSON、claims 非数组、答案超长、截断 JSON 和不支持 JSON mode；均不产生行情 delta、不调用工具。
+- [x] **Step 5: 测试非行情兼容**：完整 `test_rag_qa.py` 回归通过，覆盖财报/web、知识模式、续写和授权补充原行为。
+- [x] **Step 6: 运行聚焦测试**：`python3 -m pytest tests/unit/test_rag_qa.py -q`：64 passed，3 dependency deprecation warnings；`compileall`、`git diff --check` 通过。
+- [ ] **Step 7: 提交**：只 stage `financial_report_fetcher/rag/qa.py`、其单测与本计划进度；commit `feat: buffer structured market answer drafts`。
 
 ### Task 3: 将验证结果接入既有问答终态与 SSE 门禁
 
