@@ -197,6 +197,8 @@ python3 -m financial_report_fetcher rag ingest --pdf "reports/长江电力_60090
 Web 端：`POST /api/chat/stream` 流式通用对话（SSE，携带 `session_id` 自动保存历史）、
 `GET/POST /api/chat/sessions` 会话列表 / 新建、`POST /api/chat` 非流式通用对话（兼容）；
 问答默认启用 MCP 工具（`rag.mcp_tools: true`，超时/轮数/白名单见 `config.example.yaml`）；智能问答先由模型生成受服务端校验的来源计划：A 股当日复盘使用受控 AkShare 指数日线与全市场快照，其他时间范围沿用腾讯指数行情；数据覆盖不足会标记为部分完成，不补造市场总数；默认不检索财报。非股票问题仅使用模型能力与受控网页搜索；只有明确要求财报、基本面或公司披露时才允许本地 RAG。即使未启用或未初始化本地 RAG 索引，流式智能问答仍可使用受控 MCP 与网页搜索，但会明确标注本地财报未核验；
+网页搜索统一优先使用 DeepSeek Search（运行环境设置 `DEEPSEEK_API_KEY`），本项目按北京时间自然月将有结果的成功请求限制为 1,000 次；缺少密钥、达到上限或 DeepSeek 不可用时回退到 Tavily（需设置 `TAVILY_API_KEY`）。本地成功用量记录保存在 `data/deepseek_search_usage.sqlite3`，只统计本项目发起的搜索，不代表账号全局用量；密钥不得写入配置文件。DeepSeek 官方[计费说明](https://api-docs.deepseek.com/guides/search)为每 1,000 次成功搜索 $0.75（官方注明从 2026-11-01 开始按请求计费）；Tavily [Basic Search](https://docs.tavily.com/documentation/api-credits)每次消耗 1 credit，Researcher 免费计划每月 1,000 credits，其他计划额度/费用不同。
+
 MCP 带熔断保护（连续失败自动暂停使用、冷却后自动探测恢复）与状态检测
 （`GET /api/mcp/status`、`POST /api/mcp/diagnose`，RAG 页可视化）、
 `GET /api/rag/status` 状态、

@@ -2747,6 +2747,28 @@ class TestMcpToolDefs:
         # 补报工具只申请授权、由服务端解析候选，因此始终随问答工具一起提供。
         assert [item["function"]["name"] for item in defs] == ["web_search", "request_missing_reports"]
 
+    def test_chat_tool_defs_exposes_web_search_when_only_deepseek_is_available(self, monkeypatch):
+        class AvailableDeepSeek:
+            available = True
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class UnavailableTavily:
+            available = False
+            def __init__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(server, "DeepSeekWebSearch", AvailableDeepSeek)
+        monkeypatch.setattr(server, "TavilyWebSearch", UnavailableTavily)
+        monkeypatch.setattr(server, "_mcp_tool_defs", lambda: None)
+        cfg = type("C", (), {"mcp_tools": False, "web_search": True, "web_search_timeout": 15})()
+
+        definitions = server._build_chat_tool_defs(cfg)
+
+        assert [item["function"]["name"] for item in definitions] == [
+            "web_search", "request_missing_reports",
+        ]
+
     def test_chat_tool_defs_does_not_expose_removed_news_tool(self, monkeypatch):
         """新闻 MCP 被下线后，问答模型仍可获得网页搜索作为时效性信息来源。"""
         class FakeSearch:
@@ -3821,6 +3843,7 @@ class TestChatSupplementApi:
                 pass
 
         monkeypatch.setattr(server, "TavilyWebSearch", FakeSearch)
+        monkeypatch.setattr(server, "DeepSeekWebSearch", FakeSearch)
         monkeypatch.setattr(server, "_mcp_tool_defs", lambda: None)
         cfg = type("C", (), {"mcp_tools": True, "web_search": True, "web_search_timeout": 15})()
 
@@ -3874,6 +3897,7 @@ class TestChatSupplementApi:
         monkeypatch.setattr(server, "IngestionService", FakeSvc)
         monkeypatch.setattr(server, "RagQA", FakeQA)
         monkeypatch.setattr(server, "TavilyWebSearch", FakeSearch)
+        monkeypatch.setattr(server, "DeepSeekWebSearch", FakeSearch)
         monkeypatch.setattr(server, "_mcp_tool_defs", lambda: None)
 
         orig = (server.rag_store, server.rag_service, server.rag_qa)
@@ -5108,13 +5132,25 @@ def test_contextual_web_search_uses_planned_query_and_persists_exact_query(
                    "citations": [], "model": "fixture", "usage": {}}
 
     searches = []
-    def execute_tool(name, arguments):
-        searches.append((name, dict(arguments)))
-        return json.dumps({"source": "web_search", "results": [{
-            "title": "相关资料", "url": "https://example.com/news", "content": "资料摘要",
-        }]}, ensure_ascii=False)
+    class NoDeepSeek:
+        available = False
+        def __init__(self, *args, **kwargs):
+            pass
 
-    monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: execute_tool)
+    class FakeTavily:
+        available = True
+        def __init__(self, *args, **kwargs):
+            pass
+        def search(self, query):
+            searches.append(("web_search", {"query": query}))
+            return json.dumps({"source": "web_search", "results": [{
+                "title": "相关资料", "url": "https://example.com/news", "content": "资料摘要",
+            }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(server, "DeepSeekWebSearch", NoDeepSeek)
+    monkeypatch.setattr(server, "TavilyWebSearch", FakeTavily)
+    monkeypatch.setattr(server, "_search_usage_store", lambda: server.SearchUsageStore(
+        str(tmp_path / "search-usage.sqlite3")))
     monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
     monkeypatch.setattr(server, "rag_qa", ContextAnswerer())
 

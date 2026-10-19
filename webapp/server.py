@@ -72,6 +72,7 @@ from financial_report_fetcher.rag.qa import (
     market_evidence_fallback,
 )
 from financial_report_fetcher.rag.store import RagStore
+from financial_report_fetcher.rag.deepseek_search import DeepSeekWebSearch
 from financial_report_fetcher.rag.web_search import TavilyWebSearch, normalize_search_query
 
 from .autocomplete import StockIndex
@@ -87,6 +88,7 @@ from .chat_request_resolution import Clarification, ResolvedRequest, resolve_cha
 from .chat_runs import ChatEventChannel, ChatRunCancelled, ChatRunControl, ChatRunDeadlineExceeded, ChatRunRegistry
 from .source_adapters import SourceAccess
 from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceResult
+from .search_usage_store import SearchUsageStore
 from .chat_facts import FactNormalizer, derive_available_facts, detect_conflicts
 from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
 from .chat_policy import ToolAvailability, ToolPolicyResolver
@@ -338,6 +340,83 @@ def _mcp_tool_defs() -> Optional[List[Dict[str, Any]]]:
     return _mcp_tool_defs_cache
 
 
+def _search_usage_store() -> SearchUsageStore:
+    return SearchUsageStore(str(DATA_DIR / "deepseek_search_usage.sqlite3"))
+
+
+def _deepseek_payload_is_billable(raw: Any) -> bool:
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return False
+    return (isinstance(payload, Mapping) and (
+        payload.get("billable_success") is True
+        or (not payload.get("error") and isinstance(payload.get("results"), list)
+            and bool(payload["results"]))
+    ))
+
+
+def _deepseek_payload_has_results(raw: Any) -> bool:
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return False
+    return (isinstance(payload, Mapping) and not payload.get("error")
+            and isinstance(payload.get("results"), list) and bool(payload["results"]))
+
+
+def _execute_routed_web_search(runtime: Any, query: str, deepseek: Any, tavily: Any,
+                               usage_store: SearchUsageStore, fetched_at: str,
+                               run_id: str = "") -> SourceResult:
+    """Execute one authorized search, charging every provider attempt to this run's budget."""
+    query = normalize_search_query(query)
+    fallback_reason = "missing_api_key"
+    started = time.monotonic()
+    if getattr(deepseek, "available", False):
+        reservation = usage_store.reserve_deepseek_slot()
+        if reservation is not None:
+            billable = {"value": False}
+
+            def invoke_deepseek():
+                raw = deepseek.search(query)
+                billable["value"] = _deepseek_payload_is_billable(raw)
+                return raw
+
+            call = SourceCall("deepseek_search", "web_search", "web", {"query": query})
+            try:
+                result = execute_source(runtime, call, invoke_deepseek, fetched_at=fetched_at)
+            finally:
+                # This also releases a preflight reservation when cancellation/authorization fails.
+                usage_store.finish_deepseek_slot(reservation, billable_success=billable["value"])
+            if result.payload and result.status in {"success", "partial"} and not result.error_code:
+                try:
+                    usage = usage_store.usage_for_month()
+                    count_label = f"{usage['successful']}/{usage['limit']}"
+                except Exception:
+                    count_label = "unavailable"
+                logger.info("web_search_route run_id=%s provider=deepseek_search reason=primary usage=%s elapsed_ms=%d",
+                            run_id or "unknown", count_label,
+                            int((time.monotonic() - started) * 1000))
+                return result
+            if result.error_code == "budget_exhausted":
+                return result
+            fallback_reason = result.error_code or "empty_results"
+        else:
+            try:
+                usage = usage_store.usage_for_month()
+                fallback_reason = ("monthly_cap" if usage["successful"] + usage["in_flight"] >= usage["limit"]
+                                   else "usage_store_unavailable")
+            except Exception:
+                fallback_reason = "usage_store_unavailable"
+    else:
+        fallback_reason = "missing_api_key"
+
+    logger.info("web_search_fallback run_id=%s provider=deepseek_search reason=%s fallback=tavily elapsed_ms=%d",
+                run_id or "unknown", fallback_reason, int((time.monotonic() - started) * 1000))
+    call = SourceCall("web", "web_search", "web", {"query": query})
+    return execute_source(runtime, call, lambda: tavily.search(query), fetched_at=fetched_at)
+
+
 def _build_chat_tool_defs(cfg: Any) -> Optional[List[Dict[str, Any]]]:
     """组合 MCP、内部网页搜索与受控补报工具；网页搜索不受 MCP 熔断影响。"""
     definitions = list(_mcp_tool_defs() or []) if getattr(cfg, "mcp_tools", False) else []
@@ -347,7 +426,8 @@ def _build_chat_tool_defs(cfg: Any) -> Optional[List[Dict[str, Any]]]:
         if item.get("function", {}).get("name") not in DISABLED_MCP_TOOL_NAMES
     ]
     web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
-    if getattr(cfg, "web_search", True) and web.available:
+    deepseek = DeepSeekWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
+    if getattr(cfg, "web_search", True) and (web.available or deepseek.available):
         definitions.extend(to_openai_tools([WEB_SEARCH_TOOL]))
     # 补报工具只申请授权，不执行下载；由服务端解析候选并等待用户确认。
     definitions.append(SUPPLEMENT_REQUEST_TOOL)
@@ -517,6 +597,7 @@ def _build_mcp_tool_executor(cfg: Any, *, retry: bool = True) -> Optional[Callab
 def _source_runtime_for_run(scope: Scope, policy: ToolPolicy, cfg: Any, *, use_mcp: bool,
                             source_mode: str, control: ChatRunControl | None = None) -> Any:
     web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
+    deepseek = DeepSeekWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
     listed = frozenset(item.get("function", {}).get("name", "")
                        for item in (_mcp_tool_defs_cache or [])
                        if item.get("function", {}).get("name"))
@@ -527,6 +608,7 @@ def _source_runtime_for_run(scope: Scope, policy: ToolPolicy, cfg: Any, *, use_m
         mcp_allow=mcp_breaker.allow,
         web_enabled=bool(getattr(cfg, "web_search", True) and web.available),
         tencent_enabled=True,
+        deepseek_enabled=bool(getattr(cfg, "web_search", True) and deepseek.available),
         akshare_enabled=bool(use_mcp and source_mode == "market_recap"),
     )
     return build_source_runtime(scope=scope, policy=policy, cfg=cfg, use_mcp=use_mcp,
@@ -537,15 +619,33 @@ def _build_chat_tool_executor(cfg: Any, *, retry: bool = True) -> Optional[Calla
     """统一调度 MCP 与网页搜索，任一可用即启用工具编排。"""
     mcp_executor = _build_mcp_tool_executor(cfg, retry=retry)
     web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
-    web_enabled = getattr(cfg, "web_search", True) and web.available
+    deepseek = DeepSeekWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
+    web_enabled = getattr(cfg, "web_search", True) and (web.available or deepseek.available)
     if mcp_executor is None and not web_enabled:
         return None
 
     def _executor(name: str, arguments: Dict[str, Any]) -> str:
         if name == "web_search":
             if not web_enabled:
-                return "工具调用失败：网页搜索未配置 TAVILY_API_KEY"
-            return web.search(**dict(arguments or {}))
+                return "工具调用失败：未配置网页搜索服务"
+            query = normalize_search_query(dict(arguments or {}).get("query", ""))
+            usage_store = _search_usage_store()
+            reservation = usage_store.reserve_deepseek_slot() if deepseek.available else None
+            if reservation is not None:
+                raw = ""
+                try:
+                    raw = deepseek.search(query)
+                except Exception:
+                    raw = json.dumps({"error": "provider_error", "results": []})
+                finally:
+                    usage_store.finish_deepseek_slot(
+                        reservation, billable_success=_deepseek_payload_is_billable(raw),
+                    )
+                if _deepseek_payload_has_results(raw):
+                    return raw
+            if web.available:
+                return web.search(query)
+            return "工具调用失败：未配置网页搜索服务"
         if name in DISABLED_MCP_TOOL_NAMES:
             return "工具已下线：请使用 web_search 查询近期新闻、公告与事件。"
         if mcp_executor is None:
@@ -3304,9 +3404,12 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                         query = normalize_search_query(fallback_search_query(question, previous_context))
                     if not query:
                         query = normalize_search_query(question)
-                    call = SourceCall("web", "web_search", "web", {"query": query})
-                    return execute_source(runtime, call,
-                        lambda: execute_tool("web_search", {"query": query}), fetched_at=fetched())
+                    return _execute_routed_web_search(
+                        runtime, query,
+                        DeepSeekWebSearch(timeout=getattr(cfg, "web_search_timeout", 15)),
+                        TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15)),
+                        _search_usage_store(), fetched_at=fetched(), run_id=run_id,
+                    )
 
                 def report_execution_step(phase, step):
                     pump.put({"type": f"execution_step_{phase}", "id": step.id,

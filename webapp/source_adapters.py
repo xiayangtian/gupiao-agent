@@ -25,6 +25,7 @@ class SourceAccess:
     web_enabled: bool
     tencent_enabled: bool
     akshare_enabled: bool = False
+    deepseek_enabled: bool = False
 
     def permits(self, call: SourceCall) -> bool:
         if call.provider == "mcp":
@@ -36,6 +37,8 @@ class SourceAccess:
                 return False
         if call.provider == "web":
             return self.web_enabled
+        if call.provider == "deepseek_search":
+            return self.deepseek_enabled and call.category == "web" and call.operation == "web_search"
         if call.provider == "tencent":
             return self.tencent_enabled
         if call.provider == "akshare":
@@ -214,7 +217,7 @@ def normalize_source(call: SourceCall, raw: Any, *, fetched_at: str = "") -> Sou
                                 fetched_at=fetched_at, error_code="provider_error", coverage=base_coverage)
         row_limit = 800 if call.provider == "tencent" and call.operation == "kline" else MAX_ROWS
         rows, as_of = _extract_rows(value, row_limit=row_limit)
-        if call.provider == "web":
+        if call.provider in {"web", "deepseek_search"}:
             rows = [row for row in rows if isinstance(row.get("url"), str)
                     and urlparse(row["url"]).scheme in {"http", "https"}]
             if not rows:

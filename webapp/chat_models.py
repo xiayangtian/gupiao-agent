@@ -558,7 +558,7 @@ class Fact:
             as_of=tool.as_of,
             source_category=("market" if tool.provider in {"tencent", "akshare"} else
                              "mcp" if tool.provider in {"mcp", "stock-data-mcp"} else
-                             "web" if tool.provider in {"web", "web_search"} else "unknown"),
+                             "web" if tool.provider in {"web", "web_search", "deepseek_search"} else "unknown"),
         )
 
     def to_dict(self) -> dict[str, Any]:

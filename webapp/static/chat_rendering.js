@@ -368,7 +368,7 @@
   }
 
   function sourceProviderLabel(provider) {
-    return ({ tencent: '腾讯行情', akshare: 'A 股行情快照', market: '行情数据', 'stock-data-mcp': '股票数据服务', mcp: '数据服务', web: '网页来源', web_search: '网页来源' })[provider]
+    return ({ tencent: '腾讯行情', akshare: 'A 股行情快照', market: '行情数据', 'stock-data-mcp': '股票数据服务', mcp: '数据服务', web: '网页来源', web_search: '网页来源', deepseek_search: 'DeepSeek 搜索' })[provider]
       || '外部数据来源';
   }
 

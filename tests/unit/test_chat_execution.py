@@ -58,6 +58,23 @@ def test_web_search_projection_preserves_safe_query_summary():
     assert json.loads(projection.tool_artifacts[0].arguments_summary) == {"query": "长江电力 近五日趋势"}
 
 
+def test_deepseek_search_projection_keeps_provider_identity_and_web_only_evidence():
+    from webapp.chat_execution import project_sources
+    from webapp.chat_models import Scope
+    from webapp.source_runtime import SourceResult
+
+    source = SourceResult(
+        "ds-1", "deepseek_search", "web_search", "web", "partial",
+        payload=({"title": "来源", "url": "https://example.com", "content": "摘要"},),
+        fetched_at="2026-10-19T12:00:00+08:00",
+    )
+    projection = project_sources([source], Scope.whole_corpus())
+
+    assert projection.tool_artifacts[0].provider == "deepseek_search"
+    assert projection.artifacts[0].url == "https://example.com"
+    assert projection.facts == ()
+
+
 def test_akshare_tool_artifact_exposes_row_coverage_and_specific_limitations():
     from webapp.chat_execution import project_sources
     from webapp.chat_models import Scope

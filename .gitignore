@@ -68,3 +68,4 @@ data/tasks.sqlite3
 data/investment_news.sqlite3
 data/investment_news.sqlite3-shm
 data/investment_news.sqlite3-wal
+data/deepseek_search_usage.sqlite3

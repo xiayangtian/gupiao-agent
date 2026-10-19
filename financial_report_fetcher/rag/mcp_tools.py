@@ -93,7 +93,7 @@ FALLBACK_MCP_TOOLS: List[Dict[str, Any]] = [
     },
 ]
 
-# 内部工具，不经过 MCP。仅在运行环境配置 TAVILY_API_KEY 时注入模型。
+# 内部工具，不经过 MCP。DeepSeek Search 可用或 Tavily 可用时由服务端注入模型。
 WEB_SEARCH_TOOL: Dict[str, Any] = {
     "name": WEB_SEARCH_TOOL_NAME,
     "description": (

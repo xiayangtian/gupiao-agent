@@ -286,7 +286,7 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
                         if result.category == "web" and result.fetched_at else ())
         if result.category == "local":
             continue
-        provider = result.provider if result.provider in {"mcp", "tencent", "akshare", "web", "local"} else "other"
+        provider = result.provider if result.provider in {"mcp", "tencent", "akshare", "web", "deepseek_search", "local"} else "other"
         coverage_summary = result.coverage.summary()
         artifact_summary = (_source_result_summary(result) or
                             (result.content[:400] if status in {"success", "partial"} else result.error_code[:120]))

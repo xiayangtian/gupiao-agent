@@ -45,6 +45,23 @@ def test_authorization_requires_source_capability_and_switch():
     assert not access.permits(SourceCall("akshare", "a_share_market_snapshot", "market", {"trade_date": "2026-10-15"}))
 
 
+def test_deepseek_search_requires_explicit_keyed_capability_and_web_category():
+    from webapp.source_adapters import SourceAccess
+    from webapp.source_runtime import SourceCall
+
+    access = SourceAccess(
+        mcp_enabled=False, listed_tools=frozenset(), whitelist=frozenset(),
+        mcp_allow=lambda: False, web_enabled=False, tencent_enabled=False,
+        deepseek_enabled=True,
+    )
+    assert access.permits(SourceCall("deepseek_search", "web_search", "web", {"query": "x"}))
+    assert not access.permits(SourceCall("deepseek_search", "web_search", "market", {"query": "x"}))
+    assert not SourceAccess(
+        mcp_enabled=False, listed_tools=frozenset(), whitelist=frozenset(),
+        mcp_allow=lambda: False, web_enabled=False, tencent_enabled=False,
+    ).permits(SourceCall("deepseek_search", "web_search", "web", {"query": "x"}))
+
+
 def test_akshare_snapshot_requires_exact_server_operation_and_iso_date():
     from webapp.source_adapters import SourceAccess
     from webapp.source_runtime import SourceCall
