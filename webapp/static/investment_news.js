@@ -70,11 +70,6 @@
     return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] + offset)).toISOString().slice(0, 10);
   }
 
-  function isShanghaiMonday(day) {
-    var parts = day.split('-').map(Number);
-    return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2])).getUTCDay() === 1;
-  }
-
   function formatTime(value) {
     if (!value) return '发布时间未知';
     var parsed = new Date(value);
@@ -133,8 +128,7 @@
     }
     if (digest) {
       digest.disabled = state.busy.digest || Boolean(activeDigest);
-      digest.textContent = state.busy.digest || activeDigest ? '生成中…' :
-        (isShanghaiMonday(shanghaiToday()) ? '生成周一综述（含周末）' : '生成今日综述');
+      digest.textContent = state.busy.digest || activeDigest ? '生成中…' : '生成今日综述';
     }
   }
 
@@ -345,35 +339,18 @@
         badge.className = 'badge ' + (response.stale ? 'badge-warn' : 'badge-ok');
       }
       var payload = digest.payload || {};
-      var hasCoverage = Boolean(payload.coverage_start_day && payload.coverage_end_day);
-      var coverageStart = payload.coverage_start_day || state.digestDay;
-      var coverageEnd = payload.coverage_end_day || state.digestDay;
-      var includesWeekend = hasCoverage && coverageStart < coverageEnd;
-      var legacyMonday = isShanghaiMonday(state.digestDay) && !hasCoverage;
-      if (digestTitle) {
-        var todayTitle = state.digestDay === shanghaiToday() ? '今日 AI 综述' : state.digestDay + ' AI 综述';
-        digestTitle.textContent = includesWeekend ? todayTitle + '（含周末）' :
-          (legacyMonday ? todayTitle + '（需重生成以纳入周末）' : todayTitle);
+      var todayTitle = state.digestDay === shanghaiToday() ? '今日 AI 综述' : state.digestDay + ' AI 综述';
+      if (digestTitle) digestTitle.textContent = todayTitle;
+      var hasLegacyMultidayWindow = payload.coverage_start_day && payload.coverage_end_day &&
+        payload.coverage_start_day < payload.coverage_end_day;
+      if (hasLegacyMultidayWindow) {
+        if (meta) meta.textContent = '该摘要使用旧版跨日输入范围。';
+        content.appendChild(node('p', 'news-empty', '旧版跨日综述已停用，请重新生成以查看当日摘要。'));
+        return;
       }
-      var coverageLabel = coverageStart === coverageEnd ? '' : ' · 覆盖 ' + coverageStart + ' 至 ' + coverageEnd;
-      if (legacyMonday) coverageLabel += ' · 旧版单日综述尚未纳入周末';
       if (meta) {
         meta.textContent = '生成于 ' + formatTime(digest.generated_at) + ' · 覆盖 ' + digest.input_count +
-          ' 条资讯 · ' + digest.source_count + ' 个来源链接' + coverageLabel + ' · 数据截至 ' + formatTime(digest.data_through);
-      }
-      if (Array.isArray(payload.weekend_review) && payload.weekend_review.length) {
-        appendDigestSection(content, '周末重点回顾', payload.weekend_review);
-      } else if (isShanghaiMonday(state.digestDay)) {
-        var weekendSection = node('section', 'news-digest-section');
-        weekendSection.appendChild(node('h3', '', '周末重点回顾'));
-        var weekendCount = Number(payload.weekend_input_count || 0);
-        var weekendMessage = legacyMonday
-          ? '当前为旧版单日综述，尚未纳入周末；请重新生成以查看周末分析。'
-          : weekendCount
-            ? '周末资讯已入库，但未生成带有效来源引用的周末要点。'
-            : '周六、周日暂无已入库资讯，无法分析周末情况。';
-        weekendSection.appendChild(node('p', 'news-empty', weekendMessage));
-        content.appendChild(weekendSection);
+          ' 条资讯 · ' + digest.source_count + ' 个来源链接 · 数据截至 ' + formatTime(digest.data_through);
       }
       appendDigestSection(content, '市场主题', payload.market_themes);
       appendDigestSection(content, '政策与监管', payload.policy_regulatory);
@@ -508,11 +485,10 @@
   }
 
   function updateDateShortcuts() {
-    var mondayToday = isShanghaiMonday(shanghaiToday());
     var marketToday = document.querySelector('[data-news-window="market-today"]');
     var watchlistToday = document.querySelector('[data-news-window="watchlist-today"]');
-    if (marketToday) marketToday.textContent = mondayToday ? '周末+今天' : '今天';
-    if (watchlistToday) watchlistToday.textContent = mondayToday ? '周末+今日' : '今日';
+    if (marketToday) marketToday.textContent = '今天';
+    if (watchlistToday) watchlistToday.textContent = '今日';
     var marketControls = byId('news-market-day-controls');
     var watchlistControls = byId('news-watchlist-day-controls');
     if (marketControls) marketControls.classList.toggle('hidden', state.kind !== 'market');
@@ -534,12 +510,8 @@
       offset: String(state.offset),
     });
     var today = shanghaiToday();
-    var todaySelected = state.kind === 'market' ? state.marketDay === 'today' : state.rangeDays === 1;
     if (state.kind === 'watchlist' && state.rangeDays > 1) {
       query.set('start_day', shiftDay(today, 1 - state.rangeDays));
-      query.set('end_day', today);
-    } else if (todaySelected && isShanghaiMonday(today)) {
-      query.set('start_day', shiftDay(today, -2));
       query.set('end_day', today);
     } else {
       query.set('day', state.kind === 'market' && state.marketDay === 'yesterday' ? shiftDay(today, -1) : today);

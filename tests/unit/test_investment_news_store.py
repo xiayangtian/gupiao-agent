@@ -37,7 +37,7 @@ def test_daily_digest_keeps_only_the_latest_snapshot_per_day(tmp_path):
     assert store.get_digest("2026-10-13")["payload"] == {"summary": "previous day"}
 
 
-def test_monday_digest_input_includes_weekend_and_monday_but_tuesday_stays_daily(tmp_path):
+def test_digest_input_is_single_day_for_monday_and_tuesday(tmp_path):
     store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
     store.upsert_items([
         make_item(901, day="2026-10-17"),
@@ -49,11 +49,11 @@ def test_monday_digest_input_includes_weekend_and_monday_but_tuesday_stays_daily
     monday_ids = {item["id"] for item in store.get_digest_input_items("2026-10-19")}
     tuesday_ids = {item["id"] for item in store.get_digest_input_items("2026-10-20")}
 
-    assert monday_ids == {"item-901", "item-902", "item-903"}
+    assert monday_ids == {"item-903"}
     assert tuesday_ids == {"item-904"}
 
 
-def test_monday_digest_fingerprint_invalidates_legacy_single_day_hash(tmp_path):
+def test_digest_fingerprint_matches_legacy_single_day_hash(tmp_path):
     store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
     store.upsert_items([make_item(913, day="2026-10-19")])
     row = store.get_day_items("2026-10-19")[0]
@@ -65,10 +65,10 @@ def test_monday_digest_fingerprint_invalidates_legacy_single_day_hash(tmp_path):
         legacy_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
 
-    assert store.daily_input_hash("2026-10-19") != legacy_hash
+    assert store.daily_input_hash("2026-10-19") == legacy_hash
 
 
-def test_monday_digest_fingerprint_tracks_weekend_input(tmp_path):
+def test_digest_fingerprint_ignores_previous_day_items_for_monday(tmp_path):
     store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
     store.upsert_items([make_item(911, day="2026-10-19")])
     monday_before = store.daily_input_hash("2026-10-19")
@@ -76,7 +76,7 @@ def test_monday_digest_fingerprint_tracks_weekend_input(tmp_path):
 
     store.upsert_items([make_item(912, day="2026-10-18")])
 
-    assert store.daily_input_hash("2026-10-19") != monday_before
+    assert store.daily_input_hash("2026-10-19") == monday_before
     assert store.daily_input_hash("2026-10-20") == tuesday_before
 
 

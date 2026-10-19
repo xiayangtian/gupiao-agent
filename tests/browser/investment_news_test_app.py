@@ -88,11 +88,9 @@ class FakeAIClient:
         _write_calls()
         content = json.loads(messages[-1]["content"])
         ids = content.get("allowed_item_ids") or [item["id"] for item in content.get("items", [])]
-        weekend_ids = content.get("allowed_weekend_item_ids", [])
         response = {
             "market_themes": [{"text": "仅由本地 fixture 生成的综述。", "item_ids": ids[:1]}] if ids else [],
             "policy_regulatory": [], "watchlist": [], "risks": [],
-            "weekend_review": [{"text": "周末重点 fixture。", "item_ids": weekend_ids}] if weekend_ids else [],
         }
         return {"content": json.dumps(response, ensure_ascii=False), "model": "browser-fixture", "usage": {}}
 
@@ -153,7 +151,7 @@ def _service_factory():
         )])
     digest_payload = {
         "weekend_review": [{
-            "text": "周末模块 fixture",
+            "text": "不应展示的旧版周末重点",
             "item_ids": ["fixture-market-saturday", "fixture-market-yesterday"],
             "citation_count": 2,
             "citations": [
@@ -163,13 +161,11 @@ def _service_factory():
                  "source_name": "测试市场来源", "url": "https://example.test/market/yesterday"},
             ],
         }],
-        "coverage_start_day": (date.fromisoformat(today) - timedelta(days=2)).isoformat()
-            if date.fromisoformat(today).weekday() == 0 else today,
+        "coverage_start_day": (date.fromisoformat(today) - timedelta(days=2)).isoformat(),
         "coverage_end_day": today,
-        "weekend_input_count": 2 if date.fromisoformat(today).weekday() == 0 else 0,
+        "weekend_input_count": 2,
         "market_themes": [{
-
-            "text": "本地测试综述，引用链接应可打开且不执行 HTML。",
+            "text": "不应展示的旧版跨日摘要",
             "item_ids": ["fixture-market-0"],
             "citation_count": 1,
             "citations": [{
@@ -180,7 +176,7 @@ def _service_factory():
         "policy_regulatory": [], "watchlist": [], "risks": [],
         "input_count": 26, "source_count": 26, "data_through": timestamp,
     }
-    store.save_digest(today, digest_payload, store.daily_input_hash(today), "browser-fixture",
+    store.save_digest(today, digest_payload, "legacy-multiday-input-hash", "browser-fixture",
                       input_count=26, source_count=26, data_through=timestamp)
     historical_payload = {
         "market_themes": [{"text": "历史日期综述 fixture", "item_ids": [], "citation_count": 0, "citations": []}],

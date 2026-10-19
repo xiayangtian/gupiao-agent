@@ -49,37 +49,43 @@ def app_url():
             process.communicate(timeout=5)
 
 
-def test_monday_digest_help_explains_collection_precondition(app_url):
+def test_digest_help_explains_manual_generation_does_not_collect(app_url):
     session = "investment-news-collection-help-" + uuid.uuid4().hex
     _browser(session, "open", app_url + "/#/investment-news")
     try:
         help_text = _browser(session, "eval", "document.querySelector('#news-digest-input-help')?.textContent || ''")
+        assert "只读取已入库资讯" in help_text["data"]["result"]
         assert "不会自动采集" in help_text["data"]["result"]
-        assert "先点击“采集资讯”" in help_text["data"]["result"]
-        assert "采集完成后再点击页面上方的综述生成按钮" in help_text["data"]["result"]
+        assert "周末" not in help_text["data"]["result"]
+        assert "周一" not in help_text["data"]["result"]
     finally:
         _browser(session, "close", allow_failure=True)
 
 
-def test_digest_selector_only_lists_available_dates_and_renders_weekend_module(app_url):
+def test_digest_selector_lists_dates_and_hides_legacy_multiday_summary(app_url):
     session = "investment-news-digest-days-" + uuid.uuid4().hex
     _browser(session, "open", app_url + "/#/investment-news")
     try:
         result = _browser(session, "eval", "JSON.stringify({tag:document.querySelector('#news-digest-day')?.tagName,"
+                  "title:document.querySelector('#news-digest-title')?.textContent,"
+                  "badge:document.querySelector('#news-digest-badge')?.textContent,"
                   "options:[...document.querySelector('#news-digest-day')?.options||[]].map(option=>option.value),"
                   "summary:document.querySelector('#news-digest')?.textContent})")
         state = json.loads(result["data"]["result"])
         available = _browser(session, "eval", "fetch('/api/investment-news/digest/days').then(r=>r.json())")
         assert state["tag"] == "SELECT"
         assert state["options"] == available["data"]["result"]["days"]
-        assert "周末模块 fixture" in state["summary"]
-        assert "测试市场来源" in state["summary"]
+        assert state["title"] == "今日 AI 综述"
+        assert state["badge"] == "输入已变化"
+        assert "旧版跨日综述已停用" in state["summary"]
+        assert "不应展示的旧版跨日摘要" not in state["summary"]
+        assert "周末重点回顾" not in state["summary"]
         assert _browser(session, "errors")["data"].get("errors", []) == []
     finally:
         _browser(session, "close", allow_failure=True)
 
 
-def test_monday_today_shortcut_includes_saturday_through_monday(app_url):
+def test_today_shortcuts_are_single_day_on_monday(app_url):
     session = "investment-news-monday-window-" + uuid.uuid4().hex
     _browser(session, "open", app_url + "/#/investment-news")
     try:
@@ -93,19 +99,19 @@ def test_monday_today_shortcut_includes_saturday_through_monday(app_url):
                   "return JSON.stringify({start:url.searchParams.get('start_day'),end:url.searchParams.get('end_day'),"
                   "day:url.searchParams.get('day'),label:document.querySelector('[data-news-window=\\\"market-today\\\"]').textContent});})()")
         state = json.loads(request["data"]["result"])
-        assert state["start"] == "2026-10-17"
-        assert state["end"] == "2026-10-19"
-        assert state["day"] is None
-        assert "周末" in state["label"]
+        assert state["start"] is None
+        assert state["end"] is None
+        assert state["day"] == "2026-10-19"
+        assert state["label"] == "今天"
 
         _browser(session, "click", '[data-news-kind="watchlist"]')
         _browser(session, "click", '[data-news-window="watchlist-today"]')
         _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
         watchlist_request = _browser(session, "eval", "(()=>{const url=new URL(window.__newsRequest,location.origin);"
-                  "return JSON.stringify({kind:url.searchParams.get('kind'),start:url.searchParams.get('start_day'),"
-                  "end:url.searchParams.get('end_day')});})()")
+                  "return JSON.stringify({kind:url.searchParams.get('kind'),day:url.searchParams.get('day'),"
+                  "start:url.searchParams.get('start_day'),end:url.searchParams.get('end_day')});})()")
         watchlist_state = json.loads(watchlist_request["data"]["result"])
-        assert watchlist_state == {"kind": "watchlist", "start": "2026-10-17", "end": "2026-10-19"}
+        assert watchlist_state == {"kind": "watchlist", "day": "2026-10-19", "start": None, "end": None}
         assert _browser(session, "errors")["data"].get("errors", []) == []
     finally:
         _browser(session, "close", allow_failure=True)
