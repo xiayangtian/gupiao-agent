@@ -72,6 +72,49 @@ def test_extracts_akshare_index_daily_bars_as_market_facts():
     assert all(fact.evidence_ids == (f"ak-index-1:sh000001:{fact.period}",) for fact in facts)
 
 
+def test_extracts_baostock_index_daily_bars_as_market_facts():
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    result = SourceResult(
+        "bao-index-1", "baostock", "a_share_index_kline", "market", "success",
+        as_of="2026-10-16", payload=(
+            {"date": "2026-10-15", "close": 3707.48, "symbol": "sh000001", "kline_period": "day"},
+            {"date": "2026-10-16", "close": 3692.45, "symbol": "sh000001", "kline_period": "day"},
+        ), coverage=SourceCoverage(returned_rows=2, data_window="2026-10-15至2026-10-16"),
+    )
+    artifact = ToolArtifact(
+        "baostock", "a_share_index_kline", as_of="2026-10-16", status="success", source_id="bao-index-1",
+    )
+
+    facts = facts_from_market_result(result, artifact)
+
+    assert [(fact.period, fact.value, fact.metric, fact.period_kind) for fact in facts] == [
+        ("2026-10-15", 3707.48, "index_close", "daily"),
+        ("2026-10-16", 3692.45, "index_close", "daily"),
+    ]
+    assert all(fact.evidence_ids == (f"bao-index-1:sh000001:{fact.period}",) for fact in facts)
+
+
+def test_baostock_single_day_without_previous_bar_does_not_derive_index_change():
+    from webapp.chat_facts import derive_available_facts
+    from webapp.source_runtime import SourceCoverage, SourceResult
+
+    result = SourceResult(
+        "bao-current-only", "baostock", "a_share_index_kline", "market", "success",
+        as_of="2026-10-16", payload=(
+            {"date": "2026-10-16", "close": 3692.45, "symbol": "sh000001", "kline_period": "day"},
+        ), coverage=SourceCoverage(returned_rows=1, data_window="2026-10-16"),
+    )
+    artifact = ToolArtifact(
+        "baostock", "a_share_index_kline", as_of="2026-10-16", status="success", source_id="bao-current-only",
+    )
+
+    facts = facts_from_market_result(result, artifact)
+
+    assert len(facts) == 1 and facts[0].metric == "index_close"
+    assert derive_available_facts(facts, index_delta=True) == ()
+
+
 def test_normalizes_yuan_to_yi_without_losing_original_unit():
     fact = FactNormalizer().normalize({"metric": "revenue", "value": 410871000000, "unit": "元", "period": "2026-06-30", "period_kind": "semi_annual_cumulative", "entity_scope": "consolidated", "company_code": "601288", "evidence_ids": ["pdf_p40"]}, _pdf(), _scope())
     assert fact is not None

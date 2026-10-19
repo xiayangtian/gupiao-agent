@@ -47,7 +47,8 @@ class RagConfig:
     mcp_tools: bool = True
     mcp_tool_timeout: int = 30          # 单次工具调用超时（秒）
     mcp_max_tool_rounds: int = 3        # 最大工具调用轮数
-    mcp_max_tool_calls: int = 10        # 单次问答总工具调用上限
+    mcp_max_tool_calls: int = 10        # 单次普通问答总工具调用上限
+    market_recap_max_tool_calls: int = 15  # 今日 A 股复盘独立来源尝试上限（运行时硬封顶 15）
     mcp_tool_whitelist: List[str] = field(default_factory=list)  # 空=自动常用清单
     web_search: bool = True             # 配置 TAVILY_API_KEY 时允许网页搜索
     web_search_timeout: int = 15        # 单次网页搜索超时（秒）
@@ -78,6 +79,7 @@ class RagConfig:
             mcp_tool_timeout=int(raw.get("mcp_tool_timeout", 30)),
             mcp_max_tool_rounds=int(raw.get("mcp_max_tool_rounds", 3)),
             mcp_max_tool_calls=int(raw.get("mcp_max_tool_calls", 10)),
+            market_recap_max_tool_calls=int(raw.get("market_recap_max_tool_calls", 15)),
             mcp_tool_whitelist=[str(w) for w in raw.get("mcp_tool_whitelist", [])]
             if isinstance(raw.get("mcp_tool_whitelist"), list) else [],
             web_search=_to_bool(raw.get("web_search"), True),

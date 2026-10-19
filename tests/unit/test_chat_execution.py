@@ -196,7 +196,7 @@ def test_akshare_market_snapshot_is_blocked_when_external_market_sources_are_dis
     assert runtime.budget.snapshot() == {"total": 0, "market": 0, "web": 0}
 
 
-def test_market_recap_runtime_budget_is_9_total_7_market_2_web_and_config_capped():
+def test_market_recap_runtime_budget_is_dedicated_and_hard_capped_at_fifteen():
     from types import SimpleNamespace
 
     from webapp.chat_execution import build_source_runtime
@@ -208,27 +208,96 @@ def test_market_recap_runtime_budget_is_9_total_7_market_2_web_and_config_capped
         whitelist=frozenset(), mcp_allow=lambda: True,
         web_enabled=True, tencent_enabled=True,
     )
-    policy = SimpleNamespace(max_calls=2)
+    policy = SimpleNamespace(max_calls=20)
     runtime = build_source_runtime(
         scope=Scope.whole_corpus(), policy=policy,
-        cfg=SimpleNamespace(mcp_max_tool_calls=20), use_mcp=True,
-        source_mode="market_recap", access=access,
+        cfg=SimpleNamespace(mcp_max_tool_calls=10, market_recap_max_tool_calls=15), use_mcp=True,
+        source_mode="market_recap", access=access, daily_recap=True,
     )
 
+    assert all(runtime.budget.reserve("market") for _ in range(15))
+    assert not runtime.budget.reserve("market")
+    assert runtime.budget.snapshot() == {"total": 15, "market": 15, "web": 0}
+
+    capped = build_source_runtime(
+        scope=Scope.whole_corpus(), policy=policy,
+        cfg=SimpleNamespace(mcp_max_tool_calls=20, market_recap_max_tool_calls=6), use_mcp=True,
+        source_mode="market_recap", access=access, daily_recap=True,
+    )
+    assert all(capped.budget.reserve("market") for _ in range(6))
+    assert not capped.budget.reserve("market")
+    assert capped.budget.snapshot() == {"total": 6, "market": 6, "web": 0}
+
+
+def test_cancelled_market_runtime_blocks_all_following_provider_attempts():
+    from webapp.chat_models import Scope
+    from webapp.chat_runs import ChatRunCancelled, ChatRunControl
+    from webapp.source_runtime import CallBudget, SourceCall, SourceCoverage, SourceResult, SourceRuntime
+
+    control = ChatRunControl("session", "run", timeout_seconds=60)
+    runtime = SourceRuntime(
+        Scope.whole_corpus(), CallBudget(total=5, market=5, web=0), lambda _call: True, control=control,
+    )
+    first_call = SourceCall("tencent", "kline", "market", {"symbol": "sh000001"})
+    second_call = SourceCall("akshare", "a_share_index_kline", "market", {"symbol": "sh000001"})
+    def cancel_during_first_call():
+        control.cancel("user")
+        return SourceResult(
+            "provider-result", "tencent", "kline", "market", "success", as_of="2026-10-16",
+            coverage=SourceCoverage(data_window="2026-10-16"),
+        )
+    first_result = runtime.call(first_call, cancel_during_first_call)
+    second_invocations = []
+
+    assert first_result.status == "success"
+    with pytest.raises(ChatRunCancelled):
+        runtime.call(second_call, lambda: second_invocations.append("unexpected"))
+    assert second_invocations == []
+    assert runtime.budget.snapshot() == {"total": 1, "market": 1, "web": 0}
+
+
+def test_non_daily_market_recap_keeps_legacy_budget_even_when_daily_budget_is_15():
+    from types import SimpleNamespace
+    from webapp.chat_execution import build_source_runtime
+    from webapp.chat_models import Scope
+    from webapp.source_adapters import SourceAccess
+
+    access = SourceAccess(
+        mcp_enabled=True, listed_tools=frozenset(), whitelist=frozenset(),
+        mcp_allow=lambda: True, web_enabled=True, tencent_enabled=True,
+    )
+    runtime = build_source_runtime(
+        scope=Scope.whole_corpus(), policy=SimpleNamespace(max_calls=20),
+        cfg=SimpleNamespace(mcp_max_tool_calls=10, market_recap_max_tool_calls=15), use_mcp=True,
+        source_mode="market_recap", access=access, daily_recap=False,
+    )
+
+    assert runtime.budget.snapshot() == {"total": 0, "market": 0, "web": 0}
     assert all(runtime.budget.reserve("market") for _ in range(7))
     assert not runtime.budget.reserve("market")
     assert all(runtime.budget.reserve("web") for _ in range(2))
     assert not runtime.budget.reserve("web")
     assert runtime.budget.snapshot() == {"total": 9, "market": 7, "web": 2}
 
-    capped = build_source_runtime(
-        scope=Scope.whole_corpus(), policy=policy,
-        cfg=SimpleNamespace(mcp_max_tool_calls=6), use_mcp=True,
-        source_mode="market_recap", access=access,
+
+def test_non_recap_runtime_keeps_existing_mcp_budget():
+    from types import SimpleNamespace
+    from webapp.chat_execution import build_source_runtime
+    from webapp.chat_models import Scope
+    from webapp.source_adapters import SourceAccess
+
+    access = SourceAccess(
+        mcp_enabled=True, listed_tools=frozenset(), whitelist=frozenset(),
+        mcp_allow=lambda: True, web_enabled=False, tencent_enabled=True,
     )
-    assert all(capped.budget.reserve("market") for _ in range(6))
-    assert not capped.budget.reserve("market")
-    assert capped.budget.snapshot() == {"total": 6, "market": 6, "web": 0}
+    runtime = build_source_runtime(
+        scope=Scope.whole_corpus(), policy=SimpleNamespace(max_calls=20),
+        cfg=SimpleNamespace(mcp_max_tool_calls=10, market_recap_max_tool_calls=15), use_mcp=True,
+        source_mode="external_market", access=access,
+    )
+    assert all(runtime.budget.reserve("market") for _ in range(10))
+    assert not runtime.budget.reserve("market")
+    assert runtime.budget.snapshot() == {"total": 10, "market": 10, "web": 0}
 
 
 def test_tencent_kline_projection_creates_dated_market_facts_with_source_identity():

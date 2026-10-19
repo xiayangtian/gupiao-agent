@@ -13,6 +13,7 @@
 import logging
 
 from .tencent import TencentQuote
+from .baostock import load_index_kline as load_baostock_index_kline
 from .mcp_client import StockMCPClient, _resolve_stock_data_server_command
 
 logger = logging.getLogger(__name__)
@@ -22,4 +23,5 @@ tencent_quote = TencentQuote()
 stock_mcp = StockMCPClient()
 market_data_mcp = StockMCPClient(command=_resolve_stock_data_server_command())
 
-__all__ = ["TencentQuote", "StockMCPClient", "tencent_quote", "stock_mcp", "market_data_mcp"]
+__all__ = ["TencentQuote", "StockMCPClient", "tencent_quote", "stock_mcp", "market_data_mcp",
+           "load_baostock_index_kline"]
