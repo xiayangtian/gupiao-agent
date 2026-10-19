@@ -47,12 +47,32 @@ def test_source_evidence_includes_server_derived_market_index_facts():
 
     evidence = RagQA._source_evidence([source])
 
-    assert "上证指数 2026-10-16 收盘点位=3716.28点" in evidence[0]["text"]
-    assert "上证指数 2026-10-16 较上一交易日涨跌点数=8.8点" in evidence[0]["text"]
-    assert "上证指数 2026-10-16 较上一交易日涨跌幅=0.24%" in evidence[0]["text"]
     assert evidence[0]["id"] == "source-1"
+    assert source.facts[0].id in evidence[0]["text"]
     assert source.facts[1].id in evidence[0]["text"]
+    assert '"metric":"index_close","value":3716.28,"unit":"点"' in evidence[0]["text"]
+    assert '"metric":"index_close_delta","value":8.8,"unit":"点"' in evidence[0]["text"]
     assert '"derived_from_ids":["fact_previous","fact_current"]' in evidence[0]["text"]
+
+
+def test_market_source_prompt_prefers_normalized_facts_over_duplicate_raw_payload():
+    from webapp.chat_models import Fact
+    from webapp.source_runtime import SourceResult
+
+    fact = Fact(
+        "price", 3.81, "元/股", "2026-10-19", "point_in_time", "company", "601398",
+        "pointer", ("call-1#/0/price",), "reference", "2026-10-19", source_category="market",
+    )
+    source = SourceResult(
+        "call-1", "tencent", "quote", "market", "success",
+        content='{"private_provider_field":"raw-only"}', facts=(fact,),
+    )
+
+    evidence = RagQA._source_evidence([source])
+
+    assert fact.id in evidence[0]["text"]
+    assert "private_provider_field" not in evidence[0]["text"]
+    assert "raw-only" not in evidence[0]["text"]
 
 
 def test_market_fallback_preserves_weekly_sampling_label():
@@ -349,6 +369,7 @@ def test_market_answer_malformed_json_never_falls_back_to_unverified_delta(raw):
     ai = FakeAIStream(deltas=(raw[:18], raw[18:]), answer=raw)
     events = list(RagQA(object(), ai).answer_from_context(
         "看看工商银行行情", context=AnswerContext(sources=(source,)), market_analysis=True,
+        market_intent="market_quote",
     ))
 
     assert not any(event["type"] == "delta" for event in events)
@@ -371,6 +392,7 @@ def test_market_answer_without_json_mode_support_fails_closed_without_plaintext(
 
     events = list(RagQA(object(), NoJsonModeAI()).answer_from_context(
         "看看工商银行行情", context=AnswerContext(sources=(source,)), market_analysis=True,
+        market_intent="market_quote",
     ))
 
     assert events == [{"type": "error", "error": "market_json_mode_unavailable"}]

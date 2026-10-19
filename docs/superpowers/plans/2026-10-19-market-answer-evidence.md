@@ -105,11 +105,11 @@
 
 - [x] **Step 1: 写缓冲输出测试**：fake AI client 输入分块 JSON delta + done；断言事件不含 `delta`，唯一 done 含解析出的 answer 与结构化 claims，并传递 server intent/window。
 - [x] **Step 2: 运行单测确认失败**：新增缓冲与 malformed 测试先因正文 delta 外泄而失败。
-- [x] **Step 3: 实现行情专用生成分支**：来源证据携带稳定 `call_id`、服务端请求绑定、模型可见来源内容及最多 80 条结构化 Fact（含派生 lineage）；使用 JSON object response format，buffer 所有正文 delta，只有解析成功后将 answer/claims 放入 done。失败不回落普通文本/continuation。
+- [x] **Step 3: 实现行情专用生成分支**：来源证据携带稳定 `call_id`、服务端请求绑定、模型可见来源内容及最多 40 条结构化 Fact（含派生 lineage）；使用 JSON object response format，buffer 所有正文 delta，只有解析成功后将 answer/claims 放入 done。失败不回落普通文本/continuation。
 - [x] **Step 4: 测试来源 prompt injection 和 malformed output**：覆盖不可信行情字段、非 JSON、claims 非数组、答案超长、截断 JSON 和不支持 JSON mode；均不产生行情 delta、不调用工具。
 - [x] **Step 5: 测试非行情兼容**：完整 `test_rag_qa.py` 回归通过，覆盖财报/web、知识模式、续写和授权补充原行为。
 - [x] **Step 6: 运行聚焦测试**：`python3 -m pytest tests/unit/test_rag_qa.py -q`：64 passed，3 dependency deprecation warnings；`compileall`、`git diff --check` 通过。
-- [ ] **Step 7: 提交**：只 stage `financial_report_fetcher/rag/qa.py`、其单测与本计划进度；commit `feat: buffer structured market answer drafts`。
+- [x] **Step 7: 提交**：已提交 `financial_report_fetcher/rag/qa.py`、其单测与本计划进度；commit `7259052 feat: buffer structured market answer drafts`。
 
 ### Task 3: 将验证结果接入既有问答终态与 SSE 门禁
 
@@ -125,15 +125,15 @@
 - `_RagRunState` 增加仅本次运行内使用的 `market_claims`/`market_draft_error`；从 `done_payload` 收取，不生成 SSE 正文。
 - 行情终态处理次序：来源结果累积 → claim schema/source validation → 合格 Facts 写入 run state → `ClaimVerifier.verify` → coverage/market status → 发布核验后答案 → `_persist`/最终 done。
 
-- [ ] **Step 1: 写端到端 SSE 防泄露测试**：用既有 chat API fake dependency 返回 `source_result` 和行情结构化 `done` 草稿；记录 SSE 全帧。对通过草稿，断言正文 `delta` 只在 `verification` 帧之后出现且其文本与最终 done.answer 一致；对伪造数字、错主体、非法 pointer、模型写“已核验”但没有 claim、未知字段，断言草稿数字从未出现在任何帧或持久化内容，最终 run.status 为 partial/failed 且核验错误码有限。
-- [ ] **Step 2: 运行特定测试确认失败**：`pytest tests/unit/test_server_api.py -k market_answer_evidence -q`；预期当前 server 不接收 claims，或者行情正文 delta 在终态核验前已泄露。
-- [ ] **Step 3: 接入结构化 claim 验证**：`_relay_rag_event` 保留 done payload 的 claims；在 server 的行情终态里调用 `parse_market_answer_draft` / `validate_market_answer_claims`，将已通过的 Facts 与现有来源 Facts 去重合并。无 draft 或任一 required claim 无法绑定时设置 blocked/partial，不用模型自述替代验证。
-- [ ] **Step 4: 串接 ClaimVerifier 与 market coverage**：用 validated answer + validated Facts 调用既有 `ClaimVerifier`；复用上一实际交易日、时间窗、覆盖状态和来源冲突检查。失败答案使用已有行情安全降级；不允许 `_verified_market_fallback` 为 draft 中未核验的数字兜底。
-- [ ] **Step 5: 延迟行情 SSE**：行情模式不从 `_relay_rag_event` 输出模型正文；在 verification/coverage 最终可接受后，仅发一次经审查的 answer delta，再发 done。失败、停止、超时及来源预算耗尽都不得将 buffer 写入最终 answer；保留已完成的进度/source/artifact 帧。
-- [ ] **Step 6: 保持通用 verifier 退化可解释**：添加有限 issue code（例如 `invalid_market_draft`、`unresolved_source_reference`、`source_value_mismatch`、`market_identity_mismatch`、`market_time_mismatch`、`market_unit_mismatch`、`ambiguous_metric_semantics`）；错误对象不保存 prompt、完整原始 payload 或凭证。
-- [ ] **Step 7: 测试财报/网页和旧 run**：沿用现有 server API 单测证明非行情 delta 顺序、旧 JSON 历史 run 解码、财报/网页 verification 未变化；行情图表仍只消费现有结构化 Facts，不消费未核验 claims。
-- [ ] **Step 8: 运行聚焦测试**：`pytest tests/unit/test_server_api.py tests/unit/test_chat_verifier.py tests/unit/test_market_answer_evidence.py -q`；预期全部通过。
-- [ ] **Step 9: 提交**：只 stage server/verifier/models 和相关测试；commit `feat: gate market answer stream on evidence checks`。
+- [x] **Step 1: 写端到端 SSE 防泄露测试**：新增通过草稿的延迟 delta 测试，以及伪造数字、错主体、非法 pointer、未知字段和缺失 claim 不泄露到 SSE/存储的测试。
+- [x] **Step 2: 运行特定测试**：实现前的红测输出未单独保留；实现后防泄露聚焦回归通过。
+- [x] **Step 3: 接入结构化 claim 验证**：`_relay_rag_event` 缓存 claims；行情终态调用 `parse_market_answer_draft` / `validate_market_answer_claims`，合格 Facts 与现有 Facts 去重合并；来源 Facts 按趋势均匀采样/单日复盘端点与 lineage 有界投影。
+- [x] **Step 4: 串接 ClaimVerifier 与 market coverage**：validated answer + Facts 接入既有 `ClaimVerifier`；无效草稿不回退到草稿数字，安全 fallback 仅用服务端 Facts 并重新核验。
+- [x] **Step 5: 延迟行情 SSE**：行情模式屏蔽模型 delta；仅终态核验和覆盖状态完成后发一次审核答案，再发 done；进度/source/artifact 帧保留。
+- [x] **Step 6: 保持通用 verifier 退化可解释**：使用有限 issue code；错误内容不保存完整 payload 或凭证。
+- [x] **Step 7: 测试财报/网页和旧 run**：非行情 RagQA/server API 回归、旧 run 序列化兼容与 Fact 事件测试均在聚焦测试集通过。
+- [x] **Step 8: 运行聚焦测试**：`python3 -m pytest tests/unit/test_chat_execution.py tests/unit/test_chat_facts.py tests/unit/test_chat_verifier.py tests/unit/test_rag_qa.py tests/unit/test_source_adapters.py tests/unit/test_source_runtime.py tests/unit/test_server_api.py -q`：383 passed，3 dependency deprecation warnings；compileall 与 `git diff --check` 通过。
+- [x] **Step 9: 提交**：提交 `feat: gate market answer stream on evidence checks`，包括 server/RagQA 集成、相关单测和计划进度。
 
 ### Task 4: 做直接影响面回归和用户文档更新
 
@@ -142,10 +142,10 @@
 - Modify: `docs/FEATURE-CATALOG.md`
 - Modify: `README.md`（仅当用户可见的行情回答/来源说明改变）
 
-- [ ] **Step 1: 运行相关单测回归**：`pytest tests/unit/test_chat_execution.py tests/unit/test_chat_facts.py tests/unit/test_chat_verifier.py tests/unit/test_rag_qa.py tests/unit/test_source_adapters.py tests/unit/test_source_runtime.py tests/unit/test_server_api.py -q`；逐项记录通过/失败，不将不相关 baseline failure 归因给本变更。
-- [ ] **Step 2: 运行浏览器可信流回归**：`pytest tests/browser/test_chat_trust_flow.py -q`；如 fixture 需额外 server，使用测试 fixture 的本地 URL，不用生产账号或真实用户会话。
-- [ ] **Step 3: 真实浏览器聚焦 QA**：启动本地测试 fixture，运行 `browser_qa` 对聊天页桌面、平板、移动端验证布局；用 snapshot 检查完成/核验失败消息；查看 console、uncaught errors、失败 network 请求。报告 URL、实际视口、错误详情。截图只留在 browser-goblin 产物目录，不提交仓库。
-- [ ] **Step 4: 补回归边界**：确认多来源不同 JSON 形状均只因 model-selected pointers 可读取而无需新 provider-specific Fact mapper；字段歧义、缺时点、身份冲突仍降级；取消后无下游调用；财报/网页 SSE 不延迟/不回归。
+- [x] **Step 1: 运行相关单测回归**：`python3 -m pytest tests/unit/test_chat_execution.py tests/unit/test_chat_facts.py tests/unit/test_chat_verifier.py tests/unit/test_rag_qa.py tests/unit/test_source_adapters.py tests/unit/test_source_runtime.py tests/unit/test_server_api.py -q`：383 passed，3 dependency deprecation warnings。
+- [x] **Step 2: 运行浏览器可信流回归**：`python3 -m pytest tests/browser/test_chat_trust_flow.py -q`：9 passed、3 failed。失败根因复现为 fixture 将占位 key 用于 DeepSeek 意图分类，收到 401 并返回 clarification/run=null；本次未修改无关测试基础设施。
+- [x] **Step 3: 真实浏览器聚焦 QA**：`http://127.0.0.1:8799/#/chat`，桌面/平板/移动；无 console/page errors，browser_qa 汇总 1 个 4xx 但没有捕获对应请求；手动 network 查询也无失败请求明细。snapshot 确认聊天页范围控件与历史消息结构。临时 fixture 服务已停止；截图仅留在 browser-goblin 产物目录。
+- [x] **Step 4: 补回归边界**：行情 JSON pointer/Facts 投影、错主体/错值/缺 claim 门禁、长趋势采样、日复盘派生 lineage、coverage fallback 和非行情 SSE/Fact 兼容由聚焦单测与 horizon fixture matrix 覆盖；未新增 provider 或 source call。
 - [ ] **Step 5: 更新功能目录**：只在实现最终验证且合入本地 `main` 后，将实际合并短 SHA、用户能力变化及验证入口加入对应功能条目；README 仅在使用方式或用户可见行为变化时更新。
 - [ ] **Step 6: 合并门槛**：先完成全部适用测试，再按用户授权本地合入 `main`；不推送远端。合并后检查 `git status`、合并 SHA，按项目规则重启配置好的本地服务并检查 `/api/health`；失败需报告，不声称已生效。
 

@@ -29,7 +29,7 @@ import time
 from zoneinfo import ZoneInfo
 import uuid
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
@@ -92,7 +92,11 @@ from .source_adapters import SourceAccess
 from .source_runtime import AnswerContext, SourceCall, SourceCoverage, SourceResult
 from .search_usage_store import SearchUsageStore
 from .chat_facts import FactNormalizer, derive_available_facts, detect_conflicts
-from .chat_models import SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision, Scope, ToolPolicy
+from .chat_models import (
+    SUPPLEMENT_MAX_CANDIDATES, AnswerRun, Fact, IndustryRef, IntentDecision,
+    Scope, ToolPolicy, VerificationIssue, VerificationReport,
+)
+from .market_answer_evidence import parse_market_answer_draft, validate_market_answer_claims
 from .chat_policy import ToolAvailability, ToolPolicyResolver
 from .execution_plan import ExecutionPlan
 from .execution_planner import ExecutionPlanner, PlanningCapabilities, PlanningResult, safe_market_plan
@@ -2301,6 +2305,65 @@ def _resume_chat_tools() -> Optional[List[Dict[str, Any]]]:
     return remaining or None
 
 
+_MARKET_CLAIM_ISSUE_MESSAGES = {
+    "invalid_market_draft": "行情回答结构无效，未采用其中的数字主张。",
+    "unresolved_source_reference": "行情主张无法绑定到本轮来源证据。",
+    "source_snapshot_not_visible": "行情主张引用了模型未看到的来源数据。",
+    "source_value_mismatch": "行情主张数值与本轮来源不一致。",
+    "market_identity_mismatch": "行情主张主体与请求范围或来源不一致。",
+    "market_time_mismatch": "行情主张时点与来源或请求窗口不一致。",
+    "market_unit_mismatch": "行情主张单位不符合指标口径。",
+    "ambiguous_metric_semantics": "来源字段语义不足以支持该行情指标。",
+    "derived_metric_requires_server_fact": "派生行情指标缺少服务端公式与来源 lineage。",
+}
+
+
+def _market_claim_issues(codes: Sequence[str]) -> tuple[VerificationIssue, ...]:
+    issues: list[VerificationIssue] = []
+    seen: set[str] = set()
+    for raw_code in codes:
+        code = raw_code if raw_code in _MARKET_CLAIM_ISSUE_MESSAGES else "unresolved_source_reference"
+        if code in seen:
+            continue
+        seen.add(code)
+        issues.append(VerificationIssue(
+            code, "blocked", _MARKET_CLAIM_ISSUE_MESSAGES[code],
+        ))
+    return tuple(issues)
+
+
+def _market_prompt_facts(
+    facts: Sequence[Fact], *, operation: str, intent: str, window: MarketWindow | None,
+) -> tuple[Fact, ...]:
+    """Bound model-visible market facts while retaining period coverage and lineage parents."""
+    if operation == "a_share_market_snapshot":
+        raw = tuple(fact for fact in facts if fact.source_type != "derived")[:40]
+    else:
+        raw = tuple(sorted(
+            (fact for fact in facts if fact.source_type != "derived"),
+            key=lambda fact: (fact.period, fact.id),
+        ))
+        daily_recap_index = (
+            intent == "market_recap" and operation in {"kline", "a_share_index_kline"}
+            and window is not None and window.start_date is not None
+            and window.start_date == window.end_date
+        )
+        limit = 2 if daily_recap_index else 12
+        if len(raw) > limit:
+            if daily_recap_index:
+                raw = (raw[0], raw[-1])
+            else:
+                indices = sorted({round(index * (len(raw) - 1) / (limit - 1)) for index in range(limit)})
+                raw = tuple(raw[index] for index in indices)
+    visible_ids = {fact.id for fact in raw}
+    derived = tuple(
+        fact for fact in facts
+        if fact.source_type == "derived" and fact.derived_from_ids
+        and set(fact.derived_from_ids).issubset(visible_ids)
+    )
+    return (raw + derived)[:40]
+
+
 @dataclass
 class _RagRunState:
     """一次流式问答运行的可变累积状态（SSE 转发与运行持久化共用）。"""
@@ -2333,6 +2396,11 @@ class _RagRunState:
     source_runtime_tool_names: set[str] = field(default_factory=set)
     plan_status: str = ""
     market_evidence_status: str = ""
+    market_answer_mode: bool = False
+    market_claims: List[Dict[str, Any]] = field(default_factory=list)
+    market_draft_error: str = ""
+    market_visible_facts: List[Any] = field(default_factory=list)
+    market_visible_sources: List[Any] = field(default_factory=list)
 
 
 def _relay_rag_event(
@@ -2347,7 +2415,7 @@ def _relay_rag_event(
 
     if etype == "delta":
         text = evt.get("text", "")
-        if text:
+        if text and not state.market_answer_mode:
             state.answer_parts.append(text)
             frames.append(_sse("delta", {"text": text}))
     elif etype == "tool_call":
@@ -2441,6 +2509,11 @@ def _relay_rag_event(
     elif etype == "error":
         state.error_text = str(evt.get("error") or "未知错误")
     elif etype == "done":
+        if state.market_answer_mode:
+            claims = evt.get("market_claims")
+            state.market_claims = claims if isinstance(claims, list) else []
+            error = evt.get("market_draft_error")
+            state.market_draft_error = "" if error == "" and isinstance(claims, list) else "invalid_market_draft"
         state.retrieval_report_ids.extend(evt.get("retrieval_report_ids", []) or [])
         state.retrieval_degraded = bool(evt.get("retrieval_degraded", False))
         state.model_name = evt.get("model") or ""
@@ -3598,6 +3671,15 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 state.had_external_failure = _has_unresolved_external_failure(result.context.sources)
                 state.execution_steps = [{"id": step.id, "kind": step.kind, "status": step.status,
                                           "error": step.error} for step in result.steps]
+                is_market_request = route.intent in {"market_quote", "market_trend", "market_recap"}
+                if is_market_request:
+                    state.market_evidence_status = market_task_status(
+                        route.intent, scope, market_window, result.context.sources, "passed",
+                    )
+                market_sources_available = any(
+                    source.status in {"success", "partial"} and source.payload is not None
+                    for source in result.context.sources
+                )
                 for source in result.context.sources:
                     yield {"type": "source_result", "result": source}
                 if (route.intent == "market_recap" and market_window is not None
@@ -3615,38 +3697,43 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                             state.facts.append(fact)
                             known_ids.add(fact.id)
                             yield {"type": "fact", "fact": fact.to_dict()}
-                    index_facts_by_source = {
-                        source.call_id: tuple(
+                if is_market_request:
+                    visible_by_id: dict[str, Fact] = {}
+                    projected_sources = []
+                    for source in result.context.sources:
+                        call_prefix = f"{source.call_id}:" if source.call_id else ""
+                        pointer_prefix = f"{source.call_id}#" if source.call_id else ""
+                        tool_evidence_id = f"tool:{source.provider}:{source.operation}"
+                        source_facts = tuple(
                             fact for fact in state.facts
-                            if fact.metric in {"index_close", "index_close_delta", "index_close_pct_change"}
-                            and any(evidence_id.startswith(source.call_id + ":") for evidence_id in fact.evidence_ids)
+                            if source.category == "market"
+                            and fact.source_category in {"market", "mcp"}
+                            and any(evidence_id == tool_evidence_id
+                                    or (call_prefix and evidence_id.startswith(call_prefix))
+                                    or (pointer_prefix and evidence_id.startswith(pointer_prefix))
+                                    for evidence_id in fact.evidence_ids)
                         )
-                        for source in result.context.sources
-                    }
-                    answer_context = replace(
-                        result.context,
-                        sources=tuple(
-                            replace(source, facts=index_facts_by_source.get(source.call_id, ()))
-                            if index_facts_by_source.get(source.call_id) else source
-                            for source in result.context.sources
-                        ),
-                    )
+                        source_facts = _market_prompt_facts(
+                            source_facts, operation=source.operation, intent=route.intent, window=market_window,
+                        )
+                        for fact in source_facts:
+                            visible_by_id[fact.id] = fact
+                        if source.category == "market":
+                            projected_sources.append(replace(source, facts=source_facts,
+                                                             content="" if source_facts else source.content))
+                        else:
+                            projected_sources.append(source)
+                    answer_context = replace(result.context, sources=tuple(projected_sources))
+                    state.market_visible_facts = list(visible_by_id.values())
+                    state.market_visible_sources = list(projected_sources)
                 else:
                     answer_context = result.context
                 if run_control is not None:
                     run_control.check_active()
-                is_market_request = route.intent in {"market_quote", "market_trend", "market_recap"}
-                if is_market_request:
-                    state.market_evidence_status = market_task_status(
-                        route.intent, scope, market_window, result.context.sources, "passed",
-                    )
-                market_sources_available = any(
-                    source.status in {"success", "partial"} and source.payload is not None
-                    for source in result.context.sources
-                )
-                market_fallback_required = intent_analysis.category == "market_analysis" and (
+                market_fallback_required = (
                     (is_market_request and state.market_evidence_status == "failed")
-                    or (not is_market_request and not market_sources_available)
+                    or (intent_analysis.category == "market_analysis"
+                        and not is_market_request and not market_sources_available)
                 )
                 if (route.intent == "market_recap" and state.required_sources_missing
                         and state.market_evidence_status == "partial"):
@@ -3672,16 +3759,31 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     answer_question += "\n\n服务端限制：行情证据仅覆盖列明的主体、日期和来源；不得推断未覆盖时段或把指数样本表述为整体市场广度。"
                 _supplement_context.current = {"session_id": sid, "payload": None}
                 try:
-                    yield from chat_qa.answer_from_context(
-                        answer_question, context=answer_context, history=history, scope=scope,
-                        run_id=run_id, allow_supplement=(
+                    answer_from_context = chat_qa.answer_from_context
+                    answer_kwargs = dict(
+                        context=answer_context, history=history, scope=scope, run_id=run_id,
+                        allow_supplement=(
                             result.context.required_missing
                             and any(step.kind == "retrieve" and step.required for step in planning.plan.steps)
                             and all(source.category == "local" or source.status == "success"
                                     for source in result.context.sources)
                         ),
-                        market_analysis=intent_analysis.category == "market_analysis",
+                        market_analysis=(intent_analysis.category == "market_analysis" or is_market_request),
                     )
+                    try:
+                        answer_parameters = inspect.signature(answer_from_context).parameters
+                    except (TypeError, ValueError):
+                        answer_parameters = {}
+                    accepts_answer_kwargs = any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in answer_parameters.values()
+                    )
+                    if is_market_request and (accepts_answer_kwargs or "market_intent" in answer_parameters):
+                        answer_kwargs["market_intent"] = route.intent
+                    if is_market_request and (accepts_answer_kwargs or "market_window" in answer_parameters):
+                        answer_kwargs["market_window"] = market_window
+                    state.market_answer_mode = is_market_request
+                    yield from answer_from_context(answer_question, **answer_kwargs)
                 finally:
                     _supplement_context.current = None
                 return
@@ -3917,7 +4019,38 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                     return
                 if state.done_payload is not None:
                     done_evt = state.done_payload
-                    answer = done_evt.get("answer") or ""
+                    answer_value = done_evt.get("answer")
+                    answer = answer_value if isinstance(answer_value, str) else ""
+                    market_claim_issues: tuple[VerificationIssue, ...] = ()
+                    if state.market_answer_mode:
+                        claim_errors: list[str] = []
+                        if state.market_draft_error or not isinstance(answer_value, str):
+                            claim_errors.append("invalid_market_draft")
+                            answer = ""
+                        else:
+                            try:
+                                draft = parse_market_answer_draft(json.dumps(
+                                    {"answer": answer, "claims": state.market_claims},
+                                    ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+                                ))
+                            except (TypeError, ValueError, OverflowError):
+                                claim_errors.append("invalid_market_draft")
+                                answer = ""
+                            else:
+                                answer = draft.answer
+                                validation = validate_market_answer_claims(
+                                    draft, sources=state.market_visible_sources,
+                                    existing_facts=state.market_visible_facts,
+                                    scope=scope, window=market_window, intent=route.intent,
+                                )
+                                claim_errors.extend(validation.rejected)
+                                known_ids = {fact.id for fact in state.facts}
+                                for fact in validation.facts:
+                                    if fact.id not in known_ids:
+                                        state.facts.append(fact)
+                                        known_ids.add(fact.id)
+                                        yield _sse("fact", {"fact": fact.to_dict()})
+                        market_claim_issues = _market_claim_issues(claim_errors)
                     if (route.intent == "market_recap" and state.required_sources_missing
                             and state.market_evidence_status == "partial"):
                         fallback = _verified_market_fallback()
@@ -3948,6 +4081,16 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                         requested_period=verification_period, window=market_window,
                         answer_intent=route.intent,
                     )
+                    if market_claim_issues:
+                        combined_issues = list(state.verification_report.issues)
+                        known_issue_keys = {(issue.code, issue.severity) for issue in combined_issues}
+                        combined_issues.extend(
+                            issue for issue in market_claim_issues
+                            if (issue.code, issue.severity) not in known_issue_keys
+                        )
+                        state.verification_report = VerificationReport(
+                            "blocked", tuple(combined_issues), state.verification_report.supported_fact_ids,
+                        )
                     if state.verification_report.status == "blocked":
                         issue_codes = sorted({issue.code for issue in state.verification_report.issues})
                         logger.warning("chat_run_verification_blocked run_id=%s issue_codes=%s",
@@ -4003,6 +4146,8 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                                 if coverage_note not in answer:
                                     answer = answer.rstrip() + "\n\n" + coverage_note
                     run = _persist(status, answer)
+                    if state.market_answer_mode and answer:
+                        yield _sse("delta", {"text": answer})
                     yield _sse("done", {
                         "answer": answer,
                         "citations": legacy_citations,
