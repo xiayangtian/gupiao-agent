@@ -1998,6 +1998,28 @@ class TestChatSessionsApi:
         r2 = client.delete(f"/api/chat/sessions/{s['id']}")
         assert r2.status_code == 404
 
+    def test_batch_delete_sessions_limit_matches_frontend_batch_size(self, client, env, monkeypatch):
+        class FakeChatStore:
+            def __init__(self):
+                self.deleted = []
+
+            def delete_session(self, sid):
+                self.deleted.append(sid)
+                return True
+
+        store = FakeChatStore()
+        monkeypatch.setattr(server, "chat_store", store)
+        ids = [f"session-{index}" for index in range(101)]
+
+        oversized = client.post("/api/chat/sessions/batch-delete", json={"session_ids": ids})
+        assert oversized.status_code == 422
+        assert store.deleted == []
+
+        accepted = client.post("/api/chat/sessions/batch-delete", json={"session_ids": ids[:100]})
+        assert accepted.status_code == 200
+        assert accepted.json()["deleted_session_ids"] == ids[:100]
+        assert store.deleted == ids[:100]
+
     def test_chat_stream_without_session_starts_new_session(self, client, env, monkeypatch, tmp_path):
         """流式提问未传 session_id：创建独立会话，不消费预建空会话"""
         from webapp.chat_store import ChatStore

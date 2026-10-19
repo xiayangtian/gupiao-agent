@@ -1275,6 +1275,84 @@ def test_clear_chat_history_destroys_market_charts_before_clearing_dom():
     assert result['events'] == ['destroy', 'clear']
 
 
+def test_bulk_session_delete_batches_requests_within_server_limit():
+    result = _run_node(
+        f"""
+        const fs = require('fs'), vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('async function deleteSelectedChatSessions()');
+        const end = src.indexOf('async function renameChatSession', start);
+        const ids = Array.from({{length:205}}, (_, i) => 'session-' + i);
+        const calls = [], alerts = [];
+        const sandbox = {{
+          selectedChatSessionIds: new Set(ids), chatStreams: {{}}, chatSessionId: 'not-selected',
+          confirm: () => true, clearChatHistory: () => {{}}, loadChatSessions: async () => {{}},
+          alert: message => alerts.push(message),
+          fetch: async (_url, options) => {{
+            const sessionIds = JSON.parse(options.body).session_ids;
+            calls.push(sessionIds.length);
+            const ok = sessionIds.length <= 100;
+            return {{ok, status: ok ? 200 : 422,
+              json: async () => ({{deleted_session_ids: sessionIds, missing_session_ids: []}})}};
+          }}
+        }};
+        (async () => {{
+          if (start < 0 || end < 0) {{ console.log(JSON.stringify({{available:false}})); return; }}
+          vm.createContext(sandbox);
+          vm.runInContext(src.slice(start, end), sandbox);
+          await sandbox.deleteSelectedChatSessions();
+          console.log(JSON.stringify({{available:true, calls, alerts}}));
+        }})().catch(error => {{ console.error(error); process.exitCode = 1; }});
+        """
+    )
+    assert result == {"available": True, "calls": [100, 100, 5], "alerts": ["已删除 205 个会话。"]}
+
+
+def test_bulk_session_delete_preserves_retryable_ids_after_partial_failure():
+    result = _run_node(
+        f"""
+        const fs = require('fs'), vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(APP_JS))}, 'utf8');
+        const start = src.indexOf('async function deleteSelectedChatSessions()');
+        const end = src.indexOf('async function renameChatSession', start);
+        const ids = Array.from({{length:205}}, (_, i) => 'session-' + i);
+        const calls = [], alerts = [];
+        let clearCount = 0, reloadCount = 0, cancelCount = 0;
+        const sandbox = {{
+          selectedChatSessionIds: new Set(ids), chatSessionId: ids[0],
+          chatStreams: {{[ids[0]]: {{reader: {{cancel: () => {{ cancelCount++; return Promise.resolve(); }}}}}}}},
+          confirm: () => true, clearChatHistory: () => {{ clearCount++; }},
+          loadChatSessions: async () => {{ reloadCount++; }}, alert: message => alerts.push(message),
+          fetch: async (_url, options) => {{
+            const sessionIds = JSON.parse(options.body).session_ids;
+            calls.push(sessionIds.length);
+            const ok = calls.length === 1;
+            return {{ok, status: ok ? 200 : 500,
+              json: async () => ({{deleted_session_ids: sessionIds, missing_session_ids: []}})}};
+          }}
+        }};
+        (async () => {{
+          vm.createContext(sandbox);
+          vm.runInContext(src.slice(start, end), sandbox);
+          await sandbox.deleteSelectedChatSessions();
+          console.log(JSON.stringify({{
+            calls, alerts, remaining: sandbox.selectedChatSessionIds.size,
+            current: sandbox.chatSessionId, clearCount, reloadCount, cancelCount
+          }}));
+        }})().catch(error => {{ console.error(error); process.exitCode = 1; }});
+        """
+    )
+    assert result == {
+        "calls": [100, 100],
+        "alerts": ["已删除 100 个会话；剩余 105 个未处理。批量删除失败：HTTP 500"],
+        "remaining": 105,
+        "current": None,
+        "clearCount": 1,
+        "reloadCount": 1,
+        "cancelCount": 1,
+    }
+
+
 def test_chat_user_facing_copy_avoids_internal_terms_and_names_actions_clearly():
     result = _run_node(
         f"""

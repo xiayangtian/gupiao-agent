@@ -2479,18 +2479,44 @@ function clearChatHistory() {
 async function deleteSelectedChatSessions() {
   var ids = Array.from(selectedChatSessionIds);
   if (!ids.length || !confirm('确定删除所选 ' + ids.length + ' 个历史会话？删除后不可恢复。')) return;
-  try {
-    var res = await fetch('/api/chat/sessions/batch-delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({session_ids: ids}) });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    var result = await res.json();
-    ids.forEach(function(sid) { var st = chatStreams[sid]; if (st && st.reader) st.reader.cancel().catch(function() {}); delete chatStreams[sid]; });
-    if (ids.indexOf(chatSessionId) >= 0) { chatSessionId = null; clearChatHistory(); }
-    selectedChatSessionIds.clear();
-    await loadChatSessions();
-    if (result.deleted_session_ids.length) alert('已删除 ' + result.deleted_session_ids.length + ' 个会话。');
-  } catch (err) {
-    alert('批量删除失败：' + (err && err.message ? err.message : '请稍后重试。'));
+  var deletedSessionIds = [], missingSessionIds = [], requestError = null;
+  // Keep this batch size aligned with DeleteSessionsRequest.max_length on the server.
+  for (var offset = 0; offset < ids.length; offset += 100) {
+    var batchIds = ids.slice(offset, offset + 100);
+    try {
+      var res = await fetch('/api/chat/sessions/batch-delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({session_ids: batchIds}) });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var result = await res.json();
+      deletedSessionIds = deletedSessionIds.concat(result.deleted_session_ids || []);
+      missingSessionIds = missingSessionIds.concat(result.missing_session_ids || []);
+    } catch (err) {
+      requestError = err;
+      break;
+    }
   }
+
+  var resolvedSessionIds = deletedSessionIds.concat(missingSessionIds);
+  resolvedSessionIds.forEach(function(sid) {
+    var st = chatStreams[sid];
+    if (st && st.reader) st.reader.cancel().catch(function() {});
+    delete chatStreams[sid];
+    selectedChatSessionIds.delete(sid);
+  });
+  if (resolvedSessionIds.indexOf(chatSessionId) >= 0) { chatSessionId = null; clearChatHistory(); }
+  if (resolvedSessionIds.length) await loadChatSessions();
+
+  if (requestError) {
+    if (deletedSessionIds.length) {
+      alert('已删除 ' + deletedSessionIds.length + ' 个会话；剩余 ' + (ids.length - resolvedSessionIds.length) + ' 个未处理。批量删除失败：' + (requestError.message || '请稍后重试。'));
+    } else {
+      alert('批量删除失败：' + (requestError.message || '请稍后重试。'));
+    }
+    return;
+  }
+
+  selectedChatSessionIds.clear();
+  if (!resolvedSessionIds.length) await loadChatSessions();
+  if (deletedSessionIds.length) alert('已删除 ' + deletedSessionIds.length + ' 个会话。');
 }
 
 async function renameChatSession(sid) {
