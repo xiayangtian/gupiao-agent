@@ -61,10 +61,10 @@
 ```
 
 - 支持两种证据锚点：已存在并由服务端生成的 `fact_id`，或当前 run 的 `source_id` 加 `value_pointer`。二者只能选一；原始来源引用可带身份/时间指针，若来源响应不含这些字段则用服务端绑定的请求主体和来源 `as_of`，二者均不能确认时拒绝该 claim。
-- schema 校验禁止未知顶层/claim 字段、非有限数值、布尔数值、空 ID、非 ISO 日期、未知 `period_kind`/`entity_scope`、过长字符串/数组、缺少单位或来源锚点。claim 的可选公式只能是服务端白名单标识。
+- schema 校验禁止未知顶层/claim 字段、非有限数值、布尔数值、空 ID、非 ISO 日期、未知 `period_kind`/`entity_scope`、过长字符串/数组、缺少单位或来源锚点。claim 的可选公式只能是服务端白名单标识；只有 `fact_id` 锚点可携带公式，原始来源 pointer 不能声称已计算派生指标。
 - JSON Pointer 支持 RFC 6901 `~0` / `~1` 解码，仅遍历 dict/list；拒绝空路径、越界、标量中间节点、`__proto__`/`prototype`/`constructor`、超深路径及指向字符串/缺失值。数值节点必须是有限 `int`/`float` 且非 `bool`。
 - 通用检验只比较原始数值与 claim 值（允许单位固定换算和有限舍入容差）；检查请求绑定/返回身份与冻结 Scope、来源 `as_of`/数据日期与请求窗口、market intent 的通用 metric/unit 组合。字段含义本身若没有来源元数据或稳定语义锚点，不能因为数字相同就推断语义正确，须返回 partial/unsupported。
-- 通过的来源引用构造成现有 `Fact`，其 evidence ID 含 `source_id` 与已解析路径；既有 `Fact` 引用直接使用服务端已生成事实。最终答案仍必须通过 `ClaimVerifier` 对正文数字、范围及市场意图的检查。
+- 原始来源引用仅可生成非派生数值 Fact。涨跌额、涨跌幅等派生指标只能引用同一 run 已由服务端公式计算、且输入 Fact/公式 lineage 完整的 Fact；不得把供应商直接返回的 `change`/`change_pct` 字段当作已由本程序复算。已存在的派生 Fact 引用需确认其所有 `derived_from_ids` 均在当前 Fact 集内。最终答案仍必须通过 `ClaimVerifier` 对正文数字、范围及市场意图的检查。
 
 ---
 
@@ -83,13 +83,13 @@
 - `validate_market_answer_claims(draft, *, sources, existing_facts, scope, window, intent) -> MarketClaimValidation`：仅返回通过核对的 `Fact`、被拒条目错误码和 `passed|partial|blocked`；不会调用来源。
 - `MarketAnswerDraft(answer: str, claims: tuple[MarketClaim, ...])`；`MarketClaimValidation(facts: tuple[Fact, ...], rejected: tuple[str, ...], status: str)` 是新模块内部冻结 dataclass。
 
-- [ ] **Step 1: 写拒绝无效证据引用的失败测试**：新建 `tests/unit/test_market_answer_evidence.py`，使用现有 `SourceResult`/`SourceCoverage` fixture 建立最小腾讯报价和错误响应。覆盖非法 JSON、未知字段、claim 缺字段、`NaN`、bool value、坏 JSON Pointer、超界数组、危险属性名、未知 source ID、失败来源、来源外路径。
-- [ ] **Step 2: 运行单测确认失败**：`pytest tests/unit/test_market_answer_evidence.py -q`；预期因模块/接口不存在失败。
-- [ ] **Step 3: 先测试来源请求绑定**：在 `tests/unit/test_source_adapters.py` 增加一条固定 `SourceCall(provider="tencent", operation="quote", arguments={"symbol": "sh601398"})` 通过 `normalize_source` 后携带 `request_context["symbol"] == "sh601398"` 的测试；测试 web/search 来源不保存 query 字符串。
-- [ ] **Step 4: 最小实现来源绑定及 JSON Pointer 解析**：增加 `SourceResult.request_context` 默认空映射，在创建来源结果时仅复制行情 allowlist（`symbol`/`symbols`/`start_date`/`end_date`/`period`）；调用结果 payload 行数与字符限制保持原值；新模块实现受限路径解析和严格 schema。
-- [ ] **Step 5: 写通过/拒绝 claim 核验测试**：给定 source `call_id="call-1"`, `as_of="2026-10-19 14:55:00"`, 请求 symbol `sh601398`, payload `({"symbol":"sh601398","price":8.59,"time":"2026-10-19 14:55:00"},)`，验证 `price=8.59` 和 code/date 一致可构造 Fact；再逐一替换成 `600519`、`2026-10-16`、`8.95`、`元/手`、无身份字段且无 request binding，均拒绝。覆盖来源格式变更为 `{"ticker":"601398","last":8.59,"quote_time":"2026-10-19 14:55:00"}` 时模型可用不同 pointers 指向同值；但字段语义没有可靠锚点时按设计降级，而不是以相同数值放行。
-- [ ] **Step 6: 实现单位、主体、时点和公式白名单**：只接受 metric-specific 允许单位和有限容差；实现已有设计所需的涨跌额、涨跌幅复算（仅使用实际前交易日同主体、同口径输入）；只接受命名公式 `price_change` / `price_change_pct`，绝不执行表达式字符串。
-- [ ] **Step 7: 运行两个聚焦文件**：`pytest tests/unit/test_market_answer_evidence.py tests/unit/test_source_adapters.py -q`；预期全部通过。
+- [x] **Step 1: 写拒绝无效证据引用的失败测试**：新建 `tests/unit/test_market_answer_evidence.py`，使用现有 `SourceResult`/`SourceCoverage` fixture 建立最小腾讯报价和错误响应。覆盖非法 JSON、未知字段、claim 缺字段、`NaN`、bool value、坏 JSON Pointer、超界数组、危险属性名、未知 source ID、失败来源、来源外路径。
+- [x] **Step 2: 运行单测确认失败**：`pytest tests/unit/test_market_answer_evidence.py -q`；预期因模块/接口不存在失败。
+- [x] **Step 3: 先测试来源请求绑定**：在 `tests/unit/test_source_adapters.py` 增加一条固定 `SourceCall(provider="tencent", operation="quote", arguments={"symbol": "sh601398"})` 通过 `normalize_source` 后携带 `request_context["symbol"] == "sh601398"` 的测试；测试 web/search 来源不保存 query 字符串。
+- [x] **Step 4: 最小实现来源绑定及 JSON Pointer 解析**：增加 `SourceResult.request_context` 默认空映射，在创建来源结果时仅复制行情 allowlist（`symbol`/`symbols`/`start_date`/`end_date`/`period`）；调用结果 payload 行数与字符限制保持原值；新模块实现受限路径解析和严格 schema。
+- [x] **Step 5: 写通过/拒绝 claim 核验测试**：给定 source `call_id="call-1"`, `as_of="2026-10-19 14:55:00"`, 请求 symbol `sh601398`, payload `({"symbol":"sh601398","price":8.59,"time":"2026-10-19 14:55:00"},)`，验证 `price=8.59` 和 code/date 一致可构造 Fact；再逐一替换成 `600519`、`2026-10-16`、`8.95`、`元/手`、无身份字段且无 request binding，均拒绝。覆盖来源格式变更为 `{"ticker":"601398","last":8.59,"quote_time":"2026-10-19 14:55:00"}` 时模型可用不同 pointers 指向同值；但字段语义没有可靠锚点时按设计降级，而不是以相同数值放行。
+- [x] **Step 6: 实现单位、主体、时点和派生 lineage 白名单**：只接受 metric-specific 允许单位和有限容差；原始来源 pointer 不生成涨跌额/涨跌幅等派生指标 Fact，也不接受供应商直接返回的派生字段作为复算结果；这些指标只允许引用当前 run 已生成、使用实际前交易日同主体同口径输入、且所有 `derived_from_ids` 均可解析的服务端 Fact；模型传入的公式字符串不执行。
+- [x] **Step 7: 运行两个聚焦文件**：`pytest tests/unit/test_market_answer_evidence.py tests/unit/test_source_adapters.py -q`；预期全部通过。
 - [ ] **Step 8: 提交该任务**：只 stage 上述新模块和两个测试/源模型实现文件；commit `feat: validate market answer source references`。
 
 ### Task 2: 为行情回答增加结构化草稿，并保持非行情流原样
