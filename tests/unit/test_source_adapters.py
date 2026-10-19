@@ -262,7 +262,24 @@ def test_tencent_quote_nested_bid_ask_keeps_only_scalar_market_fields():
     assert "bid_ask" not in result.payload[0]
 
 
+def test_source_result_carries_only_safe_server_market_request_context():
+    from webapp.source_adapters import normalize_source
+    from webapp.source_runtime import SourceCall
+
+    market = normalize_source(SourceCall("tencent", "quote", "market", {
+        "symbol": "sh601398", "request_token": "must-not-be-retained",
+    }), {"data": [{"symbol": "sh601398", "price": 8.59, "time": "2026-10-19 14:55:00"}]})
+    web = normalize_source(SourceCall("web", "search", "web", {
+        "query": "长江电力 private-query",
+    }), {"results": [{"url": "https://example.test/a", "title": "headline"}]})
+
+    assert getattr(market, "request_context", None) == {"symbol": "sh601398"}
+    assert getattr(web, "request_context", None) == {}
+    assert "private-query" not in str(getattr(web, "request_context", {}))
+
+
 def test_baostock_access_is_opt_in_and_restricted_to_fixed_daily_index_calls():
+
     from webapp.source_adapters import SourceAccess
     from webapp.source_runtime import SourceCall
 

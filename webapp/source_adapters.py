@@ -10,7 +10,7 @@ from datetime import date, datetime
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
-from webapp.source_runtime import SourceCall, SourceCoverage, SourceResult
+from webapp.source_runtime import SourceCall, SourceCoverage, SourceResult, market_request_context
 
 MAX_SOURCE_CHARS = 2000
 MAX_ROWS = 50
@@ -295,7 +295,8 @@ def normalize_source(call: SourceCall, raw: Any, *, fetched_at: str = "") -> Sou
             status = str(value["status"])
         return SourceResult("", call.provider, call.operation, call.category, status,
                             content=content, as_of=as_of, fetched_at=fetched_at,
-                            payload=payload, coverage=coverage)
+                            payload=payload, coverage=coverage,
+                            request_context=market_request_context(call))
     except ValueError as exc:
         raw_text = raw if isinstance(raw, str) else ""
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]

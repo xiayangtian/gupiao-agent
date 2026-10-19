@@ -45,7 +45,27 @@ def test_web_query_arguments_are_safely_attached_to_each_source_result():
     assert json.loads(result.arguments_summary) == {"query": "长江电力 api_key=[已隐藏]"}
 
 
+def test_market_request_context_is_derived_from_authorized_call_not_invoker_result():
+    from webapp.chat_models import Scope
+    from webapp.source_runtime import CallBudget, SourceCall, SourceResult, SourceRuntime
+
+    runtime = SourceRuntime(Scope.whole_corpus(), CallBudget(1, 1, 1), lambda call: True)
+    call = SourceCall("tencent", "quote", "market", {
+        "symbol": "sh601398", "request_token": "must-not-be-retained",
+    })
+    supplied = SourceResult(
+        "", "fixture", "quote", "market", "success",
+        request_context={"symbol": "sh600519"},
+    )
+    result = runtime.call(call, lambda: supplied)
+
+    assert dict(result.request_context) == {"symbol": "sh601398"}
+    with pytest.raises(TypeError):
+        result.request_context["symbol"] = "sh600519"
+
+
 def test_failed_attempt_consumes_budget_and_is_cached():
+
     from webapp.chat_models import Scope
     from webapp.source_runtime import CallBudget, SourceCall, SourceResult, SourceRuntime
 
