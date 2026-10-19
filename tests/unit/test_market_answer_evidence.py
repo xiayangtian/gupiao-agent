@@ -50,6 +50,8 @@ def _market_source(**changes):
         "request_context": {"symbol": "sh601398"},
     }
     values.update(changes)
+    if "content" not in changes and values.get("payload") is not None:
+        values["content"] = json.dumps(values["payload"], ensure_ascii=False, separators=(",", ":"))
     if "request_context" not in {item.name for item in fields(SourceResult)}:
         values.pop("request_context", None)
     return SourceResult(**values)
@@ -119,7 +121,23 @@ def test_market_claim_mismatch_is_rejected(source, claim_changes):
     assert result.rejected
 
 
+def test_model_cannot_cite_payload_rows_not_visible_in_the_bounded_source_snapshot():
+    api = _api()
+    from webapp.chat_models import Scope
+
+    hidden = _market_source(content='{"returned_rows":800,"sampled_bars":[]}')
+    draft = api.parse_market_answer_draft(json.dumps(_draft(), ensure_ascii=False))
+    result = api.validate_market_answer_claims(
+        draft, sources=(hidden,), existing_facts=(),
+        scope=Scope.company_only("601398", "工商银行"), window=None, intent="market_quote",
+    )
+
+    assert result.status == "blocked"
+    assert result.rejected == ("source_snapshot_not_visible",)
+
+
 def test_market_claim_cannot_cross_run_missing_path_or_requested_window():
+
     api = _api()
     from datetime import date
     from types import SimpleNamespace

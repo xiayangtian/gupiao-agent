@@ -277,6 +277,24 @@ def _build_fact(claim: MarketClaim, value: float, source: SourceResult) -> Fact:
     )
 
 
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _source_snapshot_is_visible(source: SourceResult) -> bool:
+    if source.payload is None or not source.content:
+        return False
+    try:
+        visible_payload = json.loads(source.content)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return visible_payload == _jsonable(source.payload)
+
+
 def _validate_source_claim(
     claim: MarketClaim, sources: Sequence[SourceResult], scope: Scope, window: Any,
 ) -> tuple[Fact | None, str]:
@@ -285,6 +303,8 @@ def _validate_source_claim(
         return None, "unresolved_source_reference"
     if claim.metric in _SERVER_DERIVED_METRICS:
         return None, "derived_metric_requires_server_fact"
+    if not _source_snapshot_is_visible(source):
+        return None, "source_snapshot_not_visible"
     if not _scope_allows(scope, claim.company_code):
         return None, "market_identity_mismatch"
     allowed_units = _MARKET_UNITS.get(claim.metric)
