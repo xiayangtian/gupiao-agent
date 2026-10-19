@@ -306,7 +306,7 @@ def derive_available_facts(
 
 
 def facts_from_market_result(result: SourceResult, artifact: ToolArtifact) -> tuple[Fact, ...]:
-    """Extract bounded market facts from approved Tencent/AkShare operations only."""
+    """Extract bounded market facts from approved Tencent/AkShare/BaoStock operations only."""
     if not isinstance(result, SourceResult) or not isinstance(artifact, ToolArtifact):
         return ()
     if (result.provider == "akshare" and result.operation == "a_share_market_snapshot"
@@ -359,7 +359,8 @@ def facts_from_market_result(result: SourceResult, artifact: ToolArtifact) -> tu
 
     tencent_kline = result.provider == "tencent" and result.operation == "kline"
     akshare_index_kline = result.provider == "akshare" and result.operation == "a_share_index_kline"
-    if (not (tencent_kline or akshare_index_kline)
+    baostock_index_kline = result.provider == "baostock" and result.operation == "a_share_index_kline"
+    if (not (tencent_kline or akshare_index_kline or baostock_index_kline)
             or result.status not in {"success", "partial"}
             or artifact.provider != result.provider or artifact.tool_name != result.operation
             or artifact.status not in {"success", "partial"}
@@ -384,7 +385,7 @@ def facts_from_market_result(result: SourceResult, artifact: ToolArtifact) -> tu
                 or not coverage_bounds[0] <= date.fromisoformat(period) <= coverage_bounds[1]
                 or date.fromisoformat(period) > date.fromisoformat(result.as_of[:10])
                 or isinstance(close, bool) or not isinstance(close, (int, float))
-                or not isfinite(close) or close < 0):
+                or not isfinite(close) or close <= 0):
             continue
         is_index = symbol[:2].casefold() in {"sh", "sz"}
         facts.append(Fact(

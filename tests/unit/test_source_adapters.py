@@ -224,3 +224,51 @@ def test_market_pool_at_limit_does_not_claim_total_completeness():
     assert result.coverage.limit == 50
     assert result.coverage.total_rows is None
     assert "已达到返回上限，总量未知" in result.coverage.summary()
+
+
+def test_tencent_quote_nested_bid_ask_keeps_only_scalar_market_fields():
+    from webapp.source_runtime import SourceCall
+    from webapp.source_adapters import normalize_source
+
+    result = normalize_source(SourceCall("tencent", "quote", "market", {"symbol": "600900"}), {
+        "data": [{
+            "symbol": "sh600900", "code": "600900", "name": "长江电力",
+            "price": 27.3, "change": 0.3, "change_pct": 1.11,
+            "time": "2026-10-19 14:10:00",
+            "bid_ask": {"bid1": {"price": 27.3, "volume": 1200}},
+        }],
+    })
+
+    assert result.status == "success"
+    assert result.payload[0]["price"] == 27.3
+    assert result.payload[0]["change_pct"] == 1.11
+    assert "bid_ask" not in result.payload[0]
+
+
+def test_baostock_access_is_opt_in_and_restricted_to_fixed_daily_index_calls():
+    from webapp.source_adapters import SourceAccess
+    from webapp.source_runtime import SourceCall
+
+    common = dict(
+        mcp_enabled=False, listed_tools=frozenset(), whitelist=frozenset(),
+        mcp_allow=lambda: False, web_enabled=False, tencent_enabled=False,
+        akshare_enabled=True,
+    )
+    call = SourceCall("baostock", "a_share_index_kline", "market", {
+        "symbol": "sh000001", "start_date": "2026-10-15", "end_date": "2026-10-16",
+    })
+    assert not SourceAccess(**common).permits(call)
+
+    access = SourceAccess(**common, baostock_enabled=True)
+    assert access.permits(call)
+    assert not access.permits(SourceCall("baostock", "a_share_index_kline", "web", call.arguments))
+    assert not access.permits(SourceCall("baostock", "a_share_market_snapshot", "market", call.arguments))
+    assert not access.permits(SourceCall("baostock", "a_share_index_kline", "market", {
+        "symbol": "600900", "start_date": "2026-10-15", "end_date": "2026-10-16",
+    }))
+    assert not access.permits(SourceCall("baostock", "a_share_index_kline", "market", {
+        "symbol": "sh000001", "start_date": "2026-10-01", "end_date": "2026-10-16",
+    }))
+    assert not access.permits(SourceCall("baostock", "a_share_index_kline", "market", {
+        **call.arguments, "adjust": "qfq",
+    }))

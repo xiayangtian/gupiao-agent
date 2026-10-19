@@ -115,3 +115,25 @@ def test_company_recent_trend_forces_quote_and_kline_not_indices():
     result = planner.plan("分析长江电力近期走势", scope, PlanningCapabilities({"market_quote", "market_kline", "market_indices"}, 2))
     assert result.plan is not None
     assert [step.kind for step in result.plan.steps] == ["market_quote", "market_kline", "answer"]
+
+
+def test_daily_market_recap_planning_accounts_for_twelve_index_attempts_and_optional_overview():
+    from webapp.execution_planner import safe_market_plan
+
+    available = {"market_indices", "market_overview"}
+    costs = {"market_indices": 12, "market_overview": 3}
+
+    full = safe_market_plan("market_recap", available, 15, step_costs=costs)
+    assert full is not None
+    assert [step.kind for step in full.steps] == ["market_indices", "market_overview", "answer"]
+
+    without_overview = safe_market_plan("market_recap", available, 14, step_costs=costs)
+    assert without_overview is not None
+    assert [step.kind for step in without_overview.steps] == ["market_indices", "answer"]
+
+    constrained = safe_market_plan(
+        "market_recap", available, 6,
+        step_costs={"market_indices": 6, "market_overview": 3},
+    )
+    assert constrained is not None
+    assert [step.kind for step in constrained.steps] == ["market_indices", "answer"]

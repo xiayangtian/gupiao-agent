@@ -595,8 +595,18 @@ def test_answer_stream_tool_limit_says_it_resets_on_the_next_question(tmp_path, 
     )
 
 
-def test_default_tool_call_limit_is_ten_for_broad_daily_market_questions():
+def test_default_tool_call_limits_keep_regular_requests_at_ten_and_daily_recap_at_fifteen():
     assert RagConfig().mcp_max_tool_calls == 10
+    assert RagConfig().market_recap_max_tool_calls == 15
+
+
+def test_rag_config_loads_lower_recap_budget_override(monkeypatch):
+    from financial_report_fetcher.rag import config as rag_config_module
+
+    monkeypatch.setattr(rag_config_module, "_load_yaml", lambda: {
+        "rag": {"market_recap_max_tool_calls": 6},
+    })
+    assert rag_config_module.RagConfig.load().market_recap_max_tool_calls == 6
 
 
 def test_answer_stream_emits_stages_and_web_sources_across_rounds(tmp_path, fake_embedder):

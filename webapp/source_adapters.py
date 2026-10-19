@@ -25,6 +25,7 @@ class SourceAccess:
     web_enabled: bool
     tencent_enabled: bool
     akshare_enabled: bool = False
+    baostock_enabled: bool = False
 
     def permits(self, call: SourceCall) -> bool:
         if call.provider == "mcp":
@@ -64,6 +65,22 @@ class SourceAccess:
                     return False
                 return start <= end and (end - start).days <= 14
             return False
+        if call.provider == "baostock":
+            if (not self.baostock_enabled or call.category != "market"
+                    or call.operation != "a_share_index_kline"
+                    or set(call.arguments) != {"symbol", "start_date", "end_date"}
+                    or call.arguments.get("symbol") not in {"sh000001", "sz399001", "sz399006", "sh000688"}):
+                return False
+            start_raw, end_raw = call.arguments.get("start_date"), call.arguments.get("end_date")
+            try:
+                if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+                    return False
+                start, end = date.fromisoformat(start_raw), date.fromisoformat(end_raw)
+                if start.isoformat() != start_raw or end.isoformat() != end_raw:
+                    return False
+            except ValueError:
+                return False
+            return start <= end and (end - start).days <= 14
         if call.category == "local":
             return True
         return False
@@ -87,6 +104,35 @@ def _parse(raw: Any) -> Any:
         except (json.JSONDecodeError, ValueError):
             raise ValueError("unsupported_payload") from None
     return raw
+
+
+_TENCENT_QUOTE_SCALAR_FIELDS = frozenset({
+    "symbol", "code", "name", "price", "prev_close", "open", "volume", "time",
+    "change", "change_pct", "high", "low", "amount_wan", "turnover_rate", "pe",
+    "float_mv_yi", "total_mv_yi", "pb", "limit_up", "limit_down",
+})
+_TENCENT_QUOTE_ROW_KEYS = ("data", "results", "rows", "quotes")
+
+
+def _project_tencent_quote(value: Any) -> Any:
+    """Discard Tencent's nested order book while retaining known scalar quote fields."""
+    def project_row(row: Any) -> Any:
+        if not isinstance(row, Mapping):
+            return row
+        return {key: cell for key, cell in row.items()
+                if key in _TENCENT_QUOTE_SCALAR_FIELDS and _safe_cell(cell)}
+
+    if isinstance(value, list):
+        return [project_row(row) for row in value]
+    if not isinstance(value, Mapping):
+        return value
+    projected = {key: value[key] for key in ("as_of", "date", "trade_date")
+                 if key in value and _safe_cell(value[key])}
+    for key in _TENCENT_QUOTE_ROW_KEYS:
+        if isinstance(value.get(key), list):
+            projected[key] = [project_row(row) for row in value[key]]
+            return projected
+    return project_row(value)
 
 
 def _extract_rows(value: Any, *, row_limit: int = MAX_ROWS) -> tuple[list[dict[str, Any]], str]:
@@ -160,7 +206,7 @@ def _request_coverage(call: SourceCall) -> SourceCoverage:
         raw_window = arguments.get("window") or arguments.get("period")
         if isinstance(raw_window, str) and len(raw_window) <= 40:
             query_window = raw_window
-    elif call.provider == "akshare" and call.operation == "a_share_index_kline":
+    elif call.provider in {"akshare", "baostock"} and call.operation == "a_share_index_kline":
         start, end = arguments.get("start_date"), arguments.get("end_date")
         if isinstance(start, str) and isinstance(end, str) and len(start) == len(end) == 10:
             query_window = f"{start}至{end}"
@@ -209,6 +255,8 @@ def normalize_source(call: SourceCall, raw: Any, *, fetched_at: str = "") -> Sou
     base_coverage = _request_coverage(call)
     try:
         value = _parse(raw)
+        if call.provider == "tencent" and call.operation == "quote":
+            value = _project_tencent_quote(value)
         if isinstance(value, Mapping) and (value.get("error") or value.get("success") is False):
             return SourceResult("", call.provider, call.operation, call.category, "failed",
                                 fetched_at=fetched_at, error_code="provider_error", coverage=base_coverage)

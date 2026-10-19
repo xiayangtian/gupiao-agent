@@ -24,14 +24,21 @@ class SourceProjection:
 
 
 def build_source_runtime(*, scope: Scope, policy: object, cfg: object, use_mcp: bool,
-                         source_mode: str, access: SourceAccess, control: object | None = None) -> SourceRuntime:
+                         source_mode: str, access: SourceAccess, control: object | None = None,
+                         daily_recap: bool = False) -> SourceRuntime:
     configured = getattr(cfg, "mcp_max_tool_calls", 1)
     if isinstance(configured, bool) or not isinstance(configured, int):
         configured = 1
     policy_limit = getattr(policy, "max_calls", configured)
     if isinstance(policy_limit, bool) or not isinstance(policy_limit, int):
         policy_limit = configured
-    if source_mode == "market_recap":
+    if source_mode == "market_recap" and daily_recap:
+        recap_configured = getattr(cfg, "market_recap_max_tool_calls", 15)
+        if isinstance(recap_configured, bool) or not isinstance(recap_configured, int):
+            recap_configured = 1
+        total = min(max(0, recap_configured), 15)
+        market, web = total, min(total, 2)
+    elif source_mode == "market_recap":
         total = min(max(0, configured), 9)
         market, web = min(total, 7), min(total, 2)
     else:
@@ -161,7 +168,9 @@ def _matching_index_sources(
         for row in _source_rows(source):
             symbol = _row_symbol(row)
             if symbol in expected and _date_in_window(_source_date(source, row), window):
-                matches.setdefault(symbol, source)
+                existing = matches.get(symbol)
+                if existing is None or (existing.status != "success" and source.status == "success"):
+                    matches[symbol] = source
     return matches
 
 
@@ -286,7 +295,7 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
                         if result.category == "web" and result.fetched_at else ())
         if result.category == "local":
             continue
-        provider = result.provider if result.provider in {"mcp", "tencent", "akshare", "web", "local"} else "other"
+        provider = result.provider if result.provider in {"mcp", "tencent", "akshare", "baostock", "web", "local"} else "other"
         coverage_summary = result.coverage.summary()
         artifact_summary = (_source_result_summary(result) or
                             (result.content[:400] if status in {"success", "partial"} else result.error_code[:120]))
@@ -303,7 +312,7 @@ def project_sources(results: Sequence[SourceResult], scope: Scope) -> SourceProj
             source_id=result.call_id,
         )
         tools.append(artifact)
-        if result.provider in {"tencent", "akshare"}:
+        if result.provider in {"tencent", "akshare", "baostock"}:
             market_facts = facts_from_market_result(result, artifact)
             if result.provider == "tencent" and scope.mode != "whole_corpus":
                 allowed_codes = {company.code for company in scope.companies}

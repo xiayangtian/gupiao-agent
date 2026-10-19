@@ -686,6 +686,7 @@ def test_market_planner_failure_without_minimum_budget_stops_before_any_source(c
     monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "under-budget.json")))
     monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
         mcp_tools=False, web_search=False, mcp_max_tool_calls=3,
+        market_recap_max_tool_calls=3,
     )))
     monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
     source_calls = []
@@ -2100,8 +2101,14 @@ class TestChatSessionsApi:
         assert all("实际数据期 2026-09-24" in item["result_summary"] for item in run["tool_artifacts"])
         assert run["source_summary"]["market_data"] == "已使用"
 
-    def test_recap_asgi_executes_four_akshare_index_calls_and_authorized_full_market_snapshot(
-        self, client, env, monkeypatch, tmp_path,
+    @pytest.mark.parametrize(("akshare_available", "baostock_available", "expected_status", "tencent_partial", "recap_limit", "tencent_bad_previous"), [
+        (True, True, "completed", False, 15, False), (False, True, "completed", False, 15, False),
+        (False, False, "partial", False, 15, False), (True, True, "completed", True, 15, False),
+        (False, True, "partial", False, 4, False), (True, True, "completed", False, 15, True),
+    ])
+    def test_recap_asgi_falls_back_through_authorized_daily_index_sources(
+        self, client, env, monkeypatch, tmp_path, akshare_available, baostock_available,
+        expected_status, tencent_partial, recap_limit, tencent_bad_previous,
     ):
         from webapp.chat_store import ChatStore
         from webapp.execution_plan import ExecutionPlan
@@ -2109,35 +2116,76 @@ class TestChatSessionsApi:
         from financial_report_fetcher.rag.qa import RagQA
 
         monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "recap-sessions.json")))
+        if recap_limit != 15:
+            from financial_report_fetcher.rag.config import RagConfig
+            monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+                mcp_max_tool_calls=10, market_recap_max_tool_calls=recap_limit,
+            )))
         tencent_calls = []
         akshare_index_calls = []
+        baostock_index_calls = []
+        provider_call_order = []
         mcp_calls = []
+        snapshot_calls = []
         trade_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        def previous_trade_date():
+            previous_day = date.fromisoformat(trade_date) - timedelta(days=1)
+            while previous_day.weekday() >= 5:
+                previous_day -= timedelta(days=1)
+            return previous_day.isoformat()
         def fake_kline(symbol, *, period, count, adjust):
+            provider_call_order.append(("tencent", symbol))
             tencent_calls.append((symbol, period, count, adjust))
-            return []
+            if symbol == "sh000001":
+                if tencent_partial:
+                    return [{"date": trade_date, "close": 10.0, "symbol": symbol}]
+                if tencent_bad_previous:
+                    return [
+                        {"date": previous_trade_date(), "close": 0.0, "symbol": symbol},
+                        {"date": trade_date, "close": 10.0, "symbol": symbol},
+                    ]
+                return []
+            return [
+                {"date": previous_trade_date(), "close": 9.5, "symbol": symbol},
+                {"date": trade_date, "close": 10.0, "symbol": symbol},
+            ]
         def fake_index_kline(symbol, *, start_date, end_date):
+            provider_call_order.append(("akshare", symbol))
             akshare_index_calls.append((symbol, start_date, end_date))
-            previous_date = (date.fromisoformat(trade_date) - timedelta(days=1)).isoformat()
+            if not akshare_available:
+                return {"as_of": trade_date, "bars": []}
             return {"as_of": trade_date, "bars": [
-                {"date": previous_date, "close": 9.5, "symbol": symbol, "kline_period": "day"},
+                {"date": previous_trade_date(), "close": 9.5, "symbol": symbol, "kline_period": "day"},
+                {"date": trade_date, "close": 10.0, "symbol": symbol, "kline_period": "day"},
+            ]}
+        def fake_baostock_index_kline(symbol, *, start_date, end_date):
+            provider_call_order.append(("baostock", symbol))
+            baostock_index_calls.append((symbol, start_date, end_date))
+            if not baostock_available:
+                return {"as_of": trade_date, "bars": []}
+            return {"as_of": trade_date, "bars": [
+                {"date": previous_trade_date(), "close": 9.5, "symbol": symbol, "kline_period": "day"},
                 {"date": trade_date, "close": 10.0, "symbol": symbol, "kline_period": "day"},
             ]}
         def fake_mcp(name, arguments, *, timeout, retry):
             mcp_calls.append((name, dict(arguments), timeout, retry))
             return {"as_of": trade_date, "data": [{"date": trade_date, "symbol": "600001"}], "total_rows": 1}
-        monkeypatch.setattr(server, "get_market_snapshot", lambda day: {
-            "status": "success", "trade_date": day, "as_of": day + "T15:05:00+08:00",
-            "universe_rows": 5000, "unique_security_rows": 5000, "classified_rows": 5000,
-            "advancing_count": 2500, "declining_count": 2300, "unchanged_count": 200,
-            "total_volume": 900000, "total_turnover": 850000000000,
-            "volume_sample_count": 5000, "turnover_sample_count": 5000,
-            "volume_ratio": 1.1, "volume_ratio_sample_count": 4900,
-            "volume_ratio_active_rows": 5000, "volume_ratio_coverage": 0.98,
-            "limit_up_count": 35, "limit_down_count": 20, "limitations": "",
-        })
+        def fake_snapshot(day):
+            snapshot_calls.append(day)
+            return {
+                "status": "success", "trade_date": day, "as_of": day + "T15:05:00+08:00",
+                "universe_rows": 5000, "unique_security_rows": 5000, "classified_rows": 5000,
+                "advancing_count": 2500, "declining_count": 2300, "unchanged_count": 200,
+                "total_volume": 900000, "total_turnover": 850000000000,
+                "volume_sample_count": 5000, "turnover_sample_count": 5000,
+                "volume_ratio": 1.1, "volume_ratio_sample_count": 4900,
+                "volume_ratio_active_rows": 5000, "volume_ratio_coverage": 0.98,
+                "limit_up_count": 35, "limit_down_count": 20, "limitations": "",
+            }
+        monkeypatch.setattr(server, "get_market_snapshot", fake_snapshot)
         monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
         monkeypatch.setattr(server, "load_a_share_index_kline", fake_index_kline, raising=False)
+        monkeypatch.setattr(server, "load_baostock_index_kline", fake_baostock_index_kline, raising=False)
         monkeypatch.setattr(server.market_data_mcp, "call_tool", fake_mcp)
         monkeypatch.setattr(server, "mcp_breaker", type("Breaker", (), {"allow": lambda self: True})())
         monkeypatch.setattr(server, "_mcp_tool_defs_cache", [
@@ -2150,6 +2198,7 @@ class TestChatSessionsApi:
         ])
         monkeypatch.setattr(server, "_build_chat_tool_executor", lambda *_args, **_kwargs: lambda *_a: "")
         runtimes = []
+        planning_capabilities = []
         original_runtime = server._source_runtime_for_run
         def capture_runtime(*args, **kwargs):
             runtime = original_runtime(*args, **kwargs)
@@ -2160,7 +2209,8 @@ class TestChatSessionsApi:
         class FixedPlanner:
             def __init__(self, _planner):
                 pass
-            def plan(self, *_args, **_kwargs):
+            def plan(self, _question, _scope, capabilities, **_kwargs):
+                planning_capabilities.append(capabilities)
                 plan = ExecutionPlan.from_dict({"objective": "今日 A股复盘", "source_mode": "market_recap",
                     "steps": [{"id": "indices", "kind": "market_indices"},
                               {"id": "overview", "kind": "market_overview"},
@@ -2191,23 +2241,73 @@ class TestChatSessionsApi:
         })
         events = _read_sse(response)
         run = _event(events, "done")["run"]
-
-        assert len(akshare_index_calls) == 4
-        assert {call[0] for call in akshare_index_calls} == {"sh000001", "sz399001", "sz399006", "sh000688"}
-        assert all(call[2] == trade_date for call in akshare_index_calls)
-        assert tencent_calls == []
-        assert [call[0] for call in mcp_calls] == ["stock_sector_fund_flow_rank"]
-        assert run["status"] == "completed", run.get("verification_report")
+        assert len(akshare_index_calls) == (0 if recap_limit == 4 else 1)
+        if recap_limit != 4:
+            assert {call[0] for call in akshare_index_calls} == {"sh000001"}
+            assert all(call[2] == trade_date for call in akshare_index_calls)
+        assert [call[0] for call in tencent_calls] == ["sh000001", "sz399001", "sz399006", "sh000688"]
+        tencent_index_artifacts = [item for item in run["tool_artifacts"]
+                                   if item["provider"] == "tencent" and item["tool_name"] == "kline"]
+        assert any(item["status"] == ("partial" if tencent_partial or tencent_bad_previous else "unavailable")
+                   for item in tencent_index_artifacts)
+        if tencent_partial or tencent_bad_previous:
+            assert any(item["provider"] == "akshare" and item["tool_name"] == "a_share_index_kline"
+                       and item["status"] == "success" for item in run["tool_artifacts"])
+        if recap_limit == 4:
+            assert baostock_index_calls == []
+            assert provider_call_order == [("tencent", symbol) for symbol in
+                                           ("sh000001", "sz399001", "sz399006", "sh000688")]
+            assert mcp_calls == []
+            assert snapshot_calls == []
+            assert any(item["status"] == "unavailable" and item["tool_name"] == "a_share_index_kline"
+                       for item in run["tool_artifacts"])
+        elif akshare_available:
+            assert baostock_index_calls == []
+            assert provider_call_order == [
+                *(('tencent', symbol) for symbol in ("sh000001", "sz399001", "sz399006", "sh000688")),
+                ("akshare", "sh000001"),
+            ]
+            assert [call[0] for call in mcp_calls] == ["stock_sector_fund_flow_rank"]
+            assert snapshot_calls == [trade_date]
+        else:
+            assert [call[0] for call in baostock_index_calls] == ["sh000001"]
+            assert provider_call_order[-2:] == [("akshare", "sh000001"), ("baostock", "sh000001")]
+            assert [call[0] for call in mcp_calls] == ["stock_sector_fund_flow_rank"]
+            assert snapshot_calls == [trade_date]
+        assert run["status"] == expected_status, run.get("verification_report")
         assert run["verification_report"]["status"] == "passed"
-        assert any("上证指数 2026-10-16 较上一交易日涨跌幅=5.26%" in str(message)
-                   for message in answer_ai.messages)
-        assert len(run["tool_artifacts"]) == 6
-        akshare_artifact = next(item for item in run["tool_artifacts"]
-                                if item["provider"] == "akshare" and item["tool_name"] == "a_share_market_snapshot")
-        assert akshare_artifact["as_of"] == trade_date + "T15:05:00+08:00"
+        if recap_limit == 4:
+            assert not any(fact["metric"] == "index_close" and fact["company_code"] == "sh000001"
+                           for fact in run["facts"])
+        elif tencent_bad_previous:
+            assert not any(fact["metric"] == "index_close" and fact["company_code"] == "sh000001"
+                           and fact["value"] == 0.0 for fact in run["facts"])
+        elif akshare_available:
+            assert any(f"上证指数 {trade_date} 较上一交易日涨跌幅=5.26%" in str(message)
+                       for message in answer_ai.messages)
+        elif baostock_available:
+            assert any(item["provider"] == "baostock" and item["tool_name"] == "a_share_index_kline"
+                       and item["status"] == "success" for item in run["tool_artifacts"])
+            assert any(fact["metric"] == "index_close" and fact["company_code"] == "sh000001"
+                       and fact["value"] == 10.0 for fact in run["facts"])
+        else:
+            assert any(item["provider"] == "baostock" and item["tool_name"] == "a_share_index_kline"
+                       and item["status"] == "unavailable" for item in run["tool_artifacts"])
+            assert not any(fact["metric"] == "index_close" and fact["company_code"] == "sh000001"
+                           for fact in run["facts"])
+        if recap_limit == 15:
+            assert len(run["tool_artifacts"]) == (7 if akshare_available else 8)
+            akshare_artifact = next(item for item in run["tool_artifacts"]
+                                    if item["provider"] == "akshare" and item["tool_name"] == "a_share_market_snapshot")
+            assert akshare_artifact["as_of"] == trade_date + "T15:05:00+08:00"
         fact_metrics = {fact["metric"] for fact in run["facts"]}
-        assert {"market_advancing_count", "market_limit_up_count", "market_volume_ratio"} <= fact_metrics
-        assert runtimes[0].budget.snapshot() == {"total": 6, "market": 6, "web": 0}
+        if recap_limit == 15:
+            assert {"market_advancing_count", "market_limit_up_count", "market_volume_ratio"} <= fact_metrics
+        expected_calls = 4 if recap_limit == 4 else (7 if akshare_available else 8)
+        assert runtimes[0].budget.snapshot() == {"total": expected_calls, "market": expected_calls, "web": 0}
+        assert planning_capabilities[0].max_external_calls == recap_limit
+        assert planning_capabilities[0].step_costs["market_indices"] == (4 if recap_limit == 4 else 12)
+        assert planning_capabilities[0].step_costs["market_overview"] == 3
 
     def test_chat_stream_sse_and_session_persist(self, client, env, monkeypatch, tmp_path, caplog):
         """流式端点：SSE 事件含 session/delta/done；会话消息持久化"""

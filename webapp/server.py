@@ -52,7 +52,9 @@ from financial_report_fetcher.datasource import CNINFODatasource
 from financial_report_fetcher.downloader import ReportDownloader
 from financial_report_fetcher.models import DownloadStatus, ReportMeta, ReportType
 from financial_report_fetcher.report_identity import build_report_id
-from financial_report_fetcher.market import market_data_mcp, stock_mcp, tencent_quote
+from financial_report_fetcher.market import (
+    load_baostock_index_kline, market_data_mcp, stock_mcp, tencent_quote,
+)
 from financial_report_fetcher.rag.analysis import RagAnalysis
 from financial_report_fetcher.rag.mcp_tools import (
     DISABLED_MCP_TOOL_NAMES,
@@ -515,7 +517,8 @@ def _build_mcp_tool_executor(cfg: Any, *, retry: bool = True) -> Optional[Callab
 
 
 def _source_runtime_for_run(scope: Scope, policy: ToolPolicy, cfg: Any, *, use_mcp: bool,
-                            source_mode: str, control: ChatRunControl | None = None) -> Any:
+                            source_mode: str, control: ChatRunControl | None = None,
+                            daily_recap: bool = False) -> Any:
     web = TavilyWebSearch(timeout=getattr(cfg, "web_search_timeout", 15))
     listed = frozenset(item.get("function", {}).get("name", "")
                        for item in (_mcp_tool_defs_cache or [])
@@ -528,9 +531,38 @@ def _source_runtime_for_run(scope: Scope, policy: ToolPolicy, cfg: Any, *, use_m
         web_enabled=bool(getattr(cfg, "web_search", True) and web.available),
         tencent_enabled=True,
         akshare_enabled=bool(use_mcp and source_mode == "market_recap"),
+        baostock_enabled=bool(use_mcp and source_mode == "market_recap"),
     )
     return build_source_runtime(scope=scope, policy=policy, cfg=cfg, use_mcp=use_mcp,
-                                source_mode=source_mode, access=access, control=control)
+                                source_mode=source_mode, access=access, control=control,
+                                daily_recap=daily_recap)
+
+
+def _has_unresolved_external_failure(sources: Any) -> bool:
+    """A failed index provider is non-fatal when an authorized fallback supplied that index."""
+    index_operations = {"kline", "a_share_index_kline"}
+    successful_index_symbols = set()
+    for source in sources:
+        payload_rows = source.payload if isinstance(source.payload, (list, tuple)) else ()
+        if (source.category == "market" and source.operation in index_operations
+                and source.status == "success"):
+            successful_index_symbols.update(
+                str(row.get("symbol") or row.get("code") or "").lower()
+                for row in payload_rows if isinstance(row, Mapping)
+            )
+    for source in sources:
+        if source.status == "success" or source.category == "local":
+            continue
+        if source.category == "market" and source.operation in index_operations:
+            try:
+                arguments = json.loads(source.arguments_summary)
+            except (TypeError, ValueError):
+                arguments = {}
+            symbol = str(arguments.get("symbol") or "").lower() if isinstance(arguments, Mapping) else ""
+            if symbol and symbol in successful_index_symbols:
+                continue
+        return True
+    return False
 
 
 def _build_chat_tool_executor(cfg: Any, *, retry: bool = True) -> Optional[Callable[[str, Dict[str, Any]], str]]:
@@ -2245,7 +2277,7 @@ def _relay_rag_event(
                 existing_fact_ids = {item.id for item in state.facts}
                 state.facts.extend(item for item in current.facts if item.id not in existing_fact_ids)
                 state.source_summary = dict(projection.source_summary)
-                state.had_external_failure = state.had_external_failure or projection.had_failure
+                state.had_external_failure = _has_unresolved_external_failure(state.source_results)
                 for artifact in current.tool_artifacts:
                     frames.append(_sse("artifact", {"artifact": artifact.to_dict()}))
                 for artifact in current.artifacts:
@@ -2943,13 +2975,24 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                                    system="只输出执行计划 JSON：objective、source_mode、steps、acceptance；不要 Markdown、解释或工具调用。")
             return parse(retry)
     if route.intent == "market_recap":
+        daily_recap_budget = bool(body.use_mcp and market_window and market_window.label == "今日")
         try:
-            configured_recap_budget = int(chat_cfg.mcp_max_tool_calls)
+            configured_recap_budget = int(
+                getattr(chat_cfg, "market_recap_max_tool_calls", 15)
+                if daily_recap_budget else chat_cfg.mcp_max_tool_calls
+            )
         except Exception:
             configured_recap_budget = 1
-        recap_budget = min(9, max(0, configured_recap_budget))
+        recap_budget = min(15 if daily_recap_budget else 9, max(0, configured_recap_budget))
+        index_attempt_cost = 12 if daily_recap_budget else 4
+        recap_index_cost = min(index_attempt_cost, recap_budget) if recap_budget >= 4 else 4
+        recap_step_costs = {
+            "market_indices": recap_index_cost,
+            "market_overview": 3,
+        }
     else:
         recap_budget = 2
+        recap_step_costs = None
     def server_knowledge_plan() -> ExecutionPlan:
         return ExecutionPlan.from_dict({
             "objective": "提供有边界的金融知识回答", "source_mode": "general_knowledge",
@@ -2973,13 +3016,19 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         tools = None
     else:
         planning = ExecutionPlanner(_plan_json).plan(
-            body.question, scope, PlanningCapabilities(available_kinds, recap_budget),
+            body.question, scope, PlanningCapabilities(
+                available_kinds, recap_budget, step_costs=recap_step_costs or {
+                    "market_overview": 3, "market_indices": 4,
+                },
+            ),
             authoritative_intent=authoritative_intent,
             authoritative_window=authoritative_window,
             conversation_context=previous_context.to_prompt_text() if previous_context else "",
         )
         if planning.plan is None and route.intent in {"market_quote", "market_trend", "market_recap"}:
-            fallback_plan = safe_market_plan(route.intent, available_kinds, recap_budget)
+            fallback_plan = safe_market_plan(
+                route.intent, available_kinds, recap_budget, step_costs=recap_step_costs,
+            )
             if fallback_plan is not None:
                 planning = PlanningResult("safe_fallback", fallback_plan, planning.issues)
     if (planning.plan is None and intent_analysis.category in {"market_analysis", "financial_knowledge"}
@@ -3136,10 +3185,14 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                 yield from _answer_without_sources()
                 return
             cfg = RagConfig.load()
+            active_source_mode = planning.plan.source_mode if planning.plan else "external_market"
+            daily_recap_runtime = bool(
+                body.use_mcp and active_source_mode == "market_recap"
+                and market_window and market_window.label == "今日"
+            )
             runtime = _source_runtime_for_run(
                 scope, policy, cfg, use_mcp=body.use_mcp,
-                source_mode=planning.plan.source_mode if planning.plan else "external_market",
-                control=run_control,
+                source_mode=active_source_mode, control=run_control, daily_recap=daily_recap_runtime,
             )
             builder_parameters = inspect.signature(_build_chat_tool_executor).parameters
             execute_tool = (
@@ -3214,56 +3267,164 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
 
                 def indices(_question, _scope):
                     results = []
+                    symbols = ("sh000001", "sz399001", "sz399006", "sh000688")
                     daily_recap = bool(
                         body.use_mcp and planning.plan and planning.plan.source_mode == "market_recap"
                         and market_window and market_window.label == "今日" and market_window.end_date
                     )
-                    for symbol in ("sh000001", "sz399001", "sz399006", "sh000688"):
+
+                    def has_valid_market_bar(rows, symbol, target_date, *, previous=False):
+                        for bar in rows if isinstance(rows, (list, tuple)) else ():
+                            if not isinstance(bar, Mapping):
+                                continue
+                            close = bar.get("close")
+                            try:
+                                valid_close = not isinstance(close, bool) and isfinite(close) and close > 0
+                            except (TypeError, ValueError):
+                                valid_close = False
+                            row_date = bar.get("date")
+                            try:
+                                valid_date = isinstance(row_date, str) and dt.date.fromisoformat(row_date).isoformat() == row_date
+                            except ValueError:
+                                valid_date = False
+                            if not valid_date:
+                                continue
+                            row_symbol = str(bar.get("symbol") or "").lower()
+                            date_matches = (row_date < target_date) if previous else row_date == target_date
+                            if (date_matches and valid_close and (not row_symbol or row_symbol == symbol)):
+                                return True
+                        return False
+
+                    def has_valid_target(selection, symbol, target_date):
+                        return bool(selection is not None and
+                                    has_valid_market_bar(selection.bars, symbol, target_date))
+
+                    def daily_provider_payload(loader, symbol, start_date, end_date, selected):
+                        provider_result = loader(
+                            symbol, start_date=start_date.isoformat(), end_date=end_date.isoformat(),
+                        )
+                        rows = provider_result.get("bars", []) if isinstance(provider_result, Mapping) else []
+                        selection = select_market_bars(rows, market_window, period="day")
+                        selected["selection"] = selection
+                        target_date = end_date.isoformat()
+                        if not has_valid_target(selection, symbol, target_date):
+                            return {"error": "market_window_data_unavailable"}
+                        bars = include_previous_market_bar(rows, selection.bars)
+                        selected["has_previous"] = has_valid_market_bar(
+                            bars, symbol, target_date, previous=True,
+                        )
+                        return {
+                            "as_of": target_date,
+                            "bars": [dict(bar, symbol=symbol, kline_period="day") for bar in bars],
+                            "coverage_status": selection.status,
+                        }
+
+                    if daily_recap:
+                        end_date = market_window.end_date
+                        start_date = (market_window.start_date or end_date) - dt.timedelta(days=10)
+                        target_date = end_date.isoformat()
+                        unresolved = set(symbols)
+                        budget_blocked_symbols = set()
+                        budget_exhausted = False
+                        for provider in ("tencent", "akshare", "baostock"):
+                            for symbol in symbols:
+                                if symbol not in unresolved:
+                                    continue
+                                selected = {}
+                                if provider == "tencent":
+                                    count = market_kline_request_count(market_window, "day")
+                                    call = SourceCall("tencent", "kline", "market", {
+                                        "symbol": symbol, "period": "day", "count": count, "adjust": "none",
+                                        "window": market_window.label,
+                                    })
+
+                                    def invoke_tencent(symbol=symbol, selected=selected, target_date=target_date):
+                                        source, selection = _kline_source(symbol, include_previous=True)
+                                        selected["selection"] = selection
+                                        selected["has_previous"] = bool(
+                                            isinstance(source, Mapping) and has_valid_market_bar(
+                                                source.get("bars", ()), symbol, target_date, previous=True,
+                                            )
+                                        )
+                                        if not has_valid_target(selection, symbol, target_date):
+                                            return {"error": "market_window_data_unavailable"}
+                                        return source
+
+                                    invoke = invoke_tencent
+                                else:
+                                    call = SourceCall(provider, "a_share_index_kline", "market", {
+                                        "symbol": symbol, "start_date": start_date.isoformat(),
+                                        "end_date": target_date,
+                                    })
+                                    loader = load_a_share_index_kline if provider == "akshare" else load_baostock_index_kline
+                                    invoke = lambda loader=loader, symbol=symbol, start_date=start_date, end_date=end_date, selected=selected: daily_provider_payload(
+                                        loader, symbol, start_date, end_date, selected,
+                                    )
+
+                                try:
+                                    result = execute_source(runtime, call, invoke, fetched_at=fetched())
+                                except (ChatRunCancelled, ChatRunDeadlineExceeded):
+                                    return tuple(results)
+                                selection = selected.get("selection")
+                                if result.error_code == "budget_exhausted":
+                                    results.append(result)
+                                    budget_blocked_symbols.add(symbol)
+                                    budget_exhausted = True
+                                    break
+                                if (has_valid_target(selection, symbol, target_date)
+                                        and result.status in {"success", "partial"}):
+                                    complete_source = bool(
+                                        result.status == "success" and selection.status == "complete"
+                                        and selected.get("has_previous")
+                                    )
+                                    if not complete_source:
+                                        result = replace(result, status="partial")
+                                    if selection.covered_dates:
+                                        market_index_dates.add(target_date)
+                                    results.append(result)
+                                    if complete_source:
+                                        unresolved.discard(symbol)
+                                    continue
+                                if selection is not None and result.error_code == "provider_error":
+                                    code = "coverage_missing" if not selection.bars else "date_mismatch"
+                                    result = replace(result, status="unavailable", content="", payload=None,
+                                                     error_code=code)
+                                results.append(result)
+                            if budget_exhausted:
+                                break
+                        if budget_exhausted:
+                            for symbol in symbols:
+                                if symbol in unresolved and symbol not in budget_blocked_symbols:
+                                    call = SourceCall("tencent", "kline", "market", {
+                                        "symbol": symbol, "period": "day", "count": 0,
+                                        "adjust": "none", "window": market_window.label,
+                                    })
+                                    results.append(runtime.unavailable(call, "budget_exhausted"))
+                        return tuple(results)
+
+                    for symbol in symbols:
                         period = market_kline_grain(market_window) if market_window else None
                         selected = {}
-                        if daily_recap:
-                            end_date = market_window.end_date
-                            start_date = (market_window.start_date or end_date) - dt.timedelta(days=10)
-                            call = SourceCall("akshare", "a_share_index_kline", "market", {
-                                "symbol": symbol, "start_date": start_date.isoformat(),
-                                "end_date": end_date.isoformat(),
-                            })
+                        count = market_kline_request_count(market_window, period) if market_window else 0
+                        call = SourceCall("tencent", "kline", "market", {
+                            "symbol": symbol, "period": period or "day", "count": count, "adjust": "none",
+                            "window": market_window.label if market_window else "unknown",
+                        })
 
-                            def invoke_index(symbol=symbol, start_date=start_date, end_date=end_date):
-                                provider_result = load_a_share_index_kline(
-                                    symbol, start_date=start_date.isoformat(), end_date=end_date.isoformat(),
-                                )
-                                rows = provider_result.get("bars", [])
-                                selection = select_market_bars(rows, market_window, period="day")
-                                selected["selection"] = selection
-                                if not selection.bars:
-                                    return {"error": "market_window_data_unavailable"}
-                                bars = include_previous_market_bar(rows, selection.bars)
-                                return {
-                                    "as_of": selection.covered_dates[-1],
-                                    "bars": [dict(bar, symbol=symbol, kline_period="day") for bar in bars],
-                                    "coverage_status": selection.status,
-                                }
+                        def invoke_tencent(symbol=symbol):
+                            source, selection = _kline_source(
+                                symbol, include_previous=bool(
+                                    planning.plan and planning.plan.source_mode == "market_recap"
+                                    and market_window and market_window.label == "今日"
+                                ),
+                            )
+                            selected["selection"] = selection
+                            return source
 
-                            result = execute_source(runtime, call, invoke_index, fetched_at=fetched())
-                        else:
-                            count = market_kline_request_count(market_window, period) if market_window else 0
-                            call = SourceCall("tencent", "kline", "market", {
-                                "symbol": symbol, "period": period or "day", "count": count, "adjust": "none",
-                                "window": market_window.label if market_window else "unknown",
-                            })
-
-                            def invoke_tencent(symbol=symbol):
-                                source, selection = _kline_source(
-                                    symbol, include_previous=bool(
-                                        planning.plan and planning.plan.source_mode == "market_recap"
-                                        and market_window and market_window.label == "今日"
-                                    ),
-                                )
-                                selected["selection"] = selection
-                                return source
-
+                        try:
                             result = execute_source(runtime, call, invoke_tencent, fetched_at=fetched())
+                        except (ChatRunCancelled, ChatRunDeadlineExceeded):
+                            return tuple(results)
                         selection = selected.get("selection")
                         if selection and selection.covered_dates:
                             market_index_dates.add(selection.covered_dates[-1])
@@ -3324,8 +3485,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
                            control=run_control)
                 state.source_summary = result.source_summary
                 state.required_sources_missing = result.context.required_missing
-                state.had_external_failure = any(item.status != "success" for item in result.context.sources
-                                                 if item.category != "local")
+                state.had_external_failure = _has_unresolved_external_failure(result.context.sources)
                 state.execution_steps = [{"id": step.id, "kind": step.kind, "status": step.status,
                                           "error": step.error} for step in result.steps]
                 for source in result.context.sources:
