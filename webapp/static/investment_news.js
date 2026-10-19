@@ -11,6 +11,7 @@
     busy: { collection: false, digest: false },
     kind: 'market',
     digestDay: '',
+    availableDigestDays: [],
     marketDay: 'today',
     sort: 'importance',
     symbol: '',
@@ -67,6 +68,11 @@
   function shiftDay(value, offset) {
     var parts = value.split('-').map(Number);
     return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] + offset)).toISOString().slice(0, 10);
+  }
+
+  function isShanghaiMonday(day) {
+    var parts = day.split('-').map(Number);
+    return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2])).getUTCDay() === 1;
   }
 
   function formatTime(value) {
@@ -127,7 +133,8 @@
     }
     if (digest) {
       digest.disabled = state.busy.digest || Boolean(activeDigest);
-      digest.textContent = state.busy.digest || activeDigest ? '生成中…' : '生成今日综述';
+      digest.textContent = state.busy.digest || activeDigest ? '生成中…' :
+        (isShanghaiMonday(shanghaiToday()) ? '生成周一综述（含周末）' : '生成今日综述');
     }
   }
 
@@ -194,9 +201,7 @@
       var latestDigestRun = successfulDigests[successfulDigests.length - 1];
       var latestDigestDay = latestDigestRun.result.day;
       var dayChanged = latestDigestDay !== state.digestDay;
-      state.digestDay = latestDigestDay;
-      var digestDate = byId('news-digest-day');
-      if (digestDate) digestDate.value = latestDigestDay;
+      await loadDigestDays(latestDigestDay);
       if (!digestRefreshed || dayChanged) await loadDigest();
       digestRefreshed = true;
       setStatus('news-digest-run-status', '定时综述已更新并切换至 ' + latestDigestDay + '。', 'success', true);
@@ -282,18 +287,55 @@
     container.appendChild(section);
   }
 
+  async function loadDigestDays(preferredDay) {
+    var selector = byId('news-digest-day');
+    if (!selector) return;
+    try {
+      var response = await requestJson('/api/investment-news/digest/days');
+      state.availableDigestDays = Array.isArray(response.days) ? response.days.filter(function (day) {
+        return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day);
+      }) : [];
+      selector.replaceChildren();
+      state.availableDigestDays.forEach(function (day) {
+        var label = day === shanghaiToday() ? day + '（今天）' : day;
+        var option = node('option', '', label);
+        option.value = day;
+        selector.appendChild(option);
+      });
+      selector.disabled = state.availableDigestDays.length === 0;
+      var selected = state.availableDigestDays.indexOf(preferredDay) !== -1 ? preferredDay :
+        state.availableDigestDays.indexOf(state.digestDay) !== -1 ? state.digestDay :
+          (state.availableDigestDays[0] || '');
+      selector.value = selected;
+      state.digestDay = selected;
+    } catch (error) {
+      state.availableDigestDays = [];
+      state.digestDay = '';
+      selector.replaceChildren();
+      selector.disabled = true;
+      setStatus('news-status', '读取已有综述日期失败：' + error.message, 'error');
+    }
+  }
+
   async function loadDigest() {
     var content = byId('news-digest');
     if (!content) return;
+    content.replaceChildren();
+    var digestTitle = byId('news-digest-title');
+    var badge = byId('news-digest-badge');
+    var meta = byId('news-digest-meta');
+    if (!state.digestDay) {
+      if (digestTitle) digestTitle.textContent = 'AI 综述';
+      if (badge) { badge.textContent = '暂无可用日期'; badge.className = 'badge badge-info'; }
+      if (meta) meta.textContent = '日期筛选仅显示已生成综述的日期。';
+      content.appendChild(node('p', 'news-empty', '尚无已生成的综述。生成后可在日期列表中查看。'));
+      return;
+    }
     try {
       var response = await requestJson('/api/investment-news/digest?day=' + encodeURIComponent(state.digestDay));
       var digest = response.digest;
-      content.replaceChildren();
-      var digestTitle = byId('news-digest-title');
-      if (digestTitle) digestTitle.textContent = state.digestDay === shanghaiToday() ? '今日 AI 综述' : state.digestDay + ' AI 综述';
-      var badge = byId('news-digest-badge');
-      var meta = byId('news-digest-meta');
       if (!digest) {
+        if (digestTitle) digestTitle.textContent = state.digestDay === shanghaiToday() ? '今日 AI 综述' : state.digestDay + ' AI 综述';
         if (badge) { badge.textContent = '尚未生成'; badge.className = 'badge badge-info'; }
         content.appendChild(node('p', 'news-empty', state.digestDay + ' 的综述尚未生成。手动生成只读取已入库资讯，不会触发采集。'));
         return;
@@ -302,11 +344,37 @@
         badge.textContent = response.stale ? '输入已变化' : '已生成';
         badge.className = 'badge ' + (response.stale ? 'badge-warn' : 'badge-ok');
       }
+      var payload = digest.payload || {};
+      var hasCoverage = Boolean(payload.coverage_start_day && payload.coverage_end_day);
+      var coverageStart = payload.coverage_start_day || state.digestDay;
+      var coverageEnd = payload.coverage_end_day || state.digestDay;
+      var includesWeekend = hasCoverage && coverageStart < coverageEnd;
+      var legacyMonday = isShanghaiMonday(state.digestDay) && !hasCoverage;
+      if (digestTitle) {
+        var todayTitle = state.digestDay === shanghaiToday() ? '今日 AI 综述' : state.digestDay + ' AI 综述';
+        digestTitle.textContent = includesWeekend ? todayTitle + '（含周末）' :
+          (legacyMonday ? todayTitle + '（需重生成以纳入周末）' : todayTitle);
+      }
+      var coverageLabel = coverageStart === coverageEnd ? '' : ' · 覆盖 ' + coverageStart + ' 至 ' + coverageEnd;
+      if (legacyMonday) coverageLabel += ' · 旧版单日综述尚未纳入周末';
       if (meta) {
         meta.textContent = '生成于 ' + formatTime(digest.generated_at) + ' · 覆盖 ' + digest.input_count +
-          ' 条资讯 · ' + digest.source_count + ' 个来源链接 · 数据截至 ' + formatTime(digest.data_through);
+          ' 条资讯 · ' + digest.source_count + ' 个来源链接' + coverageLabel + ' · 数据截至 ' + formatTime(digest.data_through);
       }
-      var payload = digest.payload || {};
+      if (Array.isArray(payload.weekend_review) && payload.weekend_review.length) {
+        appendDigestSection(content, '周末重点回顾', payload.weekend_review);
+      } else if (isShanghaiMonday(state.digestDay)) {
+        var weekendSection = node('section', 'news-digest-section');
+        weekendSection.appendChild(node('h3', '', '周末重点回顾'));
+        var weekendCount = Number(payload.weekend_input_count || 0);
+        var weekendMessage = legacyMonday
+          ? '当前为旧版单日综述，尚未纳入周末；请重新生成以查看周末分析。'
+          : weekendCount
+            ? '周末资讯已入库，但未生成带有效来源引用的周末要点。'
+            : '周六、周日暂无已入库资讯，无法分析周末情况。';
+        weekendSection.appendChild(node('p', 'news-empty', weekendMessage));
+        content.appendChild(weekendSection);
+      }
       appendDigestSection(content, '市场主题', payload.market_themes);
       appendDigestSection(content, '政策与监管', payload.policy_regulatory);
       appendDigestSection(content, '自选股重点', payload.watchlist);
@@ -440,6 +508,11 @@
   }
 
   function updateDateShortcuts() {
+    var mondayToday = isShanghaiMonday(shanghaiToday());
+    var marketToday = document.querySelector('[data-news-window="market-today"]');
+    var watchlistToday = document.querySelector('[data-news-window="watchlist-today"]');
+    if (marketToday) marketToday.textContent = mondayToday ? '周末+今天' : '今天';
+    if (watchlistToday) watchlistToday.textContent = mondayToday ? '周末+今日' : '今日';
     var marketControls = byId('news-market-day-controls');
     var watchlistControls = byId('news-watchlist-day-controls');
     if (marketControls) marketControls.classList.toggle('hidden', state.kind !== 'market');
@@ -461,8 +534,12 @@
       offset: String(state.offset),
     });
     var today = shanghaiToday();
+    var todaySelected = state.kind === 'market' ? state.marketDay === 'today' : state.rangeDays === 1;
     if (state.kind === 'watchlist' && state.rangeDays > 1) {
       query.set('start_day', shiftDay(today, 1 - state.rangeDays));
+      query.set('end_day', today);
+    } else if (todaySelected && isShanghaiMonday(today)) {
+      query.set('start_day', shiftDay(today, -2));
       query.set('end_day', today);
     } else {
       query.set('day', state.kind === 'market' && state.marketDay === 'yesterday' ? shiftDay(today, -1) : today);
@@ -479,7 +556,9 @@
   }
 
   async function loadAll() {
-    await Promise.all([loadStatus(), loadWatchlist(), loadDigest(), loadNews()]);
+    await Promise.all([loadStatus(), loadWatchlist(), loadNews()]);
+    await loadDigestDays();
+    await loadDigest();
   }
 
   async function pollRun(runId, kind) {
@@ -508,8 +587,6 @@
       if (run.error) stateText += '：' + run.error;
       if (!isCollection && run.result && run.result.day) {
         state.digestDay = run.result.day;
-        var selectedDigestDate = byId('news-digest-day');
-        if (selectedDigestDate) selectedDigestDate.value = state.digestDay;
       }
       setStatus(statusId, stateText, run.status === 'failed' ? 'error' : (run.status === 'succeeded' ? 'success' : ''),
         ['succeeded', 'partial', 'failed', 'skipped'].indexOf(run.status) !== -1);
@@ -519,7 +596,10 @@
         state.offset = 0;
       }
       if (isCollection) await Promise.all([loadNews(), loadDigest(), loadWatchlist()]);
-      else await loadDigest();
+      else {
+        await loadDigestDays(run.result && run.result.day);
+        await loadDigest();
+      }
     } catch (error) {
       setStatus(statusId, '任务失败：' + error.message, 'error', true);
     } finally {
@@ -584,7 +664,7 @@
     if (form) form.addEventListener('submit', addWatchlist);
     var digestDate = byId('news-digest-day');
     if (digestDate) digestDate.addEventListener('change', function () {
-      state.digestDay = digestDate.value || shanghaiToday();
+      state.digestDay = digestDate.value || '';
       loadDigest();
     });
     document.querySelectorAll('[data-news-window]').forEach(function (button) {
@@ -646,9 +726,8 @@
   window.initInvestmentNewsPage = function () {
     var page = byId('page-investment-news');
     if (!page || !window.location.hash.startsWith(PAGE)) return;
-    var digestDate = byId('news-digest-day');
-    if (digestDate && !digestDate.value) digestDate.value = shanghaiToday();
-    state.digestDay = digestDate ? digestDate.value : shanghaiToday();
+    state.digestDay = '';
+    state.availableDigestDays = [];
     bindEvents();
     updateDateShortcuts();
     renderWatchlist();

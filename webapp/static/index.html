@@ -294,7 +294,10 @@
             <p id="news-digest-meta" class="hint">综述仅涵盖本地已采集资讯；自动生成时间为 09:00 和 16:00（Asia/Shanghai）。</p>
           </div>
           <div class="news-digest-controls">
-            <label class="news-date-filter">查看综述日期<input id="news-digest-day" type="date" /></label>
+            <label class="news-date-filter" for="news-digest-day">查看综述日期
+              <select id="news-digest-day" aria-describedby="news-digest-day-help" disabled></select>
+              <small id="news-digest-day-help" class="hint">仅显示已有综述的日期。</small>
+            </label>
             <span id="news-digest-badge" class="badge badge-info">尚未生成</span>
           </div>
         </div>

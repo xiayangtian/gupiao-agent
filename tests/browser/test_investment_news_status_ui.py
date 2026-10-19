@@ -49,6 +49,56 @@ def app_url():
             process.communicate(timeout=5)
 
 
+def test_digest_selector_only_lists_available_dates_and_renders_weekend_module(app_url):
+    session = "investment-news-digest-days-" + uuid.uuid4().hex
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        result = _browser(session, "eval", "JSON.stringify({tag:document.querySelector('#news-digest-day')?.tagName,"
+                  "options:[...document.querySelector('#news-digest-day')?.options||[]].map(option=>option.value),"
+                  "summary:document.querySelector('#news-digest')?.textContent})")
+        state = json.loads(result["data"]["result"])
+        available = _browser(session, "eval", "fetch('/api/investment-news/digest/days').then(r=>r.json())")
+        assert state["tag"] == "SELECT"
+        assert state["options"] == available["data"]["result"]["days"]
+        assert "周末模块 fixture" in state["summary"]
+        assert "测试市场来源" in state["summary"]
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
+def test_monday_today_shortcut_includes_saturday_through_monday(app_url):
+    session = "investment-news-monday-window-" + uuid.uuid4().hex
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        _browser(session, "eval", "(()=>{const RealDate=window.Date;window.Date=new Proxy(RealDate,{"
+                  "construct(target,args){return Reflect.construct(target,args.length?args:['2026-10-19T04:00:00Z']);}});"
+                  "const realFetch=window.fetch.bind(window);window.__newsRequest='';window.fetch=(url,options)=>{"
+                  "if(String(url).includes('/api/investment-news?'))window.__newsRequest=String(url);return realFetch(url,options);};"
+                  "document.querySelector('[data-news-window=\\\"market-today\\\"]').click();})()")
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
+        request = _browser(session, "eval", "(()=>{const url=new URL(window.__newsRequest,location.origin);"
+                  "return JSON.stringify({start:url.searchParams.get('start_day'),end:url.searchParams.get('end_day'),"
+                  "day:url.searchParams.get('day'),label:document.querySelector('[data-news-window=\\\"market-today\\\"]').textContent});})()")
+        state = json.loads(request["data"]["result"])
+        assert state["start"] == "2026-10-17"
+        assert state["end"] == "2026-10-19"
+        assert state["day"] is None
+        assert "周末" in state["label"]
+
+        _browser(session, "click", '[data-news-kind="watchlist"]')
+        _browser(session, "click", '[data-news-window="watchlist-today"]')
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
+        watchlist_request = _browser(session, "eval", "(()=>{const url=new URL(window.__newsRequest,location.origin);"
+                  "return JSON.stringify({kind:url.searchParams.get('kind'),start:url.searchParams.get('start_day'),"
+                  "end:url.searchParams.get('end_day')});})()")
+        watchlist_state = json.loads(watchlist_request["data"]["result"])
+        assert watchlist_state == {"kind": "watchlist", "start": "2026-10-17", "end": "2026-10-19"}
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)
+
+
 def test_collection_selects_the_latest_available_market_day(app_url):
     session = "investment-news-latest-day-" + uuid.uuid4().hex
     _browser(session, "open", app_url + "/#/investment-news")
@@ -87,8 +137,7 @@ def test_watchlist_date_shortcuts_and_historical_digest_browsing(app_url):
         assert "长江电力测试资讯" in today_watchlist["data"]["result"]
         assert "长江电力七天内资讯" not in today_watchlist["data"]["result"]
 
-        _browser(session, "eval", "(()=>{const input=document.querySelector('#news-digest-day');const d=new Date(input.value+'T00:00:00Z');"
-                  "d.setUTCDate(d.getUTCDate()-1);input.value=d.toISOString().slice(0,10);"
+        _browser(session, "eval", "(()=>{const input=document.querySelector('#news-digest-day');input.value=input.options[1].value;"
                   "input.dispatchEvent(new Event('change',{bubbles:true}));})()")
         _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
         historical = _browser(session, "eval", "JSON.stringify({day:document.querySelector('#news-digest-day')?.value,"
@@ -114,8 +163,7 @@ def test_summary_date_and_news_day_shortcuts_are_separate(app_url):
         yesterday_news = _browser(session, "eval", "document.querySelector('#news-list')?.textContent")
         assert "昨日市场资讯 fixture" in yesterday_news["data"]["result"]
         _browser(session, "click", '[data-news-window="market-today"]')
-        _browser(session, "eval", "(()=>{const input=document.querySelector('#news-digest-day');const d=new Date(input.value+'T00:00:00Z');"
-                  "d.setUTCDate(d.getUTCDate()-1);input.value=d.toISOString().slice(0,10);"
+        _browser(session, "eval", "(()=>{const input=document.querySelector('#news-digest-day');input.value=input.options[1].value;"
                   "input.dispatchEvent(new Event('change',{bubbles:true}));})()")
         _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 300))")
         state = _browser(session, "eval", "JSON.stringify({summary:document.querySelector('#news-digest')?.textContent,"
@@ -143,8 +191,7 @@ def test_scheduled_digest_switches_the_open_page_to_the_new_summary_date(app_url
         dates = _browser(session, "eval", "(()=>{const input=document.querySelector('#news-digest-day');"
                "const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date()).split('-').map(Number);"
                "const today=parts.map((n,i)=>String(n).padStart(i===0?4:2,'0')).join('-');"
-               "const date=new Date(today+'T00:00:00Z');date.setUTCDate(date.getUTCDate()-1);"
-               "input.value=date.toISOString().slice(0,10);input.dispatchEvent(new Event('change',{bubbles:true}));"
+               "input.value=input.options[1].value;input.dispatchEvent(new Event('change',{bubbles:true}));"
                "return JSON.stringify({today,selected:input.value});})()")
         selected = json.loads(dates["data"]["result"])
         assert selected["today"] != selected["selected"]
@@ -160,7 +207,7 @@ def test_scheduled_digest_switches_the_open_page_to_the_new_summary_date(app_url
                    "summary:document.querySelector('#news-digest')?.textContent})")
         result = json.loads(refreshed["data"]["result"])
         assert result["day"] == selected["today"]
-        assert result["title"] == "今日 AI 综述"
+        assert result["title"].startswith("今日 AI 综述")
         assert "仅由本地 fixture 生成的综述" in result["summary"]
         assert _browser(session, "errors")["data"].get("errors", []) == []
     finally:

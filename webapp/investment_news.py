@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -13,7 +13,7 @@ from webapp.investment_news_store import InvestmentNewsStore, NewsItem
 
 
 _ACTIVE_STATUSES = {"queued", "running"}
-_DIGEST_SECTIONS = ("market_themes", "policy_regulatory", "watchlist", "risks")
+_DIGEST_SECTIONS = ("weekend_review", "market_themes", "policy_regulatory", "watchlist", "risks")
 _MAX_BATCH_CHARS = 24_000
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -280,7 +280,8 @@ class InvestmentNewsService:
 
     @staticmethod
     def _validated_sections(
-        payload: dict[str, Any], allowed_ids: set[str], allowed_watchlist_ids: set[str]
+        payload: dict[str, Any], allowed_ids: set[str], allowed_watchlist_ids: set[str],
+        allowed_weekend_ids: set[str],
     ) -> tuple[dict[str, list[dict[str, Any]]], bool]:
         sections: dict[str, list[dict[str, Any]]] = {name: [] for name in _DIGEST_SECTIONS}
         had_claim = False
@@ -302,6 +303,8 @@ class InvestmentNewsService:
                 valid_ids = sorted(referenced_ids & allowed_ids)
                 if section == "watchlist" and (not valid_ids or not referenced_ids <= allowed_watchlist_ids):
                     continue
+                if section == "weekend_review" and (not valid_ids or not referenced_ids <= allowed_weekend_ids):
+                    continue
                 if valid_ids:
                     sections[section].append({"text": text.strip(), "item_ids": valid_ids})
         return sections, had_claim
@@ -312,8 +315,9 @@ class InvestmentNewsService:
             "你是财经资讯归纳助手。只根据输入条目归纳，不引入外部事实；每个要点都必须附上"
             "输入中存在的 item_ids。watchlist 要点只引用 allowed_watchlist_item_ids 中的条目，"
             "该列表只包含当前自选股对应的资讯；不得把市场资讯用于自选股重点，并标明关联股票；"
-            "不得把转载或同题报道声称为独立佐证。不得推断新闻导致股价涨跌，不给买卖建议；不确定处明确说明。"
-            "只返回 JSON 对象，包含 market_themes、policy_regulatory、watchlist、risks 四个数组，"
+            "不得把转载或同题报道声称为独立佐证。weekend_review 仅用于周一摘要，只能引用 allowed_weekend_item_ids 中周六、周日的资讯，"
+            "重点分析周末事实、可能影响及后续关注。不得推断新闻导致股价涨跌，不给买卖建议；不确定处明确说明。"
+            "只返回 JSON 对象，包含 weekend_review、market_themes、policy_regulatory、watchlist、risks 五个数组，"
             "数组元素格式为 {text, item_ids}。每个数组最多 5 条，每条 text 不超过 100 字。"
         )
         for attempt in range(2):
@@ -339,11 +343,12 @@ class InvestmentNewsService:
                 })
                 messages.append({
                     "role": "user",
-                    "content": "上次输出不完整或不是有效 JSON。请缩短内容，只输出完整 JSON 对象，四个数组各最多 3 条。",
+                    "content": "上次输出不完整或不是有效 JSON。请缩短内容，只输出完整 JSON 对象，五个数组各最多 3 条。",
                 })
         allowed = set(content.get("allowed_item_ids", []))
         allowed_watchlist = set(content.get("allowed_watchlist_item_ids", []))
-        sections, had_claim = self._validated_sections(payload, allowed, allowed_watchlist)
+        allowed_weekend = set(content.get("allowed_weekend_item_ids", []))
+        sections, had_claim = self._validated_sections(payload, allowed, allowed_watchlist, allowed_weekend)
         if had_claim and not any(sections.values()):
             raise ValueError("AI digest produced claims without valid source item citations")
         model = str(response.get("model") or "unknown") if isinstance(response, dict) else "unknown"
@@ -352,8 +357,17 @@ class InvestmentNewsService:
     def _run_digest(self, run_id: str, day: str, force: bool, trigger: str) -> dict[str, Any]:
         self.store.update_run(run_id, status="running")
         try:
-            items = self.store.get_day_items(day)
+            coverage_start_day, coverage_end_day = self.store.digest_source_window(day)
+            items = self.store.get_digest_input_items(day)
             input_hash = self.store.daily_input_hash(day)
+            weekend_days = {
+                coverage_start_day,
+                (date.fromisoformat(day) - timedelta(days=1)).isoformat(),
+            } if coverage_start_day < coverage_end_day else set()
+            weekend_ids = {
+                str(item["id"]) for item in items
+                if (item.get("published_day") or item.get("collected_day")) in weekend_days
+            }
             previous = self.store.get_digest(day)
             if not items:
                 result = {
@@ -399,12 +413,14 @@ class InvestmentNewsService:
             for batch in self._digest_batches(model_items):
                 batch_ids = [item["id"] for item in batch]
                 batch_watchlist_ids = sorted(set(batch_ids) & watchlist_ids)
+                batch_weekend_ids = sorted(set(batch_ids) & weekend_ids)
                 sections, model_name = self._call_digest_model({
                     "stage": "summarize_batch",
                     "day": day,
                     "items": batch,
                     "allowed_item_ids": batch_ids,
                     "allowed_watchlist_item_ids": batch_watchlist_ids,
+                    "allowed_weekend_item_ids": batch_weekend_ids,
                 })
                 batch_summaries.append({
                     "item_ids": batch_ids,
@@ -417,6 +433,7 @@ class InvestmentNewsService:
                 "batch_summaries": batch_summaries,
                 "allowed_item_ids": sorted(all_ids),
                 "allowed_watchlist_item_ids": sorted(watchlist_ids),
+                "allowed_weekend_item_ids": sorted(weekend_ids),
             })
             items_by_id = {str(item["id"]): item for item in items}
             for section in final_sections.values():
@@ -448,6 +465,9 @@ class InvestmentNewsService:
                 "input_count": len(items),
                 "source_count": len(source_pairs),
                 "data_through": data_through,
+                "coverage_start_day": coverage_start_day,
+                "coverage_end_day": coverage_end_day,
+                "weekend_input_count": len(weekend_ids),
             }
             generated_at = _iso(self.clock())
             self.store.save_digest(

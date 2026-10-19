@@ -122,6 +122,17 @@ def test_watchlist_api_enforces_a_share_code_and_twenty_item_cap(news_client):
     assert client.delete("/api/investment-news/watchlist/600000").status_code == 204
 
 
+def test_digest_days_api_only_returns_existing_dates_in_descending_order(news_client):
+    client, service, store = news_client
+    store.save_digest("2026-10-17", {"market_themes": []}, "hash-a", "test")
+    store.save_digest("2026-10-19", {"market_themes": []}, "hash-b", "test")
+
+    response = client.get("/api/investment-news/digest/days")
+
+    assert response.status_code == 200
+    assert response.json() == {"days": ["2026-10-19", "2026-10-17"]}
+
+
 def test_manual_collection_and_digest_are_distinct_api_operations(news_client):
     client, service, store = news_client
 

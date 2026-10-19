@@ -1259,6 +1259,13 @@ def generate_investment_news_digest():
         raise HTTPException(status_code=503, detail="投资资讯服务正在关闭") from exc
 
 
+@app.get("/api/investment-news/digest/days")
+def get_investment_news_digest_days():
+    service = _investment_news_or_503()
+    service.store.cleanup_expired()
+    return {"days": service.store.list_digest_days()}
+
+
 @app.get("/api/investment-news/digest")
 def get_investment_news_digest(day: Optional[str] = None):
     service = _investment_news_or_503()

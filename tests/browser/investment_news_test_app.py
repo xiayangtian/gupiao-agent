@@ -88,9 +88,11 @@ class FakeAIClient:
         _write_calls()
         content = json.loads(messages[-1]["content"])
         ids = content.get("allowed_item_ids") or [item["id"] for item in content.get("items", [])]
+        weekend_ids = content.get("allowed_weekend_item_ids", [])
         response = {
             "market_themes": [{"text": "仅由本地 fixture 生成的综述。", "item_ids": ids[:1]}] if ids else [],
             "policy_regulatory": [], "watchlist": [], "risks": [],
+            "weekend_review": [{"text": "周末重点 fixture。", "item_ids": weekend_ids}] if weekend_ids else [],
         }
         return {"content": json.dumps(response, ensure_ascii=False), "model": "browser-fixture", "usage": {}}
 
@@ -129,6 +131,14 @@ def _service_factory():
         source_id="eastmoney_market", source_name="测试市场来源",
         published_at=yesterday_published, collected_at=timestamp, kind="market", symbols=(),
     )])
+    saturday = date.fromisoformat(today) - timedelta(days=2)
+    saturday_published = datetime.combine(saturday, datetime_time(10, 0), tzinfo=shanghai_tz).isoformat()
+    store.upsert_items([NewsItem(
+        id="fixture-market-saturday", title="周六市场资讯 fixture",
+        url="https://example.test/market/saturday", snippet="周末市场快讯 fixture",
+        source_id="eastmoney_market", source_name="测试市场来源",
+        published_at=saturday_published, collected_at=timestamp, kind="market", symbols=(),
+    )])
     for days_ago, item_id, title in (
         (5, "fixture-stock-7day", "长江电力七天内资讯"),
         (20, "fixture-stock-30day", "长江电力三十天内资讯"),
@@ -142,7 +152,23 @@ def _service_factory():
             collected_at=timestamp, kind="watchlist", symbols=("600900",),
         )])
     digest_payload = {
+        "weekend_review": [{
+            "text": "周末模块 fixture",
+            "item_ids": ["fixture-market-saturday", "fixture-market-yesterday"],
+            "citation_count": 2,
+            "citations": [
+                {"item_id": "fixture-market-saturday", "title": "周六市场资讯 fixture",
+                 "source_name": "测试市场来源", "url": "https://example.test/market/saturday"},
+                {"item_id": "fixture-market-yesterday", "title": "昨日市场资讯 fixture",
+                 "source_name": "测试市场来源", "url": "https://example.test/market/yesterday"},
+            ],
+        }],
+        "coverage_start_day": (date.fromisoformat(today) - timedelta(days=2)).isoformat()
+            if date.fromisoformat(today).weekday() == 0 else today,
+        "coverage_end_day": today,
+        "weekend_input_count": 2 if date.fromisoformat(today).weekday() == 0 else 0,
         "market_themes": [{
+
             "text": "本地测试综述，引用链接应可打开且不执行 HTML。",
             "item_ids": ["fixture-market-0"],
             "citation_count": 1,

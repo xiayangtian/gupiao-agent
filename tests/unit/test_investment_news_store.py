@@ -1,5 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
+import json
 
 import pytest
 
@@ -33,6 +35,57 @@ def test_daily_digest_keeps_only_the_latest_snapshot_per_day(tmp_path):
     assert store.get_digest("2026-10-14")["payload"] == {"summary": "afternoon"}
     assert store.get_digest("2026-10-14")["model"] == "model-b"
     assert store.get_digest("2026-10-13")["payload"] == {"summary": "previous day"}
+
+
+def test_monday_digest_input_includes_weekend_and_monday_but_tuesday_stays_daily(tmp_path):
+    store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
+    store.upsert_items([
+        make_item(901, day="2026-10-17"),
+        make_item(902, day="2026-10-18"),
+        make_item(903, day="2026-10-19"),
+        make_item(904, day="2026-10-20"),
+    ])
+
+    monday_ids = {item["id"] for item in store.get_digest_input_items("2026-10-19")}
+    tuesday_ids = {item["id"] for item in store.get_digest_input_items("2026-10-20")}
+
+    assert monday_ids == {"item-901", "item-902", "item-903"}
+    assert tuesday_ids == {"item-904"}
+
+
+def test_monday_digest_fingerprint_invalidates_legacy_single_day_hash(tmp_path):
+    store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
+    store.upsert_items([make_item(913, day="2026-10-19")])
+    row = store.get_day_items("2026-10-19")[0]
+    legacy_input = [(
+        row["id"], row["title"], row["snippet"], row["published_at"], row["sources"],
+        row["kinds"], row["symbols"], row["importance_tags"],
+    )]
+    legacy_hash = hashlib.sha256(json.dumps(
+        legacy_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+    assert store.daily_input_hash("2026-10-19") != legacy_hash
+
+
+def test_monday_digest_fingerprint_tracks_weekend_input(tmp_path):
+    store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
+    store.upsert_items([make_item(911, day="2026-10-19")])
+    monday_before = store.daily_input_hash("2026-10-19")
+    tuesday_before = store.daily_input_hash("2026-10-20")
+
+    store.upsert_items([make_item(912, day="2026-10-18")])
+
+    assert store.daily_input_hash("2026-10-19") != monday_before
+    assert store.daily_input_hash("2026-10-20") == tuesday_before
+
+
+def test_available_digest_days_are_sorted_and_exclude_missing_days(tmp_path):
+    store = InvestmentNewsStore(str(tmp_path / "news.sqlite3"))
+    store.save_digest("2026-10-17", {"summary": "weekend"}, "hash-a", "model")
+    store.save_digest("2026-10-19", {"summary": "monday"}, "hash-b", "model")
+
+    assert store.list_digest_days() == ["2026-10-19", "2026-10-17"]
 
 
 def test_daily_digest_hash_includes_watchlist_scope_changes(tmp_path):

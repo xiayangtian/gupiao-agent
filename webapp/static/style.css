@@ -2971,9 +2971,9 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .news-watchlist-form { display: grid; gap: var(--space-sm); }
 .news-watchlist-form label, .news-list-controls label, .news-date-filter { color: var(--text-secondary); font-size: 12px; font-weight: 600; }
 .news-watchlist-add-row { display: flex; gap: var(--space-sm); min-width: 0; }
-.news-watchlist-add-row input, .news-list-controls select, .news-date-filter input { min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border-hover); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-primary); font: inherit; }
+.news-watchlist-add-row input, .news-list-controls select, .news-date-filter input, .news-date-filter select { min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border-hover); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-primary); font: inherit; }
 .news-watchlist-add-row input { flex: 1; width: 100%; }
-.news-watchlist-form input:focus-visible, .news-list-controls select:focus-visible, .news-date-filter input:focus-visible, .news-kind-button:focus-visible, .news-date-shortcuts .btn:focus-visible, .news-list button:focus-visible, .news-watchlist-list button:focus-visible, .investment-news-actions button:focus-visible, .news-pagination button:focus-visible { outline: 3px solid rgb(59 130 246 / 45%); outline-offset: 2px; }
+.news-watchlist-form input:focus-visible, .news-list-controls select:focus-visible, .news-date-filter input:focus-visible, .news-date-filter select:focus-visible, .news-kind-button:focus-visible, .news-date-shortcuts .btn:focus-visible, .news-list button:focus-visible, .news-watchlist-list button:focus-visible, .investment-news-actions button:focus-visible, .news-pagination button:focus-visible { outline: 3px solid rgb(59 130 246 / 45%); outline-offset: 2px; }
 .news-watchlist-list, .news-list { list-style: none; display: grid; gap: var(--space-sm); min-width: 0; }
 .news-watchlist-item { display: flex; justify-content: space-between; align-items: center; gap: var(--space-sm); padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); min-width: 0; }
 .news-watchlist-item-label { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
