@@ -11,7 +11,7 @@ import threading
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 from zoneinfo import ZoneInfo
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -478,15 +478,8 @@ class InvestmentNewsStore:
         result["result"] = json.loads(result.pop("result_json") or "{}")
         return result
 
-    @staticmethod
-    def digest_source_window(day: str) -> tuple[str, str]:
-        target = date.fromisoformat(day)
-        start = target - timedelta(days=2) if target.weekday() == 0 else target
-        return start.isoformat(), target.isoformat()
-
     def get_digest_input_items(self, day: str) -> list[dict[str, Any]]:
-        start_day, end_day = self.digest_source_window(day)
-        return self._item_rows(start_day=start_day, end_day=end_day)
+        return self._item_rows(day)
 
     def list_digest_days(self) -> list[str]:
         with self._connect() as db:
@@ -502,14 +495,6 @@ class InvestmentNewsStore:
             )
             for row in rows
         ]
-        start_day, end_day = self.digest_source_window(day)
-        if start_day != end_day:
-            digest_input = {
-                "version": 2,
-                "start_day": start_day,
-                "end_day": end_day,
-                "items": digest_input,
-            }
         encoded = json.dumps(digest_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

@@ -2,7 +2,6 @@ from dataclasses import replace
 import json
 
 from tests.unit.investment_news_fixtures import FakeNewsSource, RecordingAIClient, make_item, make_service
-from webapp.investment_news import InvestmentNewsService
 
 
 def test_manual_digest_reads_all_day_items_in_batches_without_collecting(tmp_path):
@@ -26,96 +25,34 @@ def test_manual_digest_reads_all_day_items_in_batches_without_collecting(tmp_pat
     service.shutdown()
 
 
-def test_monday_digest_uses_weekend_window_and_weekend_only_citations(tmp_path):
-    class WeekendAwareAI:
-        def __init__(self):
-            self.calls = []
-
-        def chat(self, messages, **kwargs):
-            content = json.loads(messages[0]["content"])
-            self.calls.append(content)
-            ids = content.get("allowed_item_ids") or [item["id"] for item in content.get("items", [])]
-            weekend_ids = content.get("allowed_weekend_item_ids", [])
-            return {
-                "content": json.dumps({
-                    "market_themes": [{"text": "本周摘要", "item_ids": ids[:1]}] if ids else [],
-                    "policy_regulatory": [],
-                    "watchlist": [],
-                    "risks": [],
-                    "weekend_review": [{"text": "周末重点", "item_ids": weekend_ids}] if weekend_ids else [],
-                }, ensure_ascii=False),
-                "model": "weekend-test-model",
-            }
-
-    weekend_items = [
-        make_item(921, day="2026-10-17"),
-        make_item(922, day="2026-10-18"),
-    ]
-    monday_item = make_item(923, day="2026-10-19")
-    tuesday_item = make_item(924, day="2026-10-20")
-    ai = WeekendAwareAI()
+def test_monday_and_tuesday_digests_use_only_their_own_day_and_no_weekend_section(tmp_path):
+    saturday = make_item(921, day="2026-10-17")
+    sunday = make_item(922, day="2026-10-18")
+    monday = make_item(923, day="2026-10-19")
+    tuesday = make_item(924, day="2026-10-20")
+    ai = RecordingAIClient()
     service, store = make_service(
         tmp_path,
-        source=FakeNewsSource(market_items=[*weekend_items, monday_item, tuesday_item]),
+        source=FakeNewsSource(market_items=[saturday, sunday, monday, tuesday]),
         ai_client=ai,
     )
     service.collect_now("manual")
 
-    monday = service.generate_digest("2026-10-19", force=True)
-    monday_call = next(call for call in ai.calls if call["stage"] == "combine_daily_summary")
+    monday_result = service.generate_digest("2026-10-19", force=True)
 
-    assert monday["status"] == "succeeded"
-    assert monday["input_count"] == 3
-    assert monday["coverage_start_day"] == "2026-10-17"
-    assert monday["coverage_end_day"] == "2026-10-19"
-    assert monday["weekend_input_count"] == 2
-    assert monday_call["allowed_weekend_item_ids"] == ["item-921", "item-922"]
-    assert monday["weekend_review"][0]["item_ids"] == ["item-921", "item-922"]
-    assert {citation["item_id"] for citation in monday["weekend_review"][0]["citations"]} == {
-        "item-921", "item-922",
-    }
+    assert monday_result["status"] == "succeeded"
+    assert monday_result["input_count"] == 1
+    assert ai.seen_item_ids == {"item-923"}
+    assert all("allowed_weekend_item_ids" not in json.loads(call["messages"][0]["content"]) for call in ai.calls)
+    assert all("weekend_review" not in call["kwargs"]["system"] for call in ai.calls)
+    assert not {"weekend_review", "coverage_start_day", "coverage_end_day", "weekend_input_count"} & monday_result.keys()
+    assert {citation["item_id"] for citation in monday_result["market_themes"][0]["citations"]} == {"item-923"}
 
-    tuesday = service.generate_digest("2026-10-20", force=True)
-    assert tuesday["status"] == "succeeded"
-    assert tuesday["input_count"] == 1
-    assert tuesday["coverage_start_day"] == "2026-10-20"
-    assert tuesday["weekend_input_count"] == 0
-    assert tuesday["weekend_review"] == []
+    tuesday_result = service.generate_digest("2026-10-20", force=True)
+    assert tuesday_result["status"] == "succeeded"
+    assert tuesday_result["input_count"] == 1
+    assert ai.seen_item_ids == {"item-923", "item-924"}
     service.shutdown()
-
-
-def test_monday_digest_generates_when_no_weekend_items_are_stored(tmp_path):
-    monday_item = make_item(925, day="2026-10-19")
-    service, store = make_service(
-        tmp_path,
-        source=FakeNewsSource(market_items=[monday_item]),
-        ai_client=RecordingAIClient(),
-    )
-    service.collect_now("manual")
-
-    result = service.generate_digest("2026-10-19", force=True)
-
-    assert result["status"] == "succeeded"
-    assert result["input_count"] == 1
-    assert result["coverage_start_day"] == "2026-10-17"
-    assert result["weekend_input_count"] == 0
-    assert result["weekend_review"] == []
-    service.shutdown()
-
-
-def test_weekend_review_rejects_points_that_include_non_weekend_citations():
-    sections, _ = InvestmentNewsService._validated_sections(
-        {
-            "market_themes": [{"text": "周一市场要点", "item_ids": ["monday"]}],
-            "weekend_review": [{"text": "周末要点", "item_ids": ["saturday", "monday"]}],
-        },
-        {"saturday", "sunday", "monday"},
-        set(),
-        {"saturday", "sunday"},
-    )
-
-    assert sections["weekend_review"] == []
-    assert sections["market_themes"][0]["item_ids"] == ["monday"]
 
 
 def test_digest_retries_once_when_model_output_is_truncated(tmp_path):
