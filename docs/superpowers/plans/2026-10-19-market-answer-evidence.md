@@ -146,8 +146,8 @@
 - [x] **Step 2: 运行浏览器可信流回归**：`python3 -m pytest tests/browser/test_chat_trust_flow.py -q`：9 passed、3 failed。失败根因复现为 fixture 将占位 key 用于 DeepSeek 意图分类，收到 401 并返回 clarification/run=null；本次未修改无关测试基础设施。
 - [x] **Step 3: 真实浏览器聚焦 QA**：`http://127.0.0.1:8799/#/chat`，桌面/平板/移动；无 console/page errors，browser_qa 汇总 1 个 4xx 但没有捕获对应请求；手动 network 查询也无失败请求明细。snapshot 确认聊天页范围控件与历史消息结构。临时 fixture 服务已停止；截图仅留在 browser-goblin 产物目录。
 - [x] **Step 4: 补回归边界**：行情 JSON pointer/Facts 投影、错主体/错值/缺 claim 门禁、长趋势采样、日复盘派生 lineage、coverage fallback 和非行情 SSE/Fact 兼容由聚焦单测与 horizon fixture matrix 覆盖；未新增 provider 或 source call。
-- [ ] **Step 5: 更新功能目录**：只在实现最终验证且合入本地 `main` 后，将实际合并短 SHA、用户能力变化及验证入口加入对应功能条目；README 仅在使用方式或用户可见行为变化时更新。
-- [ ] **Step 6: 合并门槛**：先完成全部适用测试，再按用户授权本地合入 `main`；不推送远端。合并后检查 `git status`、合并 SHA，按项目规则重启配置好的本地服务并检查 `/api/health`；失败需报告，不声称已生效。
+- [x] **Step 5: 更新功能目录**：本地合并后已更新 `docs/FEATURE-CATALOG.md` 与 `docs/superpowers/DESIGN-REGISTRY.md`，记录合并 SHA `1db656a`、能力边界和验证证据；README 未因使用方式/配置变化而修改。
+- [x] **Step 6: 合并门槛**：本地合并 commit `1db656a` 后聚焦单测 383 passed、compileall 与 `git diff --check` 通过；`test_design_registry.py` 8 passed/1 既有失败（两份其他方案 spec 未登记）。未推送。服务 PID 56628 的 health 200 但运行代码旧于 main，根工作区处于有未提交/未跟踪文件的 docs 分支，不安全重启；当前服务尚未使用本次合入代码。
 
 ## Plan Self-Review
 
