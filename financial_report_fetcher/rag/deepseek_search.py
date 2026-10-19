@@ -30,7 +30,7 @@ class DeepSeekWebSearch:
         timeout: int = 15,
     ) -> None:
         self.api_key = (api_key if api_key is not None else os.getenv("DEEPSEEK_API_KEY", "")).strip()
-        self.session = session or requests.Session()
+        self.session = session
         self.timeout = max(1, int(timeout))
 
     @property
@@ -84,7 +84,8 @@ class DeepSeekWebSearch:
         payload = {"query": normalized, "count": bounded_count, "need_content": bool(need_content)}
         billable_success = False
         try:
-            response = self.session.post(
+            session = self.session or requests.Session()
+            response = session.post(
                 self.endpoint,
                 headers={
                     "Authorization": f"Bearer {self.api_key}",

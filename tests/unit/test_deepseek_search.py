@@ -66,6 +66,16 @@ def test_deepseek_search_caps_query_and_removes_unsafe_results_and_bounds_text()
     assert len(result["results"][0]["snippet"]) <= 400
 
 
+def test_missing_key_does_not_construct_http_session(monkeypatch):
+    import financial_report_fetcher.rag.deepseek_search as module
+
+    monkeypatch.setattr(module.requests, "Session", lambda: (_ for _ in ()).throw(
+        AssertionError("HTTP session should be lazy when search is disabled")))
+
+    search = module.DeepSeekWebSearch(api_key="")
+    assert json.loads(search.search("query"))["error"] == "missing_api_key"
+
+
 def test_deepseek_search_empty_query_never_calls_network():
     session = FakeSession(FakeResponse({"results": []}))
 
