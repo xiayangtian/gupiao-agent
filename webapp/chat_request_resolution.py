@@ -25,6 +25,7 @@ class Clarification:
     company_code: str | None = None
     market_window: MarketWindow | None = None
     financial_period: str | None = None
+    options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,8 @@ def _clarification_for(
             return Clarification("请说明要分析大盘，还是哪只股票的走势。", "subject",
                                  "market_trend", question, market_window=window)
         return Clarification("请明确需要分析财务指标还是证券价格走势，并补充公司或市场范围。",
-                             "kind", "market_trend", question)
+                             "kind", "market_trend", question,
+                             options=("财务指标", "证券价格走势"))
     if route.intent == "financial_trend" and financial_period is None:
         return Clarification("请明确财报期间或趋势范围，例如 2025 年或近三年。",
                              "window", route.intent, question)
@@ -353,7 +355,8 @@ def resolve_chat_request(
     if analysis.category == "unclear" and consumed_version is None and not (
         default_a_share or default_overseas or contextual_window_update or contextual_market_update
     ):
-        return Clarification(analysis.clarification_question, "kind", "clarification", text)
+        return Clarification(analysis.clarification_question, "kind", "clarification", text,
+                             options=("财报经营指标", "证券价格走势"))
     if analysis.needs_clarification and consumed_version is None and not (
         default_a_share or default_overseas or contextual_window_update or contextual_market_update
     ):
@@ -366,6 +369,7 @@ def resolve_chat_request(
         return Clarification(
             analysis.clarification_question, missing_field, route.intent, text,
             market_window=window, financial_period=financial_period,
+            options=("财报经营指标", "证券价格走势") if missing_field == "kind" else (),
         )
 
     code = str(pending.get("company_code") or "") if consumed_version and isinstance(pending, Mapping) else ""
@@ -377,12 +381,14 @@ def resolve_chat_request(
         ):
             return Clarification("当前分析范围与行情请求冲突，请确认继续使用行情范围还是返回财报范围。",
                                  "kind", route.intent, effective_question,
-                                 company_code=code or None, market_window=window)
+                                 company_code=code or None, market_window=window,
+                                 options=("继续使用行情范围", "返回财报范围"))
 
     if route.intent == "clarification" and consumed_version is None:
         clarification = _clarification_for(route, text, window, financial_period, None)
         return clarification or Clarification("请说明你希望分析财报经营指标，还是证券价格走势。",
-                                               "kind", "market_trend", text)
+                                               "kind", "market_trend", text,
+                                               options=("财报经营指标", "证券价格走势"))
     clarification = _clarification_for(route, effective_question, window, financial_period, code or None)
     if clarification is not None:
         return clarification

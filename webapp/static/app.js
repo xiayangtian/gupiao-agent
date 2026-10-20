@@ -2694,6 +2694,29 @@ function appendWebSources(sel, sources) {
   box.scrollTop = box.scrollHeight;
 }
 
+function renderChatClarificationOptions(container, options, onSelect) {
+  if (!container || !Array.isArray(options) || options.length < 2 || options.length > 5) return null;
+  var card = document.createElement('div');
+  card.className = 'chat-clarification-options';
+  card.setAttribute('role', 'group');
+  card.setAttribute('aria-label', '请选择一个选项');
+  options.forEach(function (option) {
+    if (typeof option !== 'string' || !option.trim() || option.length > 80) return;
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chat-clarification-option';
+    button.textContent = option;
+    button.addEventListener('click', function () {
+      Array.prototype.forEach.call(card.querySelectorAll('button'), function (item) { item.disabled = true; });
+      onSelect(option);
+    });
+    card.appendChild(button);
+  });
+  if (card.children.length < 2) return null;
+  container.appendChild(card);
+  return card;
+}
+
 function parseSseFrame(frame) {
   var event = '', dataLines = [];
   frame.split('\n').forEach(function (line) {
@@ -3074,6 +3097,8 @@ async function submitQuestion(q, key) {
           chatStreams[key] = st;
           chatSessionId = newSid;
         }
+      } else if (parsed.event === 'clarification') {
+        st.clarificationOptions = Array.isArray(parsed.data.options) ? parsed.data.options : [];
       } else if (parsed.event === 'scope_resolved') {
         // 范围合同到达：先在回答首部展示不可变范围摘要；最终回答由持久化 run.scope 重渲染。
         st.scope = parsed.data.scope || null;
@@ -3290,6 +3315,13 @@ async function submitQuestion(q, key) {
           // analysis 来源引用未进入 run.artifacts，只保留在旧 citations 字段一个版本；
           // PDF/网页/实时工具已由 renderRunArtifacts 统一渲染。
           appendAnalysisCitations('#chat-history', parsed.data.citations || []);
+          var clarificationOptions = Array.isArray(parsed.data.clarification_options)
+            ? parsed.data.clarification_options : st.clarificationOptions;
+          if (parsed.data.clarification && clarificationOptions && clarificationOptions.length >= 2) {
+            renderChatClarificationOptions($('#chat-history'), clarificationOptions, function (choice) {
+              submitQuestion(q + '\n\n我选择：' + choice, chatStreamKey());
+            });
+          }
           if (parsed.data.retrieval_degraded) {
             var retrievalWarning = document.createElement('div');
             retrievalWarning.className = 'chat-retrieval-warning';

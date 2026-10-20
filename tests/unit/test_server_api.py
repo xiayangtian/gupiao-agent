@@ -593,6 +593,16 @@ def test_chat_stream_rejects_non_financial_before_answer_or_tools(client, env, m
     env["fake_ai"].chat.assert_not_called()
 
 
+def test_chat_stream_returns_structured_options_for_ambiguous_intent(client, env, monkeypatch):
+    analysis = ChatIntentAnalysis("unclear", "none", "", "", "none", "", True, "请说明需要哪类分析。")
+    monkeypatch.setattr(server, "_analyze_chat_intent", lambda question, context="": analysis)
+
+    events = _read_sse(client.post("/api/chat/stream", json={"question": "分析这个"}))
+
+    assert _event(events, "clarification")["options"] == ["财报经营指标", "证券价格走势"]
+    assert _event(events, "done")["clarification_options"] == ["财报经营指标", "证券价格走势"]
+
+
 def test_chat_stream_keeps_explicit_stock_request_slots_across_unclear_subject_reply(client, env, monkeypatch, tmp_path):
     from webapp.chat_store import ChatStore
 
