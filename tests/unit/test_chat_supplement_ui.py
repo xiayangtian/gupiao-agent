@@ -64,6 +64,28 @@ console.log(JSON.stringify(bubble.innerHTML));
     assert "知识库" not in html and "思考中" not in html
 
 
+def test_clarification_options_are_rendered_as_safe_clickable_buttons():
+    source = _source()
+    renderer = _function_source(source, "renderChatClarificationOptions")
+    script = "\n".join([
+        renderer,
+        """
+const buttons = [];
+const card = {children: [], setAttribute: function () {}, appendChild: function (item) { this.children.push(item); },
+  querySelectorAll: function () { return buttons; }};
+const container = {appendChild: function (item) { this.card = item; }};
+const document = {createElement: function (tag) { if (tag === 'div') return card; const item = {setAttribute: function () {}, addEventListener: function (_name, fn) { this.click = fn; }}; buttons.push(item); return item; }};
+let chosen = '';
+renderChatClarificationOptions(container, ['财报经营指标', '<img src=x>'], function (value) { chosen = value; });
+container.card.children[0].click();
+console.log(JSON.stringify({text:container.card.children.map(button => button.textContent), chosen, disabled:buttons[0].disabled}));
+""",
+    ])
+    result = _run_node(script)
+    assert result == {"text": ["财报经营指标", "<img src=x>"], "chosen": "财报经营指标", "disabled": True}
+    assert "innerHTML" not in renderer
+
+
 def test_chat_progress_and_feedback_messages_use_plain_user_facing_language():
     server_source = (APP_JS.parents[1] / "server.py").read_text(encoding="utf-8")
     source = _source()

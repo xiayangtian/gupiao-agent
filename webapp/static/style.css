@@ -2474,6 +2474,28 @@ input, select, button { font-family: inherit; font-size: inherit; }
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
+/* Clarification choices are buttons so ambiguous requests can be resolved without typing. */
+.chat-clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.chat-clarification-option {
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.chat-clarification-option:hover:not(:disabled) { background: var(--surface-hover, #eff6ff); }
+.chat-clarification-option:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.chat-clarification-option:disabled { opacity: .65; cursor: default; }
+
 /* ═════════ 范围选择与可信回答（Scope / 证据 / 运行状态） ═════════ */
 
 .chat-scope-bar {

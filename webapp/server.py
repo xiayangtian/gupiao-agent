@@ -1886,7 +1886,7 @@ def _recap_coverage_for_window(result: SourceResult, window: MarketWindow) -> So
 
 def _chat_preflight_response(
     session_id: str, question: str, message: str, started_at: float,
-    *, pending: Mapping[str, Any] | None = None,
+    *, pending: Mapping[str, Any] | None = None, options: Sequence[str] = (),
 ) -> StreamingResponse:
     """Persist and return a clarification without constructing a planner or source runtime."""
     if pending is not None:
@@ -1899,12 +1899,13 @@ def _chat_preflight_response(
 
     async def events():
         yield _sse("session", {"session_id": session_id})
-        yield _sse("clarification", {"message": message})
+        yield _sse("clarification", {"message": message, "options": list(options or [])})
         yield _sse("delta", {"text": message})
         yield _sse("done", {
             "answer": message, "run": None, "session_id": session_id,
             "elapsed_seconds": round(time.perf_counter() - started_at, 3),
             "clarification": True,
+            "clarification_options": list(options or []),
         })
 
     return StreamingResponse(events(), media_type="text/event-stream")
@@ -2995,6 +2996,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
             }
         return _chat_preflight_response(
             sid, original_question, item.message, started_at, pending=pending_record,
+            options=item.options,
         )
 
     if isinstance(resolved_request, Clarification):

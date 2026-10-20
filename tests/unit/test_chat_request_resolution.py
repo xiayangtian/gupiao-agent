@@ -80,6 +80,16 @@ def test_company_recent_market_request_defaults_to_five_trading_days():
     assert "retrieve" not in result.allowed_source_kinds
 
 
+def test_ambiguous_request_exposes_clickable_kind_options():
+    result = resolve_chat_request(
+        "分析这个", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("unclear", needs_clarification=True, clarification_question="请补充说明。"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert result.options == ("财报经营指标", "证券价格走势")
+
+
 def test_orphan_window_clarifies_subject_without_creating_report_intent():
     result = resolve_chat_request("近五交易日", ScopeRequest.auto(), None, NOW,
                                   analysis=_analysis("market_analysis", "none", "", "trend", "近五交易日",
@@ -90,6 +100,7 @@ def test_orphan_window_clarifies_subject_without_creating_report_intent():
     assert result.missing_field == "subject"
     assert result.intent == "market_trend"
     assert result.market_window.trading_days == 5
+    assert result.options == ()
 
 
 def test_window_reply_consumes_only_a_matching_pending_market_slot():
