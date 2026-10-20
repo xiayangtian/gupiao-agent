@@ -141,6 +141,9 @@ def test_analyzer_uses_bounded_context_and_parses_structured_model_json():
     assert "思维链" in system_prompt
     assert "分析今日a股行情" in user_prompt
     assert "最近一轮: 用户问大盘" in user_prompt
+    assert "缺少市场时默认 A 股" in system_prompt
+    assert "缺少时间范围时默认今日" in system_prompt
+    assert "待澄清槽位" in system_prompt
 
 
 def test_analyzer_rejects_invalid_json_and_invalid_schema_without_fallback():

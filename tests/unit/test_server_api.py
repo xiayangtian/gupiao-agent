@@ -439,6 +439,99 @@ def test_chat_stream_clarifies_unresolved_company_before_planning_or_sources(cli
     assert source_calls == []
 
 
+def test_chat_stream_defaults_generic_market_request_to_a_share_today(client, env, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from financial_report_fetcher.rag.config import RagConfig
+    from webapp.chat_store import ChatStore
+    from webapp.execution_planner import PlanningResult, safe_market_plan
+
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "generic-market-default.json")))
+    monkeypatch.setattr(server, "_analyze_chat_intent", lambda *_args, **_kwargs: ChatIntentAnalysis(
+        "unclear", "none", "", "", "none", "", True, "请说明市场和时间范围。",
+    ))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=False, web_search=False, mcp_max_tool_calls=9,
+    )))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
+    kline_calls = []
+
+    def fake_kline(symbol, *, period, count, adjust):
+        kline_calls.append(symbol)
+        return [
+            {"date": (today - timedelta(days=1)).isoformat(), "close": 1000.0, "symbol": symbol},
+            {"date": today.isoformat(), "close": 1001.0, "symbol": symbol},
+        ]
+
+    monkeypatch.setattr(server.tencent_quote, "kline", fake_kline)
+
+    class FixedPlanner:
+        def __init__(self, *_args):
+            pass
+
+        def plan(self, _question, _scope, capabilities, *, authoritative_intent=None, **_kwargs):
+            plan = safe_market_plan(authoritative_intent, capabilities.available_kinds,
+                                    capabilities.max_external_calls)
+            return PlanningResult("validated" if plan else "unavailable", plan)
+
+    class NoNumberRag:
+        def answer_from_context(self, _question, **_kwargs):
+            yield {"type": "done", "answer": "按 A 股今日行情范围查询，实际覆盖以来源为准。",
+                   "market_claims": [], "market_draft_error": "", "citations": [],
+                   "model": "fixture", "usage": {}, "tools_used": [], "retrieval_report_ids": [],
+                   "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+    monkeypatch.setattr(server, "rag_qa", NoNumberRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "分析行情", "use_mcp": False,
+    }))
+
+    assert "clarification" not in [name for name, _ in events]
+    plan = _event(events, "execution_plan")
+    assert plan["source_mode"] == "market_recap"
+    run = _event(events, "done")["run"]
+    assert run["scope"]["companies"] == []
+    assert run["execution_plan"]["window_origin"] == "default"
+    assert kline_calls == ["sh000001", "sz399001", "sz399006", "sh000688"]
+
+
+def test_orphan_hong_kong_market_request_does_not_call_a_share_sources(client, env, monkeypatch, tmp_path):
+    from financial_report_fetcher.rag.config import RagConfig
+    from webapp.chat_store import ChatStore
+
+    monkeypatch.setattr(server, "chat_store", ChatStore(str(tmp_path / "hong-kong-no-a-share.json")))
+    monkeypatch.setattr(server, "_analyze_chat_intent", lambda *_args, **_kwargs: ChatIntentAnalysis(
+        "unclear", "none", "", "", "none", "", True, "请说明行情对象。",
+    ))
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=False, web_search=False,
+    )))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
+    a_share_calls = []
+    monkeypatch.setattr(server.tencent_quote, "realtime", lambda *_args: a_share_calls.append("quote"))
+    monkeypatch.setattr(server.tencent_quote, "kline", lambda *_args, **_kwargs: a_share_calls.append("kline"))
+    monkeypatch.setattr(server.tencent_quote, "index", lambda *_args: a_share_calls.append("index"))
+
+    class NoSourceRag:
+        def answer_from_context(self, _question, **kwargs):
+            assert kwargs["knowledge_mode"] is True
+            assert "该市场行情来源" in kwargs["knowledge_notice"]
+            yield {"type": "done", "answer": "未接入可核验的港股行情来源。",
+                   "citations": [], "model": "fixture", "usage": {}}
+
+    monkeypatch.setattr(server, "rag_qa", NoSourceRag())
+    events = _read_sse(client.post("/api/chat/stream", json={
+        "question": "港股", "use_mcp": False,
+    }))
+
+    assert "clarification" not in [name for name, _ in events]
+    assert _event(events, "execution_plan")["source_mode"] == "general_knowledge"
+    assert a_share_calls == []
+
+
 def test_chat_stream_uses_model_classification_for_lowercase_a_share(client, env, monkeypatch, tmp_path):
     from financial_report_fetcher.rag.config import RagConfig
     from financial_report_fetcher.rag.qa import RagQA
@@ -500,7 +593,7 @@ def test_chat_stream_rejects_non_financial_before_answer_or_tools(client, env, m
     env["fake_ai"].chat.assert_not_called()
 
 
-def test_chat_stream_persists_and_consumes_orphan_window_clarification(client, env, monkeypatch, tmp_path):
+def test_chat_stream_keeps_explicit_stock_request_slots_across_unclear_subject_reply(client, env, monkeypatch, tmp_path):
     from webapp.chat_store import ChatStore
 
     store = ChatStore(str(tmp_path / "pending-market.json"))
@@ -511,9 +604,14 @@ def test_chat_stream_persists_and_consumes_orphan_window_clarification(client, e
         captured.append((question or body.question, requires_company))
         return server.ScopeResolution(None, "请提供公司名称或股票代码。")
 
+    analyses = iter((
+        ChatIntentAnalysis("market_analysis", "equity", "未知公司", "", "trend", "近五交易日", False, ""),
+        ChatIntentAnalysis("unclear", "none", "", "", "none", "", True, "请说明具体请求。"),
+    ))
+    monkeypatch.setattr(server, "_analyze_chat_intent", lambda *_args, **_kwargs: next(analyses))
     monkeypatch.setattr(server, "_resolve_scope", require_scope)
     first = _read_sse(client.post("/api/chat/stream", json={
-        "question": "近五交易日", "use_mcp": False,
+        "question": "分析未知公司近五交易日股价走势", "use_mcp": False,
     }))
     sid = _event(first, "session")["session_id"]
     session = store.get_session(sid)
@@ -525,15 +623,108 @@ def test_chat_stream_persists_and_consumes_orphan_window_clarification(client, e
         "question": "600660", "session_id": sid, "use_mcp": False,
     }))
 
-    assert captured == [("近五交易日 600660", True)]
+    assert captured == [
+        ("分析未知公司近五交易日股价走势", True),
+        ("分析未知公司近五交易日股价走势 600660", True),
+    ]
     next_pending = store.get_session(sid)["pending_clarification"]
     assert next_pending["version"] != session["pending_clarification"]["version"]
     assert next_pending["missing_field"] == "subject"
     assert next_pending["market_window"]["trading_days"] == 5
+    assert "分析未知公司近五交易日股价走势" in next_pending["question"]
     assert "clarification" in [name for name, _ in second]
 
 
-def test_chat_stream_clarifies_missing_window_before_planning_or_sources(client, env, monkeypatch):
+def test_chat_stream_merges_company_reply_with_pending_today_market_quote(client, env, monkeypatch, tmp_path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from financial_report_fetcher.rag.config import RagConfig
+    from webapp.chat_store import ChatStore
+    from webapp.chat_scope import Scope
+    from webapp.execution_planner import PlanningResult, safe_market_plan
+
+    store = ChatStore(str(tmp_path / "haier-followup.json"))
+    monkeypatch.setattr(server, "chat_store", store)
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    analyses = iter((
+        ChatIntentAnalysis("market_analysis", "equity", "海尔", "", "quote", "今日", False, ""),
+        ChatIntentAnalysis("financial_knowledge", "none", "", "", "explain", "", False, ""),
+        ChatIntentAnalysis("unclear", "none", "", "", "none", "", True, "请说明具体分析对象。"),
+    ))
+    monkeypatch.setattr(server, "_analyze_chat_intent", lambda *_args, **_kwargs: next(analyses))
+    scope_questions = []
+
+    def resolve_scope(body, run_id="", *, requires_company=False, question=None):
+        scope_questions.append(question or body.question)
+        if len(scope_questions) == 1:
+            return server.ScopeResolution(None, "您指的是哪只海尔股票？")
+        return server.ScopeResolution(Scope.company_only("600690", "海尔智家"))
+
+    monkeypatch.setattr(server, "_resolve_scope", resolve_scope)
+    monkeypatch.setattr(server.RagConfig, "load", classmethod(lambda _cls: RagConfig(
+        mcp_tools=False, web_search=False, mcp_max_tool_calls=3,
+    )))
+    monkeypatch.setattr(server, "_build_chat_tool_defs", lambda _cfg: None)
+    quote_calls = []
+    monkeypatch.setattr(server.tencent_quote, "realtime", lambda symbols: (
+        quote_calls.append(list(symbols)) or [{
+            "symbol": "sh600690", "name": "海尔智家", "price": 26.12,
+            "time": f"{today} 15:00:00",
+        }]
+    ))
+
+    class FixedPlanner:
+        def __init__(self, *_args):
+            pass
+
+        def plan(self, _question, _scope, capabilities, *, authoritative_intent=None, **_kwargs):
+            plan = safe_market_plan(authoritative_intent, capabilities.available_kinds,
+                                    capabilities.max_external_calls)
+            return PlanningResult("validated" if plan else "unavailable", plan)
+
+    class NoNumberRag:
+        def answer_from_context(self, _question, **_kwargs):
+            yield {"type": "done", "answer": "已按海尔智家今日行情范围查询。",
+                   "market_claims": [], "market_draft_error": "", "citations": [],
+                   "model": "fixture", "usage": {}, "tools_used": [], "retrieval_report_ids": [],
+                   "retrieval_degraded": False}
+
+    monkeypatch.setattr(server, "ExecutionPlanner", FixedPlanner)
+    monkeypatch.setattr(server, "rag_qa", NoNumberRag())
+    first = _read_sse(client.post("/api/chat/stream", json={
+        "question": "再分析下海尔的今日行情", "use_mcp": False,
+    }))
+    sid = _event(first, "session")["session_id"]
+    pending = store.get_session(sid)["pending_clarification"]
+    assert pending["intent"] == "market_quote"
+    assert pending["market_window"]["label"] == "今日"
+
+    second = _read_sse(client.post("/api/chat/stream", json={
+        "question": "海尔智家", "session_id": sid, "use_mcp": False,
+    }))
+
+    assert "clarification" not in [name for name, _ in second]
+    assert "再分析下海尔的今日行情" in scope_questions[1]
+    assert "海尔智家" in scope_questions[1]
+    assert _event(second, "scope_resolved")["scope"]["companies"][0]["code"] == "600690"
+    assert quote_calls == [["600690"]]
+    run = _event(second, "done")["run"]
+    assert run["execution_plan"]["market_window"]["label"] == "今日"
+    assert "pending_clarification" not in store.get_session(sid)
+
+    third = _read_sse(client.post("/api/chat/stream", json={
+        "question": "今日行情", "session_id": sid, "use_mcp": False,
+    }))
+    assert "clarification" not in [name for name, _ in third]
+    assert "海尔智家" in scope_questions[2]
+    assert "600690" in scope_questions[2]
+    assert _event(third, "scope_resolved")["scope"]["companies"][0]["code"] == "600690"
+    assert _event(third, "done")["run"]["execution_plan"]["steps"][0]["kind"] == "market_quote"
+    assert quote_calls == [["600690"], ["600690"]]
+
+
+def test_chat_stream_rejects_overlong_explicit_market_window_before_planning_or_sources(client, env, monkeypatch):
     planner_calls = []
     source_calls = []
 
@@ -548,15 +739,17 @@ def test_chat_stream_clarifies_missing_window_before_planning_or_sources(client,
     monkeypatch.setattr(server, "ExecutionPlanner", ForbiddenPlanner)
     monkeypatch.setattr(server, "_build_chat_tool_defs", lambda *args, **kwargs: source_calls.append("tools"))
     monkeypatch.setattr(server, "_chat_qa_or_degraded", lambda: source_calls.append("qa") or object())
+    monkeypatch.setattr(server, "_resolve_scope", lambda *_args, **_kwargs:
+        server.ScopeResolution(server.Scope.company_only("600900", "长江电力")))
 
     response = client.post("/api/chat/stream", json={
-        "question": "长江电力股价走势", "use_mcp": True,
+        "question": "600900近801个交易日股价走势", "use_mcp": True,
     })
     events = _read_sse(response)
 
     assert response.status_code == 200
     assert "clarification" in [name for name, _ in events]
-    assert "时间" in _event(events, "clarification")["message"]
+    assert "超出当前安全查询上限" in _event(events, "clarification")["message"]
     assert planner_calls == []
     assert source_calls == []
 
@@ -797,29 +990,28 @@ def test_market_repair_replays_live_sse_routes_and_one_shot_clarification_offlin
             assert "行情数据覆盖有限" not in replay_run["content"]
         replay_runs.append(replay_run)
 
-    orphan = _read_sse(client.post("/api/chat/stream", json={
+    short_followup = _read_sse(client.post("/api/chat/stream", json={
         "question": "近五交易日", "session_id": session_id, "use_mcp": False,
     }))
-    assert "clarification" in [name for name, _ in orphan]
-    assert _event(orphan, "done")["run"] is None
-    assert "execution_plan" not in [name for name, _ in orphan]
+    assert "clarification" not in [name for name, _ in short_followup]
+    short_run = _event(short_followup, "done")["run"]
+    assert short_run["scope"]["companies"][0]["code"] == "600660"
+    assert short_run["execution_plan"]["source_mode"] == "external_market"
+    assert short_run["execution_plan"]["market_window"]["trading_days"] == 5
+    assert short_run["retrieval_report_ids"] == []
 
-    first_half = _read_sse(client.post("/api/chat/stream", json={
+    monkeypatch.setattr(server, "_analyze_chat_intent", lambda *_args, **_kwargs: ChatIntentAnalysis(
+        "market_analysis", "equity", "福耀玻璃", "", "trend", "", False, "",
+    ))
+    default_today = _read_sse(client.post("/api/chat/stream", json={
         "question": "福耀玻璃股价走势", "use_mcp": False,
     }))
-    clarification_sid = _event(first_half, "session")["session_id"]
-    assert _event(first_half, "done")["run"] is None
-    assert "clarification" in [name for name, _ in first_half]
-    completed = _read_sse(client.post("/api/chat/stream", json={
-        "question": "近五交易日", "session_id": clarification_sid, "use_mcp": False,
-    }))
-    completed_run = _event(completed, "done")["run"]
-
-    assert completed_run["status"] == "completed"
-    assert completed_run["scope"]["companies"][0]["code"] == "600660"
-    assert completed_run["execution_plan"]["source_mode"] == "external_market"
-    assert completed_run["retrieval_report_ids"] == []
-    assert len(market_calls) == 7
+    default_run = _event(default_today, "done")["run"]
+    assert "clarification" not in [name for name, _ in default_today]
+    assert default_run["execution_plan"]["source_mode"] == "external_market"
+    assert default_run["execution_plan"]["market_window"]["label"] == "今日"
+    assert default_run["scope"]["companies"][0]["code"] == "600660"
+    assert len(market_calls) == 8
     assert pdf_calls == [] and mcp_calls == []
     assert caplog.text.count("verification=passed") >= 3
     assert all(run["execution_plan"]["source_mode"] in {"market_recap", "external_market"}

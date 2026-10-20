@@ -3024,6 +3024,7 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
     knowledge_mode = (
         intent_analysis.category == "financial_knowledge"
         and intent_analysis.task_kind != "research"
+        and route.intent == "general_knowledge"
         and not resolved_request.context_only_followup
     )
     resolution = await asyncio.to_thread(
@@ -3055,9 +3056,12 @@ async def _chat_stream_impl(body: StreamChatRequest, request: Any, *, run_id_ove
         tools = None
     tool_names = [str(item.get("function", {}).get("name") or "") for item in (tools or [])]
     availability = ToolAvailability.available(*tool_names)
+    overseas_market_followup = route.intent == "general_web" and any(
+        term in question for term in ("港股", "香港股", "美股", "境外市场", "海外市场")
+    )
     market_data_fallback = (
-        intent_analysis.category == "market_analysis"
-        and route.intent == "general_web"
+        route.intent == "general_web"
+        and (intent_analysis.category == "market_analysis" or overseas_market_followup)
         and "web_search" not in tool_names
     )
     research_data_fallback = (

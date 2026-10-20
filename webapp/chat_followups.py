@@ -41,6 +41,7 @@ class PreviousTurnContext:
     companies: tuple[Mapping[str, str], ...]
     facts: tuple[Mapping[str, Any], ...]
     tools: tuple[Mapping[str, str], ...]
+    market_window: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +54,7 @@ class PreviousTurnContext:
             "companies": [dict(company) for company in self.companies],
             "facts": [dict(fact) for fact in self.facts],
             "tools": [dict(tool) for tool in self.tools],
+            "market_window": dict(self.market_window) if self.market_window else None,
         }
 
     def to_prompt_text(self) -> str:
@@ -62,7 +64,7 @@ class PreviousTurnContext:
             if len(text) <= _MAX_CONTEXT_CHARS:
                 return text
             reduced = False
-            for key in ("tools", "facts", "steps", "companies"):
+            for key in ("tools", "facts", "steps", "companies", "market_window"):
                 if data[key]:
                     data[key].pop()
                     reduced = True
@@ -117,6 +119,16 @@ def build_previous_turn_context(messages: Sequence[Mapping[str, Any]]) -> Previo
         return None
 
     plan = run.execution_plan if isinstance(run.execution_plan, Mapping) else {}
+    raw_window = plan.get("market_window")
+    market_window = None
+    if isinstance(raw_window, Mapping):
+        candidate = {
+            key: raw_window.get(key)
+            for key in ("kind", "label", "start_date", "end_date", "trading_days", "timezone")
+            if key in raw_window
+        }
+        if isinstance(candidate.get("kind"), str) and isinstance(candidate.get("label"), str):
+            market_window = candidate
     steps = tuple(
         _bounded_text(item.get("kind"), 60)
         for item in plan.get("steps", [])[:8]
@@ -147,6 +159,7 @@ def build_previous_turn_context(messages: Sequence[Mapping[str, Any]]) -> Previo
         run_id=_bounded_text(run.id, 80), status=run.status,
         source_mode=_bounded_text(plan.get("source_mode"), 50),
         steps=steps, companies=companies, facts=facts, tools=tools,
+        market_window=market_window,
     )
 
 

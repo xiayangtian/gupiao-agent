@@ -73,12 +73,14 @@ def test_explicit_one_year_financial_trend_does_not_become_market_trend():
     assert result.market_window is None
 
 
-def test_orphan_medium_or_long_horizon_clarifies_subject():
-    for query in ("中期行情", "长期走势"):
+def test_orphan_medium_or_long_horizon_defaults_to_a_share_recap():
+    for query, expected_label in (("中期行情", "中期（近六个月）"), ("长期走势", "长期（近三年）")):
         result = resolve_chat_request(
             query, ScopeRequest.auto(), None, _NOW,
             analysis=ChatIntentAnalysis("market_analysis", "none", "", "", "trend", query,
                                         True, "请说明分析对象。"),
         )
-        assert isinstance(result, Clarification), query
-        assert result.missing_field == "subject", query
+        assert isinstance(result, ResolvedRequest), query
+        assert result.route.intent == "market_recap"
+        assert result.market_window.label == expected_label
+        assert "A股" in result.effective_question

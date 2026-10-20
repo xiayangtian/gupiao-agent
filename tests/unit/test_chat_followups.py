@@ -17,7 +17,12 @@ def _run_dict():
             source_type="tool", evidence_ids=("source-1",), verification="reference",
             as_of="2026-10-12", source_category="market",
         ),),
-        execution_plan={"source_mode": "external_market", "steps": [{"kind": "market_kline"}]},
+        execution_plan={
+            "source_mode": "external_market", "steps": [{"kind": "market_kline"}],
+            "market_window": {"kind": "rolling_trading_days", "label": "近5交易日",
+                              "start_date": None, "end_date": "2026-10-12", "trading_days": 5,
+                              "timezone": "Asia/Shanghai"},
+        },
         tool_artifacts=(),
         id="previous-run",
     )
@@ -38,6 +43,7 @@ def test_previous_turn_context_uses_latest_valid_run_and_excludes_internal_field
     assert context.question == "分析长江电力近五个交易日走势"
     assert context.answer == "长江电力近五日收盘价采样显示上涨。"
     assert context.run_id == "previous-run"
+    assert context.market_window["label"] == "近5交易日"
     prompt = context.to_prompt_text()
     assert "600900" in prompt and "29.38" in prompt and "market_kline" in prompt
     assert "旧问题" not in prompt

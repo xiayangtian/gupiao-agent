@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any, Literal, Mapping
 
 from webapp.chat_followups import PreviousTurnContext, is_context_only_followup
@@ -11,7 +12,7 @@ from webapp.chat_policy import QuestionRoute
 from webapp.chat_scope import ScopeRequest
 from webapp.chat_time import (
     MarketWindow, has_market_period_expression, is_fuzzy_market_horizon,
-    market_window_error, resolve_financial_period, resolve_market_window,
+    is_orphan_market_horizon, market_window_error, resolve_financial_period, resolve_market_window,
 )
 
 
@@ -32,7 +33,7 @@ class ResolvedRequest:
     effective_question: str
     market_window: MarketWindow | None
     financial_period: str | None
-    window_origin: Literal["explicit", "fuzzy_default", "clarification", "none"]
+    window_origin: Literal["explicit", "fuzzy_default", "default", "clarification", "none"]
     allowed_source_kinds: frozenset[str]
     consumed_pending_version: str | None = None
     context_only_followup: bool = False
@@ -49,6 +50,12 @@ _SOURCE_KINDS = {
     "research_task": frozenset(),
 }
 _FINANCIAL_TERMS = ("营收", "营业收入", "净利润", "净利", "财报", "年报", "半年报", "季报", "ROE", "毛利率", "现金流")
+_MARKET_WORDS = ("行情", "走势", "趋势", "大盘", "股市", "市场", "指数", "涨跌", "股价")
+_NON_A_SHARE_SUBJECTS = (
+    "港股", "香港股", "美股", "境外", "海外", "黄金", "原油", "商品", "行业", "板块",
+    "半导体", "债券", "基金", "外汇", "期货", "加密货币", "比特币",
+)
+_SINGLE_STOCK_TERMS = ("个股", "股价", "某只", "这只", "单只")
 def _restore_window(value: Any) -> MarketWindow | None:
     if not isinstance(value, Mapping):
         return None
@@ -140,6 +147,40 @@ def _clarification_for(
     return None
 
 
+def _generic_market_question(text: str) -> bool:
+    if any(term in text for term in ("什么是", "解释", "含义", "概念", "定义")):
+        return False
+    if text.strip() in {"行情", "大盘", "市场", "股市", "指数"}:
+        return True
+    if (not any(term in text for term in _MARKET_WORDS)
+            or any(term in text for term in (*_NON_A_SHARE_SUBJECTS, *_SINGLE_STOCK_TERMS))
+            or any(char.isdigit() for char in text)):
+        return False
+    residual = text.casefold()
+    for term in sorted((
+        "a股", "怎么样", "分析", "查看", "看看", "查询", "复盘", "表现", "涨跌", "走势", "趋势",
+        "行情", "大盘", "股市", "市场", "指数", "今日", "今天", "如何", "再", "帮我", "请", "看", "了解", "的", "下",
+    ), key=len, reverse=True):
+        residual = residual.replace(term, "")
+    return not re.sub(r"[\W_]+", "", residual)
+
+
+def _previous_market_route(context: PreviousTurnContext | None) -> QuestionRoute | None:
+    if context is None or context.status not in {"completed", "partial"}:
+        return None
+    if context.source_mode == "market_recap" and not context.companies:
+        return QuestionRoute("market_recap", False, True)
+    if context.source_mode == "external_market" and context.companies:
+        if "market_quote" in context.steps:
+            return QuestionRoute("market_quote", True, False)
+        return QuestionRoute("market_trend", True, True)
+    if context.source_mode == "general_web" and any(
+        term in context.question for term in ("港股", "香港股", "美股", "境外市场", "海外市场")
+    ):
+        return QuestionRoute("general_web", False, False)
+    return None
+
+
 def _route_from_analysis(analysis: ChatIntentAnalysis) -> QuestionRoute:
     if analysis.category == "market_analysis":
         if analysis.subject_kind == "broad_market":
@@ -194,22 +235,100 @@ def resolve_chat_request(
     if not isinstance(analysis, ChatIntentAnalysis):
         raise ValueError("analysis must be a validated ChatIntentAnalysis")
     text = question.strip()
-    route = _route_from_analysis(analysis)
+    pending_fresh = isinstance(pending, Mapping) and _pending_is_fresh(pending, now)
+    previous_market_route = None if pending_fresh else _previous_market_route(previous_context)
+    orphan_horizon = is_orphan_market_horizon(text)
+    generic_market = _generic_market_question(text)
+    default_a_share = (
+        not pending_fresh and previous_market_route is None
+        and (
+            (orphan_horizon and analysis.category not in {"financial_report", "non_financial"})
+            or (analysis.category == "unclear" and generic_market)
+            or (analysis.category == "market_analysis" and (
+                (orphan_horizon and analysis.subject_kind == "none")
+                or (generic_market and not any(term in text for term in _SINGLE_STOCK_TERMS)
+                    and analysis.subject_kind in {"none", "broad_market"})
+                or (analysis.subject_kind == "none" and not analysis.stock_code
+                    and not any(term in text for term in _SINGLE_STOCK_TERMS)
+                    and analysis.task_kind in {"quote", "trend", "recap"})
+            ))
+        )
+    )
+    explicit_overseas = any(term in text for term in ("港股", "香港股", "美股", "境外市场", "海外市场"))
+    contextual_window_update = bool(previous_market_route and (
+        orphan_horizon or (generic_market and not explicit_overseas)
+    ))
+    default_overseas = analysis.category == "unclear" and explicit_overseas
+    contextual_market_update = bool(previous_market_route and explicit_overseas)
+    market_request = analysis.category == "market_analysis" or default_a_share or default_overseas or contextual_window_update or contextual_market_update
+
+    if default_a_share:
+        route = QuestionRoute("market_recap", False, True)
+    elif contextual_window_update and previous_market_route is not None:
+        route = (QuestionRoute("market_trend", True, True)
+                 if previous_market_route.intent == "market_trend" else previous_market_route)
+    elif (contextual_market_update or default_overseas) and analysis.category == "unclear":
+        route = QuestionRoute("general_web", False, False)
+    else:
+        route = _route_from_analysis(analysis)
     context_only_followup = (
-        not (isinstance(pending, Mapping) and _pending_is_fresh(pending, now))
-        and is_context_only_followup(text, previous_context)
+        not pending_fresh and is_context_only_followup(text, previous_context)
     )
     if context_only_followup:
         route = QuestionRoute("general_knowledge", False, False)
+
     time_text = f"{text} {analysis.time_expression}".strip()
-    window = resolve_market_window(time_text, now) if analysis.category == "market_analysis" else None
+    window = resolve_market_window(time_text, now) if market_request else None
     financial_period = resolve_financial_period(time_text) if analysis.category == "financial_report" else None
     effective_question = text
-    window_origin: Literal["explicit", "fuzzy_default", "clarification", "none"] = (
+    window_origin: Literal["explicit", "fuzzy_default", "default", "clarification", "none"] = (
         "fuzzy_default" if window and is_fuzzy_market_horizon(text)
         else "explicit" if window else "none"
     )
     consumed_version = None
+
+    if default_a_share:
+        if window is None and not analysis.time_expression:
+            window = resolve_market_window("今日", now)
+            window_origin = "default"
+        if orphan_horizon:
+            effective_question = f"A股大盘行情 {text}"
+        else:
+            explicitly_a_share = "a股" in text.casefold()
+            effective_question = text if explicitly_a_share else f"{text} A股大盘行情"
+            if window is not None and not any(term in text for term in ("今天", "今日")) and not has_market_period_expression(text):
+                effective_question += " 今日"
+    elif contextual_window_update and previous_context is not None:
+        if previous_market_route and previous_market_route.intent == "market_recap":
+            descriptor = "A股大盘行情"
+        elif previous_market_route and previous_market_route.intent == "general_web":
+            subject = next((term for term in ("港股", "香港股", "美股", "境外市场", "海外市场")
+                            if term in previous_context.question), "海外市场")
+            descriptor = f"{subject}市场行情"
+        else:
+            company = previous_context.companies[0]
+            subject = f"{company.get('name') or company.get('code')} ({company.get('code')})"
+            descriptor = f"{subject} 行情走势"
+        effective_question = f"{descriptor} {text}"
+    elif contextual_market_update and previous_context is not None:
+        inherited_window = (
+            _restore_window(previous_context.market_window)
+            or resolve_market_window(previous_context.question, now)
+        )
+        window = window or inherited_window or resolve_market_window("今日", now)
+        if window is not None and window_origin == "none":
+            window_origin = "default" if inherited_window is None else "explicit"
+        effective_question = f"分析{text}市场行情 {window.label if window else '今日'}"
+    elif default_overseas:
+        window = window or resolve_market_window("今日", now)
+        if window is not None and window_origin == "none":
+            window_origin = "default"
+        effective_question = f"分析{text}市场行情 {window.label if window else '今日'}"
+    elif market_request and window is None and not analysis.time_expression:
+        window = resolve_market_window("今日", now)
+        if window is not None:
+            window_origin = "default"
+            effective_question = f"{text} 今日"
 
     if isinstance(pending, Mapping) and _pending_is_fresh(pending, now):
         pending_route = _route_for_pending(str(pending.get("intent") or ""))
@@ -231,9 +350,13 @@ def resolve_chat_request(
 
     if analysis.category == "non_financial":
         return Clarification("当前仅支持金融类问题。", "kind", "non_financial", text)
-    if analysis.category == "unclear":
+    if analysis.category == "unclear" and consumed_version is None and not (
+        default_a_share or default_overseas or contextual_window_update or contextual_market_update
+    ):
         return Clarification(analysis.clarification_question, "kind", "clarification", text)
-    if analysis.needs_clarification and consumed_version is None:
+    if analysis.needs_clarification and consumed_version is None and not (
+        default_a_share or default_overseas or contextual_window_update or contextual_market_update
+    ):
         if analysis.subject_kind == "none" or (route.requires_company and not analysis.subject_name and not analysis.stock_code):
             missing_field: Literal["subject", "window", "kind"] = "subject"
         elif route.requires_time_window and window is None:

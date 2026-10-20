@@ -28,6 +28,202 @@ def test_model_analysis_overrides_case_sensitive_keyword_route_for_a_share():
     assert result.route.requires_company is False
 
 
+def test_generic_market_request_defaults_to_a_share_and_today():
+    result = resolve_chat_request(
+        "分析行情", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("market_analysis", "none", "", "recap"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_recap"
+    assert result.market_window.label == "今日"
+    assert result.window_origin == "default"
+    assert "A股" in result.effective_question
+
+
+def test_market_intent_without_subject_defaults_to_broad_a_share_unless_single_stock_requested():
+    result = resolve_chat_request(
+        "今天表现如何", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("market_analysis", "none", "", "trend", "今日"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_recap"
+    assert result.market_window.label == "今日"
+    assert "A股" in result.effective_question
+
+    single_stock = resolve_chat_request(
+        "个股今日走势", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("market_analysis", "none", "", "trend", "今日"),
+    )
+    assert isinstance(single_stock, ResolvedRequest)
+    assert single_stock.route.intent == "market_trend"
+    assert single_stock.route.requires_company is True
+
+
+def test_orphan_seven_days_defaults_to_a_share_market_recap():
+    result = resolve_chat_request(
+        "7天", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("unclear", needs_clarification=True,
+                           clarification_question="请补充分析对象。"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_recap"
+    assert result.market_window.label == "近7自然日"
+    assert result.market_window.start_date.isoformat() == "2026-10-03"
+    assert result.market_window.end_date.isoformat() == "2026-10-09"
+    assert result.window_origin == "explicit"
+    assert "A股" in result.effective_question
+
+
+def test_completed_broad_market_context_allows_short_horizon_correction():
+    from webapp.chat_followups import PreviousTurnContext
+
+    previous = PreviousTurnContext(
+        question="分析A股今日行情", answer="A股今日复盘。", run_id="r-market",
+        status="completed", source_mode="market_recap", steps=("market_indices",),
+        companies=(), facts=(), tools=(),
+    )
+    result = resolve_chat_request(
+        "7天", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("unclear", needs_clarification=True,
+                           clarification_question="请补充分析对象。"),
+        previous_context=previous,
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_recap"
+    assert result.market_window.label == "近7自然日"
+    assert "A股" in result.effective_question
+
+
+def test_short_market_followup_retains_resolved_company_and_original_intent():
+    from webapp.chat_followups import PreviousTurnContext
+
+    previous = PreviousTurnContext(
+        question="海尔智家", answer="海尔智家今日行情。", run_id="r-haier",
+        status="completed", source_mode="external_market", steps=("market_quote",),
+        companies=({"code": "600690", "name": "海尔智家"},), facts=(), tools=(),
+        market_window={"kind": "explicit", "label": "今日", "start_date": "2026-10-09",
+                       "end_date": "2026-10-09", "trading_days": None,
+                       "timezone": "Asia/Shanghai"},
+    )
+    result = resolve_chat_request(
+        "今日行情", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("unclear", needs_clarification=True,
+                           clarification_question="请说明具体分析对象。"),
+        previous_context=previous,
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_quote"
+    assert result.market_window.label == "今日"
+    assert "海尔智家 (600690)" in result.effective_question
+    assert result.consumed_pending_version is None
+
+
+def test_followup_window_keeps_a_previous_overseas_market():
+    from webapp.chat_followups import PreviousTurnContext
+
+    previous = PreviousTurnContext(
+        question="港股", answer="港股行情来源有限。", run_id="r-hk",
+        status="partial", source_mode="general_web", steps=("web_search",),
+        companies=(), facts=(), tools=(),
+        market_window={"kind": "explicit", "label": "今日", "start_date": "2026-10-09",
+                       "end_date": "2026-10-09", "trading_days": None,
+                       "timezone": "Asia/Shanghai"},
+    )
+    result = resolve_chat_request(
+        "7天", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("unclear", needs_clarification=True,
+                           clarification_question="请说明分析对象。"),
+        previous_context=previous,
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "general_web"
+    assert result.market_window.label == "近7自然日"
+    assert "港股" in result.effective_question
+    assert "A股" not in result.effective_question
+    assert result.allowed_source_kinds == frozenset({"web_search"})
+
+
+def test_explicit_market_change_inherits_previous_window_not_previous_market():
+    from webapp.chat_followups import PreviousTurnContext
+
+    previous = PreviousTurnContext(
+        question="分析近期行情", answer="A股近7自然日复盘。", run_id="r-market",
+        status="completed", source_mode="market_recap", steps=("market_indices",),
+        companies=(), facts=(), tools=(),
+        market_window={"kind": "explicit", "label": "近7自然日", "start_date": "2026-10-03",
+                       "end_date": "2026-10-09", "trading_days": None,
+                       "timezone": "Asia/Shanghai"},
+    )
+    result = resolve_chat_request(
+        "港股", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("market_analysis", "overseas_market", "港股", "recap"),
+        previous_context=previous,
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "general_web"
+    assert result.market_window.label == "近7自然日"
+    assert "港股" in result.effective_question
+    assert "A股" not in result.effective_question
+
+
+def test_explicit_overseas_market_defaults_only_the_missing_window():
+    result = resolve_chat_request(
+        "港股行情", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("market_analysis", "overseas_market", "港股", "recap"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "general_web"
+    assert result.market_window.label == "今日"
+    assert "港股" in result.effective_question
+    assert "A股" not in result.effective_question
+
+
+def test_orphan_overseas_market_defaults_to_today_without_rewriting_market():
+    result = resolve_chat_request(
+        "港股", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("unclear", needs_clarification=True,
+                           clarification_question="请说明分析哪方面。"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "general_web"
+    assert result.market_window.label == "今日"
+    assert "港股" in result.effective_question
+    assert "A股" not in result.effective_question
+    assert result.allowed_source_kinds == frozenset({"web_search"})
+
+
+def test_pending_subject_reply_overrides_unclear_intent_without_losing_original_slots():
+    pending = {
+        "version": "pending-haier", "created_at": NOW.isoformat(),
+        "missing_field": "subject", "intent": "market_quote", "company_code": None,
+        "market_window": {"kind": "explicit", "label": "今日", "start_date": "2026-10-09",
+                          "end_date": "2026-10-09", "trading_days": None,
+                          "timezone": "Asia/Shanghai"},
+        "financial_period": None, "question": "再分析下海尔的今日行情",
+    }
+    result = resolve_chat_request(
+        "海尔智家", ScopeRequest.auto(), pending, NOW,
+        analysis=_analysis("unclear", needs_clarification=True,
+                           clarification_question="您想了解海尔智家的哪方面内容？"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_quote"
+    assert result.market_window.label == "今日"
+    assert result.consumed_pending_version == "pending-haier"
+    assert "再分析下海尔的今日行情" in result.effective_question
+    assert "海尔智家" in result.effective_question
+
+
 def test_market_assets_without_stock_identity_are_not_blocked_by_company_scope():
     for kind, name in (("commodity", "黄金"), ("overseas_market", "美股"), ("industry", "半导体")):
         result = resolve_chat_request(
@@ -68,6 +264,19 @@ def test_broad_market_request_does_not_require_a_company():
     assert recent.market_window.trading_days == 5
 
 
+def test_company_market_request_without_period_defaults_to_today():
+    result = resolve_chat_request(
+        "分析福耀玻璃股价走势", ScopeRequest.auto(), None, NOW,
+        analysis=_analysis("market_analysis", "equity", "福耀玻璃", "trend"),
+    )
+
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_trend"
+    assert result.market_window.label == "今日"
+    assert result.window_origin == "default"
+    assert result.effective_question.endswith("今日")
+
+
 def test_company_recent_market_request_defaults_to_five_trading_days():
     result = resolve_chat_request("分析福耀玻璃近期行情", ScopeRequest.auto(), None, NOW,
                                   analysis=_analysis("market_analysis", "equity", "福耀玻璃", "trend", "近期"))
@@ -80,16 +289,16 @@ def test_company_recent_market_request_defaults_to_five_trading_days():
     assert "retrieve" not in result.allowed_source_kinds
 
 
-def test_orphan_window_clarifies_subject_without_creating_report_intent():
+def test_orphan_market_horizon_defaults_to_a_share_recap_without_clarification():
     result = resolve_chat_request("近五交易日", ScopeRequest.auto(), None, NOW,
                                   analysis=_analysis("market_analysis", "none", "", "trend", "近五交易日",
                                                      needs_clarification=True,
                                                      clarification_question="请说明分析对象。"))
 
-    assert isinstance(result, Clarification)
-    assert result.missing_field == "subject"
-    assert result.intent == "market_trend"
+    assert isinstance(result, ResolvedRequest)
+    assert result.route.intent == "market_recap"
     assert result.market_window.trading_days == 5
+    assert "A股" in result.effective_question
 
 
 def test_window_reply_consumes_only_a_matching_pending_market_slot():
