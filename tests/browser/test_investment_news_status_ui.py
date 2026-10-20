@@ -332,3 +332,26 @@ def test_success_times_stay_visible_while_operation_notices_auto_hide(app_url):
         assert _browser(session, "errors")["data"].get("errors", []) == []
     finally:
         _browser(session, "close", allow_failure=True)
+
+
+def test_watchlist_related_stock_badge_is_separate_below_card_metadata(app_url):
+    session = "news-stock-badge-" + uuid.uuid4().hex[:12]
+    _browser(session, "open", app_url + "/#/investment-news")
+    try:
+        _browser(session, "click", '[data-news-kind="watchlist"]')
+        _browser(session, "eval", "new Promise(resolve => setTimeout(resolve, 350))")
+        result = _browser(session, "eval", "(()=>{const item=[...document.querySelectorAll('#news-list .news-item')].find(node=>node.textContent.includes('长江电力测试资讯'));"
+                  "const meta=item?.querySelector('.news-item-meta');const relation=item?.querySelector('.news-item-related-stocks');"
+                  "return JSON.stringify({metadata:meta?.textContent||'',related:relation?.textContent||'',"
+                  "below:Boolean(meta&&relation&&(meta.compareDocumentPosition(relation)&Node.DOCUMENT_POSITION_FOLLOWING)),"
+                  "duplicateTag:[...item?.querySelectorAll('.news-item-tags .news-tag')||[]].some(tag=>tag.textContent==='自选股关联'),"
+                  "classes:relation?.className||''});})()")
+        card = json.loads(result["data"]["result"])
+        assert card["related"] == "自选股关联长江电力"
+        assert card["below"] is True
+        assert card["duplicateTag"] is False
+        assert "关联股票" not in card["metadata"]
+        assert "news-item-related-stocks" in card["classes"]
+        assert _browser(session, "errors")["data"].get("errors", []) == []
+    finally:
+        _browser(session, "close", allow_failure=True)

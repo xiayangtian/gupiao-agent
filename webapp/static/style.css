@@ -3019,6 +3019,10 @@ details.citation-card .citation-snippet { margin-top: 6px; }
 .news-item-title { color: var(--text-primary); font-weight: 650; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
 .news-item-title a:hover { color: var(--accent-hover); text-decoration: underline; }
 .news-item-meta, .news-item-tags { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.news-item-related-stocks { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.news-item-related-label, .news-item-related-name { display: inline-flex; align-items: center; max-width: 100%; padding: 4px 9px; border: 1px solid; border-radius: 999px; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.news-item-related-label { border-color: var(--accent-border); background: var(--accent-light); color: #1e3a8a; font-weight: 700; }
+.news-item-related-name { border-color: var(--border-hover); background: var(--surface-alt); color: var(--text-primary); font-weight: 600; }
 .news-item-snippet { color: var(--text-secondary); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .news-item-sources { color: var(--text-secondary); font-size: 12px; }
 .news-item-sources summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; width: fit-content; }

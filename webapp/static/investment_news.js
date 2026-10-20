@@ -444,6 +444,10 @@
     if (!items.length) {
       list.appendChild(node('li', 'news-empty', '该日期范围暂无已采集资讯。可单独点击“采集资讯”获取更新。'));
     }
+    var stockNamesByCode = {};
+    state.watchlist.forEach(function (stock) {
+      stockNamesByCode[stock.code] = stock.name;
+    });
     items.forEach(function (item) {
       var card = node('li', 'news-item');
       var title = externalLink(item.url, safeText(item.title, '（无标题）'), 'news-item-title');
@@ -454,13 +458,22 @@
       metadata.appendChild(node('span', '', '来源：' + safeText(item.source_name, '未知来源')));
       metadata.appendChild(node('span', '', '发布时间：' + formatTime(item.published_at)));
       metadata.appendChild(node('span', '', '采集时间：' + formatTime(item.last_seen_at || item.collected_at)));
-      if (Array.isArray(item.symbols) && item.symbols.length) {
-        metadata.appendChild(node('span', '', '关联股票：' + item.symbols.join('、')));
-      }
       card.appendChild(metadata);
+      var hasRelatedStocks = Array.isArray(item.symbols) && item.symbols.length > 0;
+      if (hasRelatedStocks) {
+        var relatedStocks = node('div', 'news-item-related-stocks');
+        relatedStocks.appendChild(node('span', 'news-item-related-label', '自选股关联'));
+        item.symbols.forEach(function (code) {
+          relatedStocks.appendChild(node('span', 'news-item-related-name', stockNamesByCode[code] || code));
+        });
+        card.appendChild(relatedStocks);
+      }
 
       var tags = node('div', 'news-item-tags');
-      (item.importance_tags || []).forEach(function (tag) { tags.appendChild(node('span', 'news-tag', tag)); });
+      (item.importance_tags || []).forEach(function (tag) {
+        if (hasRelatedStocks && tag === '自选股关联') return;
+        tags.appendChild(node('span', 'news-tag', tag));
+      });
       if (Number(item.related_count || 0) > 1) {
         tags.appendChild(node('span', 'news-tag', '同题报道 ' + item.related_count + ' 条；不代表独立佐证'));
       }
